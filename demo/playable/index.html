@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#8fc9ef" />
+    <meta name="color-scheme" content="dark" />
+    <title>Chunk.js WebGL2 NiceChunk Demo</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <canvas id="worldCanvas" aria-label="Native WebGL2 NiceChunk chunk world"></canvas>
+    <aside class="hud" id="debugHud">
+      <button class="hud-toggle" id="hudToggle" type="button" aria-expanded="false" aria-controls="hudDetails">
+        <span>Native WebGL2 NiceChunk</span>
+        <strong id="fpsValue">0 FPS</strong>
+        <b>Details</b>
+      </button>
+      <div class="hud-details" id="hudDetails">
+        <dl>
+          <div><dt>Rebuild</dt><dd id="buildValue">-</dd></div>
+          <div><dt>Chunks</dt><dd id="chunkValue">-</dd></div>
+          <div><dt>Visible</dt><dd id="visibleValue">-</dd></div>
+          <div><dt>Triangles</dt><dd id="triangleValue">-</dd></div>
+          <div><dt>Draw calls</dt><dd id="drawValue">-</dd></div>
+          <div><dt>GPU buffers</dt><dd id="gpuValue">-</dd></div>
+          <div><dt>Position</dt><dd id="positionValue">0, 0, 0</dd></div>
+          <div><dt>Hit block</dt><dd id="hitValue">-</dd></div>
+          <div><dt>Avatar</dt><dd id="avatarValue">loading</dd></div>
+          <div class="pose-card"><dt>Pose</dt><dd id="poseValue">-</dd></div>
+        </dl>
+        <div class="pose-control">
+          <input id="poseInput" type="text" autocomplete="off" spellcheck="false" aria-label="Camera and player pose" />
+          <button id="copyPoseButton" type="button">Copy</button>
+          <button id="loadPoseButton" type="button">Load</button>
+        </div>
+        <label class="range-control" for="viewRangeInput">
+          <span>Render range</span>
+          <input id="viewRangeInput" type="range" min="2" max="20" step="1" value="5" />
+          <b id="viewRangeValue">5 chunks</b>
+        </label>
+        <div class="flight-control">
+          <button id="flightToggleButton" type="button" aria-pressed="false">Flight Off</button>
+          <button id="flightUpButton" type="button">Up</button>
+          <button id="flightDownButton" type="button">Down</button>
+        </div>
+        <section class="render-log-panel" aria-label="Chunk render log">
+          <div class="render-log-actions">
+            <span>Render log</span>
+            <button id="renderLogToggleButton" type="button">Off</button>
+            <button id="copyRenderLogButton" type="button">Copy</button>
+            <button id="clearRenderLogButton" type="button">Clear</button>
+          </div>
+          <pre id="renderLogPreview">OFF</pre>
+        </section>
+        <div class="actions">
+          <button id="mineButton" type="button">Mine pending</button>
+          <button id="confirmButton" type="button">Confirm</button>
+          <button id="rollbackButton" type="button">Rollback</button>
+        </div>
+        <p id="statusText">Booting deterministic chunk world...</p>
+        <p class="controls">WASD / joystick move character · Space jump / fly up · C/Ctrl fly down · Shift 5x sprint · drag look · F mine</p>
+      </div>
+    </aside>
+    <div class="joystick" id="joystick" aria-hidden="true"><i id="joystickKnob"></i></div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

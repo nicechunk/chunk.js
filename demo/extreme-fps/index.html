@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#02060a" />
+    <meta name="color-scheme" content="dark" />
+    <title>Chunk.js WebGL2 Extreme FPS Demo</title>
+    <link rel="stylesheet" href="../style.css" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body class="fps-body">
+    <canvas id="engineCanvas" aria-label="Chunk.js extreme FPS WebGL2 canvas"></canvas>
+    <aside class="fps-hud">
+      <span>Chunk.js WebGL2 Extreme FPS</span>
+      <strong id="fpsValue">0 FPS</strong>
+      <dl>
+        <div><dt>Peak</dt><dd id="peakValue">0 FPS</dd></div>
+        <div><dt>Mesh build</dt><dd id="buildValue">-</dd></div>
+        <div><dt>Blocks</dt><dd id="blockValue">-</dd></div>
+        <div><dt>Quads</dt><dd id="quadValue">-</dd></div>
+        <div><dt>Triangles</dt><dd id="triangleValue">-</dd></div>
+        <div><dt>Draw calls</dt><dd id="drawValue">1</dd></div>
+      </dl>
+      <p id="statusText">Booting WebGL2...</p>
+    </aside>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

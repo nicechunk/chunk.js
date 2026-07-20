@@ -1,0 +1,17 @@
+{
+  "name": "@nicechunk/chunk-js",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Standalone WebGL2-first voxel renderer foundation for NiceChunk.",
+  "exports": {
+    ".": "./src/index.js",
+    "./src": "./src/index.js",
+    "./engine": "./engine/index.js"
+  },
+  "scripts": {
+    "check": "npm run check:policy && node tools/check.mjs && npm test",
+    "check:policy": "node tools/repository-policy.mjs",
+    "test": "node tests/forge-spatial.test.mjs && node tests/smoke.test.mjs && node tests/voxel-fracture.test.mjs && node tests/forge-runtime-cache.test.mjs && node tests/forge-cloth.test.mjs && node tests/forge-dyes.test.mjs && node tests/ncm-blueprint.test.mjs && node tests/ncm-character.test.mjs && node tests/ncm4-avatar-renderer.test.mjs && node tests/building-parser.test.mjs"
+  }
+}

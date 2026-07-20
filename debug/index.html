@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#071526" />
+    <meta name="color-scheme" content="dark" />
+    <title>Chunk.js Debug</title>
+    <link rel="stylesheet" href="../demo/style.css" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="chunk-shell">
+      <header class="hero-card">
+        <nav class="topbar" aria-label="Chunk.js debug navigation">
+          <a class="brand" href="../">Chunk.js</a>
+          <span class="route-pill">Debug</span>
+        </nav>
+        <section class="hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow">WebGL2 diagnostics</p>
+            <h1>WebGL2 renderer and limits.</h1>
+            <p>This page checks browser WebGL2 capabilities for the NiceChunk voxel renderer. It does not create the main demo scene.</p>
+            <div class="hero-actions">
+              <a class="action-link secondary" href="./materials/">Open material bake lab</a>
+            </div>
+          </div>
+          <aside class="status-grid" aria-label="WebGL2 debug status" id="debugCards">
+            <article><span>Status</span><strong id="supportStatus">Checking</strong></article>
+          </aside>
+        </section>
+      </header>
+      <section class="log-card" aria-labelledby="debugTitle">
+        <h2 id="debugTitle">Adapter details</h2>
+        <pre id="debugOutput" tabindex="0" aria-label="WebGL2 adapter JSON details">Checking...</pre>
+      </section>
+    </main>
+    <script type="module" src="./webgl2-info.js"></script>
+  </body>
+</html>

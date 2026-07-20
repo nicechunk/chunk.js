@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#091522" />
+    <meta name="color-scheme" content="dark" />
+    <title>NiceChunk Smelting Material Bake Preview</title>
+    <meta name="description" content="Deterministic Chunk.js model bake preview for all NiceChunk smelting recipe outputs." />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="bake-shell">
+      <header class="hero">
+        <nav class="topbar" aria-label="Smelting material preview navigation">
+          <a class="brand" href="../../">Chunk.js</a>
+          <span class="route">Debug / Smelting Material Bake</span>
+        </nav>
+        <div class="hero-grid">
+          <section class="hero-copy">
+            <p class="eyebrow">Deterministic Voxel Output Library</p>
+            <h1>Smelting Material Bake Preview</h1>
+            <p>Every card uses the same cached Chunk.js model that appears in the smelting station and backpack. The page cross-checks visual IDs against the public on-chain recipe table.</p>
+          </section>
+          <form class="controls" id="filterForm">
+            <label>
+              <span>Search</span>
+              <input id="searchInput" type="search" placeholder="Material, class, use..." autocomplete="off" />
+            </label>
+            <div class="control-pair">
+              <label>
+                <span>Class</span>
+                <select id="classFilter"><option value="all">All classes</option></select>
+              </label>
+              <label>
+                <span>Heat</span>
+                <select id="heatFilter">
+                  <option value="all">All tiers</option>
+                  <option value="0">Ambient / cold process</option>
+                  <option value="1">Tier 1</option>
+                  <option value="2">Tier 2</option>
+                  <option value="3">Tier 3</option>
+                  <option value="4">Tier 4</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              <span>Model yaw <output id="yawValue">35°</output></span>
+              <input id="yawInput" type="range" min="-180" max="180" step="1" value="35" />
+            </label>
+          </form>
+        </div>
+      </header>
+
+      <section class="stats" aria-label="Bake statistics">
+        <article><span>Recipe parity</span><strong id="parityValue">-</strong></article>
+        <article><span>Models</span><strong id="modelCountValue">-</strong></article>
+        <article><span>Total triangles</span><strong id="triangleCountValue">-</strong></article>
+        <article><span>Peak model</span><strong id="peakValue">-</strong></article>
+        <article><span>Bake time</span><strong id="bakeTimeValue">-</strong></article>
+      </section>
+
+      <section class="library">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Public Recipe Outputs</p>
+            <h2>Forge-ready materials</h2>
+          </div>
+          <p id="resultMeta">Loading recipe and visual data...</p>
+        </div>
+        <div class="material-grid" id="materialGrid" aria-live="polite"></div>
+        <p class="empty-state" id="emptyState" hidden>No material models match the current filters.</p>
+      </section>
+
+      <footer class="status-bar">
+        <span class="status-light" aria-hidden="true"></span>
+        <p id="statusText">Loading deterministic model definitions...</p>
+      </footer>
+    </main>
+
+    <template id="materialCardTemplate">
+      <article class="material-card">
+        <header>
+          <div>
+            <span class="model-index"></span>
+            <h3></h3>
+          </div>
+          <span class="class-badge"></span>
+        </header>
+        <div class="model-stage"></div>
+        <p class="material-description"></p>
+        <div class="recipe-line">
+          <span>Recipe</span>
+          <div class="recipe-inputs"></div>
+        </div>
+        <dl class="material-meta"></dl>
+        <div class="composition"></div>
+      </article>
+    </template>
+
+    <script type="module" src="./main.js?v=0.1.69-building-materials1"></script>
+  </body>
+</html>

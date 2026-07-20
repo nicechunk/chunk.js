@@ -1,0 +1,21 @@
+# Local credentials and machine configuration
+.env
+.env.*
+.auth/
+.gh-config/
+.ssh/
+*.key
+*.pem
+*keypair*.json
+hosts.yml
+id_ed25519
+id_rsa
+rpc_key
+
+# Generated files
+node_modules/
+coverage/
+dist/
+.vite/
+*.log
+.DS_Store

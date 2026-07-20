@@ -1,0 +1,21 @@
+/* Debug-only layout guards. Keep the shared demo surface unchanged. */
+.chunk-shell,
+.log-card {
+  min-width: 0;
+}
+
+.topbar .brand {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+#debugOutput {
+  display: block;
+  max-width: 100%;
+  margin: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  padding: 12px 0 4px;
+  scrollbar-gutter: stable;
+}

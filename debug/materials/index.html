@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#10150c" />
+    <meta name="color-scheme" content="dark" />
+    <title>Chunk.js Material Bake Lab</title>
+    <meta name="description" content="NiceChunk Chunk.js deterministic material bake preview and management page." />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="material-shell">
+      <header class="hero-card">
+        <nav class="topbar" aria-label="Chunk.js material navigation">
+          <a class="brand" href="../../">Chunk.js</a>
+          <span class="route-pill">Material Bake Lab</span>
+        </nav>
+        <section class="hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow">TextureArray Bake Debugger</p>
+            <h1>Material Layer Preview and Parameter Lab</h1>
+            <p>This page reuses the material baker, clouds, ground vegetation, trees, and avatar model data from the Chunk.js game runtime without loading external textures. It provides one place to inspect, tune, and manage every runtime texture and visual model.</p>
+          </div>
+          <form class="control-panel" id="bakeForm">
+            <label>
+              <span>World Seed</span>
+              <input id="seedInput" type="text" value="nicechunk-mainnet-001" autocomplete="off" />
+            </label>
+            <label>
+              <span>Tile Size</span>
+              <select id="tileSizeInput">
+                <option value="16">16</option>
+                <option value="32" selected>32</option>
+                <option value="64">64</option>
+                <option value="128">128</option>
+              </select>
+            </label>
+            <label>
+              <span>Tiled Preview</span>
+              <select id="repeatInput">
+                <option value="2">2 x 2</option>
+                <option value="3">3 x 3</option>
+                <option value="4" selected>4 x 4</option>
+                <option value="6">6 x 6</option>
+              </select>
+            </label>
+            <label>
+              <span>Filter</span>
+              <select id="filterInput">
+                <option value="all" selected>All</option>
+                <option value="opaque">Opaque</option>
+                <option value="fluid">Fluid</option>
+                <option value="transparent">Transparent</option>
+                <option value="cutout">Cutout</option>
+                <option value="edited">Edited</option>
+              </select>
+            </label>
+            <button type="submit">Rebake</button>
+          </form>
+        </section>
+      </header>
+
+      <section class="status-grid" aria-label="Bake status">
+        <article><span>Materials</span><strong id="materialCountValue">-</strong></article>
+        <article><span>Layers</span><strong id="layerCountValue">-</strong></article>
+        <article><span>Models</span><strong id="assetCountValue">-</strong></article>
+        <article><span>Tile Bytes</span><strong id="tileBytesValue">-</strong></article>
+        <article><span>Bake Time</span><strong id="bakeTimeValue">-</strong></article>
+      </section>
+
+      <section class="asset-list-card">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Runtime Visual Assets</p>
+            <h2>Game Visual Models</h2>
+          </div>
+          <p>Preview clouds, tree proxies, ground vegetation, flowers, and avatar models here. These assets are visual only; collision, resource validation, and on-chain state continue to use integer world logic.</p>
+        </div>
+        <div id="assetGrid" class="asset-grid" aria-live="polite"></div>
+      </section>
+
+      <section class="workspace">
+        <section class="material-list-card">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Baked Layers</p>
+              <h2>All Materials</h2>
+            </div>
+            <p>Select any card to edit it on the right. Tile and Repeat both use the same deterministic baked result.</p>
+          </div>
+          <div id="materialGrid" class="material-grid" aria-live="polite"></div>
+        </section>
+
+        <aside class="editor-card" aria-label="Material editor">
+          <div class="editor-sticky">
+            <div class="editor-head">
+              <p class="eyebrow">Selected Material</p>
+              <h2 id="selectedTitle">Nothing Selected</h2>
+              <p id="selectedMeta">Select a material layer from the list.</p>
+            </div>
+
+            <div class="preview-pair">
+              <figure>
+                <canvas id="selectedTileCanvas"></canvas>
+                <figcaption>Tile</figcaption>
+              </figure>
+              <figure>
+                <canvas id="selectedRepeatCanvas"></canvas>
+                <figcaption>Repeat</figcaption>
+              </figure>
+            </div>
+
+            <form id="editorForm" class="editor-form">
+              <label>
+                <span>Base Color</span>
+                <input id="baseColorInput" type="color" value="#ffffff" />
+              </label>
+              <label>
+                <span>Alpha <output id="alphaValue">255</output></span>
+                <input id="alphaInput" type="range" min="0" max="255" step="1" value="255" />
+              </label>
+              <label>
+                <span>Roughness <output id="roughnessValue">1.00</output></span>
+                <input id="roughnessInput" type="range" min="0" max="1" step="0.01" value="1" />
+              </label>
+              <label>
+                <span>Style</span>
+                <select id="styleInput"></select>
+              </label>
+              <label>
+                <span>Shader Type</span>
+                <select id="shaderTypeInput">
+                  <option value="opaque">opaque</option>
+                  <option value="transparent">transparent</option>
+                  <option value="fluid">fluid</option>
+                  <option value="cutout">cutout</option>
+                </select>
+              </label>
+              <label>
+                <span>Emissive</span>
+                <input id="emissiveInput" type="text" placeholder="0,0,0" autocomplete="off" />
+              </label>
+            </form>
+
+            <div class="button-row">
+              <button id="resetMaterialButton" type="button">Reset Current</button>
+              <button id="copySnippetButton" type="button">Copy Registry Snippet</button>
+            </div>
+
+            <details class="export-panel">
+              <summary>Import / Export Debug Overrides</summary>
+              <textarea id="overrideText" spellcheck="false"></textarea>
+              <div class="button-row">
+                <button id="exportButton" type="button">Export JSON</button>
+                <button id="importButton" type="button">Import JSON</button>
+                <button id="resetAllButton" type="button">Clear All</button>
+              </div>
+            </details>
+
+            <p id="statusText" class="status-text">Debug overrides are stored only in this browser. Write confirmed values back to source control.</p>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <template id="materialCardTemplate">
+      <article class="material-card" tabindex="0">
+        <header>
+          <div>
+            <span class="layer-index"></span>
+            <h3></h3>
+          </div>
+          <span class="badge"></span>
+        </header>
+        <div class="tile-row">
+          <canvas class="tile-canvas"></canvas>
+          <canvas class="repeat-canvas"></canvas>
+        </div>
+        <dl class="material-meta"></dl>
+      </article>
+    </template>
+
+    <template id="assetCardTemplate">
+      <article class="asset-card">
+        <header>
+          <div>
+            <span class="asset-category"></span>
+            <h3></h3>
+          </div>
+          <span class="badge"></span>
+        </header>
+        <canvas class="model-canvas"></canvas>
+        <p class="asset-description"></p>
+        <dl class="material-meta"></dl>
+      </article>
+    </template>
+
+    <script type="module" src="./main.js?v=0.1.69-en1"></script>
+  </body>
+</html>
