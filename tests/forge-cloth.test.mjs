@@ -24,7 +24,7 @@ const equipment = Object.freeze({
   attributes6: new Uint8Array(12).fill(20),
 });
 
-assert.equal(NCF1_VERSION, 14, "cloth must extend the deployed NCF1 v14 format without a version fork");
+assert.equal(NCF1_VERSION, 15, "cloth must remain available in the current NCF1 format");
 assert.equal(FORGE_CLOTH_RESOURCE_ID, "cloth");
 assert.deepEqual(
   FORGE_RESOURCE_IDS,
@@ -40,7 +40,7 @@ for (let resource = 0; resource < FORGE_RESOURCE_IDS.length; resource += 1) {
   }));
   const decoded = decodeNcf1(bytes, { requireCanonical: true });
   assert.equal(decoded.components[0].resource, resource, `${resourceId} must retain numeric resource index ${resource}`);
-  assert.equal(decoded.components[0].resourceId, resourceId, `${resourceId} must round-trip through NCF1 v14`);
+  assert.equal(decoded.components[0].resourceId, resourceId, `${resourceId} must round-trip through the current NCF1 format`);
   assert.deepEqual(encodeNcf1Bytes(decoded), bytes, `${resourceId} must re-encode to identical canonical bytes`);
 }
 

@@ -6,6 +6,8 @@ import {
   Ncf1ValidationError,
   createForgeComponent,
   createForgeDesign,
+  decodeForgeVolumeMm3,
+  encodeForgeVolumeMm3,
   forgeVoxelIndex,
 } from "./forge-core.js";
 
@@ -1312,10 +1314,10 @@ export function forgeWorkbenchStats(input, materialInputs = null, options = {}) 
     inputVolumeMm3: analysis.inputVolumeMm3,
     usedVolumeMm3: analysis.usedVolumeMm3,
     unusedVolumeMm3: analysis.inputVolumeMm3 - analysis.usedVolumeMm3,
-    requiredVolumeMm3: analysis.equipment.volumeCm3 * 1_000,
-    volumeHeadroomMm3: analysis.inputVolumeMm3 - analysis.equipment.volumeCm3 * 1_000,
-    requirementsWithinInputs: analysis.equipment.volumeCm3 * 1_000 <= analysis.inputVolumeMm3,
-    chainReady: analysis.equipment.mass5g > 0 && analysis.equipment.volumeCm3 > 0,
+    requiredVolumeMm3: analysis.equipment.volumeMm3,
+    volumeHeadroomMm3: analysis.inputVolumeMm3 - analysis.equipment.volumeMm3,
+    requirementsWithinInputs: analysis.equipment.volumeMm3 <= analysis.inputVolumeMm3,
+    chainReady: analysis.equipment.mass5g > 0 && analysis.equipment.volumeMm3 > 0,
     physicsAdvisory: forgePhysicalAdvisory(analysis),
   };
 }
@@ -1560,14 +1562,15 @@ function analyzeForgeWorkbench(input, materialInputs, options) {
     attributes[FORGE_ATTRIBUTE_KEYS[index]] = score;
     attributes6[index] = Math.floor((score * 63 + 50) / 100);
   }
-  const volumeCm3 = Math.min(0xffff, Math.floor(usedVolumeMm3 / 1_000));
+  const volumeMm3 = decodeForgeVolumeMm3(encodeForgeVolumeMm3(usedVolumeMm3));
+  const volumeCm3 = volumeMm3 / 1_000;
   // Five grams equal 5,000,000 micrograms. Round the physical mass to the
   // existing u16 NCF1 field, retaining its required nonzero sentinel when an
   // encodable nonempty volume would otherwise round to zero.
   let mass5g = Math.min(0xffff, Math.floor((massWeightTotal + 2_500_000) / 5_000_000));
-  if (volumeCm3 > 0 && mass5g === 0) mass5g = 1;
-  const equipment = { mass5g, volumeCm3, attributes6 };
-  if (equipment.volumeCm3 * 1_000 > inputVolumeMm3) {
+  if (volumeMm3 > 0 && mass5g === 0) mass5g = 1;
+  const equipment = { mass5g, volumeMm3, volumeCm3, attributes6 };
+  if (equipment.volumeMm3 > inputVolumeMm3) {
     throw new Ncf1ValidationError("Forge equipment volume exceeds selected material inputs.", "forge-volume-exceeds-inputs");
   }
   return {
@@ -4071,7 +4074,7 @@ function componentBoundsQ2(components) {
 }
 
 function emptyForgeEquipment() {
-  return { mass5g: 0, volumeCm3: 0, attributes6: new Uint8Array(FORGE_ATTRIBUTE_KEYS.length) };
+  return { mass5g: 0, volumeMm3: 0, volumeCm3: 0, attributes6: new Uint8Array(FORGE_ATTRIBUTE_KEYS.length) };
 }
 
 function emptyAttributeScores() {

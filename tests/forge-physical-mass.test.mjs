@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  decodeForgeVolumeMm3,
   decodeNcf1,
+  encodeForgeVolumeMm3,
   encodeNcf1Bytes,
 } from "../forge/forge-core.js";
 import {
@@ -140,7 +142,9 @@ test("the public density ceiling keeps the maximum workbench mass exact", () => 
   const materials = new Array(24).fill(entry.material);
 
   const equipment = forgeWorkbenchEquipment(components, materials);
+  const expectedVolumeMm3 = decodeForgeVolumeMm3(encodeForgeVolumeMm3(24 * 0xffff_ffff));
   assert.equal(equipment.mass5g, 0xffff);
-  assert.equal(equipment.volumeCm3, 0xffff);
+  assert.equal(equipment.volumeMm3, expectedVolumeMm3);
+  assert.equal(equipment.volumeCm3, expectedVolumeMm3 / 1_000);
   assert.equal(equipment.attributes6[5], 63);
 });

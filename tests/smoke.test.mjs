@@ -86,6 +86,7 @@ import {
   isVisualBlock,
   MATERIAL_ID,
   materialDef,
+  NCF1_VERSION,
   NCF1_MAX_RAW_BYTES,
   normalizeForgeComponent,
   normalizeForgeWorkbench,
@@ -696,7 +697,7 @@ const sixFaceComponentDesign = createForgeDesign({
   equipment: { mass5g: 12, volumeCm3: 34, attributes6: new Uint8Array(12).fill(17) },
 });
 const bakedSixFaceDesign = bakeForgeComponentsToAppearance(sixFaceComponentDesign);
-assert.equal(bakedSixFaceDesign.version, 14, "appearance baking must remain inside the deployed NCF1 v14 format");
+assert.equal(bakedSixFaceDesign.version, NCF1_VERSION, "appearance baking must retain the current NCF1 format");
 assert.deepEqual(bakedSixFaceDesign.equipment, sixFaceComponentDesign.equipment, "appearance baking must preserve the complete authoritative equipment header");
 assert.deepEqual(
   bakedSixFaceDesign.appearance.grip,
@@ -865,7 +866,7 @@ const rescuedCompactSelection = selectCompactNcf1Encoding(oversizedEditableDesig
 assert.equal(rescuedCompactSelection.mode, "appearance", "the compact selector should rescue an oversized editable design when its union surface is small");
 assert.ok(rescuedCompactSelection.sourceByteLength > NCF1_MAX_RAW_BYTES, "the rescue fixture should prove the source component payload exceeds the chain ceiling");
 assert.ok(rescuedCompactSelection.byteLength <= NCF1_MAX_RAW_BYTES, "the rescued appearance payload must fit the chain ceiling");
-assert.equal(decodeNcf1(rescuedCompactSelection.bytes, { requireCanonical: true }).version, 14, "rescued compact payloads should remain canonical NCF1 v14");
+assert.equal(decodeNcf1(rescuedCompactSelection.bytes, { requireCanonical: true }).version, NCF1_VERSION, "rescued compact payloads should remain canonical current-version NCF1");
 const irreducibleCheckerDesign = createForgeDesign({
   components: [createForgeComponent({ solid: checkerSolid })],
   equipment: deterministicForgeDesign.equipment,
@@ -873,7 +874,7 @@ const irreducibleCheckerDesign = createForgeDesign({
 assert.throws(
   () => selectCompactNcf1Encoding(irreducibleCheckerDesign),
   (error) => error?.code === "code-too-large",
-  "the compact selector must still reject geometry when neither v14 representation fits 640 bytes",
+  "the compact selector must still reject geometry when neither current-version representation fits 640 bytes",
 );
 let boundarySeed = (11 * 2654435761) >>> 0;
 const boundarySolid = new Uint8Array(FORGE_COMPONENT_GRID.x * FORGE_COMPONENT_GRID.y * FORGE_COMPONENT_GRID.z);
@@ -892,7 +893,7 @@ assert.deepEqual(
   exactBoundaryBytes,
   "the compact selector should retain an exact-640-byte component payload when appearance is larger",
 );
-assert.equal(decodeNcf1(exactBoundaryBytes, { requireCanonical: true }).version, 14, "the exact 640-byte boundary should decode canonically as NCF1 v14");
+assert.equal(decodeNcf1(exactBoundaryBytes, { requireCanonical: true }).version, NCF1_VERSION, "the exact 640-byte boundary should decode canonically as current-version NCF1");
 assert.equal(
   validateNcf1(Uint8Array.from([...exactBoundaryBytes, 0])).code,
   "code-too-large",
@@ -931,7 +932,7 @@ maximumScoreAttributes[4] = 0;
 const maximumRequirementDesign = createForgeDesign({
   equipment: { mass5g: 0xffff, volumeCm3: 0xffff, attributes6: maximumScoreAttributes },
 });
-assert.deepEqual(forgeMaterialRequirements(maximumRequirementDesign).vector, [65_535_000, 54_246], "maximum header requirements should remain exact safe integers");
+assert.deepEqual(forgeMaterialRequirements(maximumRequirementDesign).vector, [65_470_464, 54_246], "maximum v15 header requirements should use the largest non-exceeding packed volume");
 const compactHeader = decodeNcf1EquipmentHeader(compactForgeFixture);
 assert.deepEqual(
   forgeDesignStatsVector(compactForgeFixture),
@@ -1123,8 +1124,8 @@ const fullSteelStats = forgeWorkbenchStats([steelWorkbenchEntry.component], [ste
 assert.equal(fullSteelStats.inheritanceMode, FORGE_WORKBENCH_INHERITANCE_MODE, "workbench stats should identify the deterministic material inheritance rule");
 assert.equal(fullSteelStats.inputVolumeMm3, 123_456, "workbench inputs should preserve the exact backpack slot volume");
 assert.equal(fullSteelStats.usedVolumeMm3, 123_456, "a full solid mask should use the selected slot's complete volume");
-assert.equal(fullSteelStats.requiredVolumeMm3, 123_000, "equipment headers should floor millimetres cubed to an encodable cubic-centimetre requirement");
-assert.equal(fullSteelStats.volumeHeadroomMm3, 456, "header quantization must leave input headroom instead of exceeding the slot");
+assert.equal(fullSteelStats.requiredVolumeMm3, 123_456, "v15 equipment headers should preserve exactly representable fine-grained volume");
+assert.equal(fullSteelStats.volumeHeadroomMm3, 0, "exact v15 volume encoding should consume no synthetic material headroom");
 assert.equal(fullSteelStats.requirementsWithinInputs, true, "derived equipment volume must never exceed selected input volume");
 assert.equal(fullSteelStats.equipment.mass5g, 194, "equipment mass should encode physical mass in 5-gram units");
 assert.equal(fullSteelStats.equipment.attributes6[0], 57, "smelting attributes should be compacted into the NCF1 equipment header");
