@@ -191,6 +191,21 @@ assert.deepEqual(
   zoomedOrthographicProjection,
   "the concise zoom alias should match the explicit orthographic zoom API",
 );
+const headFocusedProjection = createAvatarPreviewViewProjection(mesh, 1, {
+  projection: "orthographic",
+  orthographicZoom: 1.8,
+  targetHeightRatio: 0.82,
+  eyeHeightRatio: 0.86,
+});
+assert.ok(Array.from(headFocusedProjection).every(Number.isFinite), "head-focused preview matrices must remain finite");
+assert.notDeepEqual(
+  headFocusedProjection,
+  createAvatarPreviewViewProjection(mesh, 1, {
+    projection: "orthographic",
+    orthographicZoom: 1.8,
+  }),
+  "relative target and eye heights must move the preview framing",
+);
 
 const propVertexOffset = 2 * 24 * 10;
 for (let offset = propVertexOffset; offset < mesh.vertices.length; offset += 10) {

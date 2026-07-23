@@ -355,7 +355,9 @@ function createAvatarHandle(gl, mesh) {
 export function createAvatarPreviewViewProjection(mesh, aspect, params = {}) {
   const bounds = mesh.renderBounds || { minY: 0, maxY: mesh.bounds?.height ?? 2.4 };
   const height = Math.max(1, mesh.bounds?.height ?? (bounds.maxY - bounds.minY));
-  const target = [0, height * 0.54, 0];
+  const targetY = finiteNumber(params.targetY, height * finiteNumber(params.targetHeightRatio, 0.54));
+  const eyeY = finiteNumber(params.eyeY, height * finiteNumber(params.eyeHeightRatio, 0.58));
+  const target = [0, targetY, 0];
   const renderHeight = Math.max(height, Number(bounds.maxY) - Number(bounds.minY) || 0);
   const renderWidth = Math.max(
     Math.abs(Number(bounds.minX) || 0),
@@ -368,7 +370,7 @@ export function createAvatarPreviewViewProjection(mesh, aspect, params = {}) {
     renderHeight * 1.72,
     renderWidth * 0.92 / Math.max(0.55, aspect),
   ));
-  const eye = [0.05, height * 0.58, distance];
+  const eye = [0.05, eyeY, distance];
   const view = mat4LookAt(eye, target, [0, 1, 0]);
   const orthographic = params.projection === "orthographic" || params.orthographic === true;
   const projection = orthographic
@@ -397,6 +399,10 @@ function resolvePreviewProjectionParams(options, params) {
     padding: params.padding ?? options.padding,
     height: params.height ?? options.height,
     zoom: params.zoom ?? options.zoom,
+    targetY: params.targetY ?? options.targetY,
+    eyeY: params.eyeY ?? options.eyeY,
+    targetHeightRatio: params.targetHeightRatio ?? options.targetHeightRatio,
+    eyeHeightRatio: params.eyeHeightRatio ?? options.eyeHeightRatio,
   };
 }
 
