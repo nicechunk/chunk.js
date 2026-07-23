@@ -20,11 +20,29 @@ assert.deepEqual(
   NCM4_ACTIONS.map(({ name }) => name),
   ["idle", "greet_customer", "show_goods", "record_price", "complete_trade"],
 );
+const crcFixture = new TextEncoder().encode("123456789");
 assert.equal(
-  ncm4Crc32c(new TextEncoder().encode("123456789")),
+  ncm4Crc32c(crcFixture),
   0xe3069283,
   "CRC32C must use the Castagnoli test vector",
 );
+assert.equal(ncm4Crc32c(crcFixture.buffer), 0xe3069283);
+assert.equal(
+  ncm4Crc32c(new DataView(crcFixture.buffer, crcFixture.byteOffset, crcFixture.byteLength)),
+  0xe3069283,
+);
+assert.doesNotThrow(() => ncm4Crc32c(new Uint8Array(NCM4_MAX_PAYLOAD_BYTES)));
+assert.throws(
+  () => ncm4Crc32c(new Uint8Array(NCM4_MAX_PAYLOAD_BYTES + 1)),
+  /exceeds 1532 bytes/,
+);
+for (const invalidCrcInput of [undefined, 1_000_000, { length: 1_000_000 }, [1, 2, 3]]) {
+  assert.throws(
+    () => ncm4Crc32c(invalidCrcInput),
+    /ArrayBuffer or ArrayBufferView/,
+    "NCM4 CRC32C must reject non-BufferSource inputs",
+  );
+}
 
 const palette = [
   "#24150f", "#5d3522", "#9a6746", "#f0c9ad",
@@ -115,6 +133,10 @@ assert.equal(encodeNcm4(decoded), code, "decode/encode must preserve the canonic
 assert.throws(() => decodeNcm4(` ${code}`), /canonical NCM4/);
 assert.throws(() => decodeNcm4(code.replace(/^NCM4:/, "ncm4:")), /canonical NCM4/);
 assert.throws(() => decodeNcm4(`${code}=`), /Base64URL/);
+assert.throws(
+  () => decodeNcm4(`NCM4:${"A".repeat(Math.ceil(NCM4_MAX_PAYLOAD_BYTES * 4 / 3) + 1)}`),
+  /payload exceeds the on-chain safety limit/,
+);
 
 const raw = rawFromCode(code);
 const crcCorruption = new Uint8Array(raw);

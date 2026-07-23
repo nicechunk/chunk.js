@@ -3,6 +3,7 @@ import { chunkId, worldToChunk } from "../core/coordinates.js";
 import { isBlockingBlock, isOpaqueSolidBlock, BLOCK_ID } from "../world/block-registry.js";
 import { compileSurfaceDecorationRules } from "../world/surface-decoration-rules.js";
 import {
+  chunkLocalToWorldI32,
   createWorldGeneratorConfig,
   DEFAULT_GENERATION_VERSION,
   DEFAULT_RESOURCE_RULE_VERSION,
@@ -20,6 +21,12 @@ import {
   waterLevelAt,
 } from "../world/world-generator.js";
 import { CHUNK_BOUNDARY_MASK, ChunkState } from "./chunk-state.js";
+import {
+  DELTA_PROTOCOL_LIMITS,
+  DELTA_RESOURCE_LIMITS,
+  deltaKey,
+  normalizeDelta,
+} from "./chunk-delta.js";
 import { meshChunkOpaqueFast, meshChunkVisual } from "./chunk-mesher.js";
 
 const DEFAULT_MAX_BUILD_QUEUE = 768;
@@ -28,8 +35,17 @@ const VISIBILITY_CLEANUP_INTERVAL_FRAMES = 45;
 const INITIAL_BUILD_CONCURRENCY = 1;
 const WORKER_BUILD_RETRY_BASE_MS = 180;
 const WORKER_BUILD_RETRY_MAX_MS = 5000;
+const MAX_CONSECUTIVE_WORKER_FAILURES = 3;
 const COLLISION_COLUMN_CACHE_LIMIT = 4096;
 const MAX_GENERATED_TREE_TRUNK_HEIGHT = 7;
+const managerWorldSeeds = new WeakMap();
+export const CHUNK_MANAGER_LIMITS = Object.freeze({
+  maxViewDistance: 32,
+  maxPreloadMargin: 8,
+  maxWorkers: 32,
+  maxQueuedBuilds: 8192,
+  maxVisibilityLingerFrames: 10_000,
+});
 
 export class ChunkManager {
   constructor({
@@ -37,6 +53,7 @@ export class ChunkManager {
     chunkSize = DEFAULT_CHUNK_SIZE,
     height = DEFAULT_CHUNK_HEIGHT,
     minY = DEFAULT_MIN_WORLD_Y,
+    maxBuildY = undefined,
     viewDistance = DEFAULT_VIEW_DISTANCE,
     preloadMargin = 1,
     seaLevel = DEFAULT_SEA_LEVEL,
@@ -52,18 +69,23 @@ export class ChunkManager {
     maxQueuedBuilds = DEFAULT_MAX_BUILD_QUEUE,
     visibilityLingerFrames = DEFAULT_VISIBILITY_LINGER_FRAMES,
   } = {}) {
-    this.config = createWorldGeneratorConfig({ worldSeed, chunkSize, height, minY, seaLevel, maxTerrainHeight, generationVersion, resourceRuleVersion });
-    this.worldSeed = worldSeed;
-    this.chunkSize = chunkSize;
-    this.height = height;
-    this.minY = minY;
-    this.viewDistance = viewDistance;
-    this.preloadMargin = Math.max(0, Math.trunc(preloadMargin || 0));
+    this.config = createWorldGeneratorConfig({ worldSeed, chunkSize, height, minY, maxBuildY, seaLevel, maxTerrainHeight, generationVersion, resourceRuleVersion });
+    managerWorldSeeds.set(this, this.config.worldSeed);
+    Object.defineProperty(this, "worldSeed", {
+      enumerable: true,
+      get: () => new Uint8Array(managerWorldSeed(this)),
+    });
+    this.chunkSize = this.config.chunkSize;
+    this.height = this.config.height;
+    this.minY = this.config.minY;
+    this.maxBuildY = this.config.maxBuildY;
+    this.viewDistance = boundedManagerInteger(viewDistance, 1, CHUNK_MANAGER_LIMITS.maxViewDistance, "view distance");
+    this.preloadMargin = boundedManagerInteger(preloadMargin, 0, CHUNK_MANAGER_LIMITS.maxPreloadMargin, "preload margin");
     this.preloadDistance = this.viewDistance + this.preloadMargin;
-    this.seaLevel = seaLevel;
-    this.maxTerrainHeight = maxTerrainHeight;
-    this.generationVersion = generationVersion;
-    this.resourceRuleVersion = resourceRuleVersion;
+    this.seaLevel = this.config.seaLevel;
+    this.maxTerrainHeight = this.config.maxTerrainHeight;
+    this.generationVersion = this.config.generationVersion;
+    this.resourceRuleVersion = this.config.resourceRuleVersion;
     this.materialVersion = materialVersion;
     this.surfaceDecorationRules = compileSurfaceDecorationRules(surfaceDecorationRules);
     this.surfaceDecorationRulesRevision = 0;
@@ -79,28 +101,52 @@ export class ChunkManager {
     this.lastWorkerBuildMs = 0;
     this.lastBuildError = null;
     this.useWorkers = Boolean(useWorkers && typeof Worker !== "undefined");
-    this.workerCount = this.useWorkers ? Math.max(1, Math.trunc(workerCount || 1)) : 0;
+    this.workerCount = this.useWorkers
+      ? boundedManagerInteger(workerCount, 1, CHUNK_MANAGER_LIMITS.maxWorkers, "worker count")
+      : 0;
     this.deferInitialBuilds = Boolean(deferInitialBuilds && this.useWorkers);
     this.continuousBuildDispatch = !Boolean(deferContinuousBuildDispatch && this.useWorkers);
     this.activeBuildLimit = this.deferInitialBuilds ? 0 : Math.min(this.workerCount, INITIAL_BUILD_CONCURRENCY);
-    this.maxQueuedBuilds = Math.max(1, Math.trunc(maxQueuedBuilds || DEFAULT_MAX_BUILD_QUEUE));
+    this.maxQueuedBuilds = maxQueuedBuilds;
     this.workers = [];
     this.idleWorkers = [];
     this.buildQueue = [];
     this.buildQueueNeedsSort = false;
     this.inFlightBuilds = new Map();
+    this.settledWorkerTaskIds = new WeakMap();
     this.completedBuilds = [];
     this.workerBuildFailures = new Map();
+    this.consecutiveWorkerFailures = 0;
     this.dispatchScheduled = false;
+    this.dispatchTimer = null;
+    this.disposed = false;
     this.taskSerial = 1;
     this.renderLogger = null;
     this.supplementalCollisionProvider = null;
     this.collisionColumnTopCache = new Map();
     this.visibilityFrame = 0;
     this.lastVisibilityCleanupFrame = 0;
-    this.visibilityLingerFrames = Math.max(0, Math.trunc(Number(visibilityLingerFrames) || 0));
+    this.visibilityLingerFrames = boundedManagerInteger(
+      visibilityLingerFrames,
+      0,
+      CHUNK_MANAGER_LIMITS.maxVisibilityLingerFrames,
+      "visibility linger frames",
+    );
     this.visibleChunkMemory = new Map();
     if (this.useWorkers && !this.deferInitialBuilds) this.initWorkers(Math.min(this.workerCount, INITIAL_BUILD_CONCURRENCY));
+  }
+
+  get maxQueuedBuilds() {
+    return this._maxQueuedBuilds;
+  }
+
+  set maxQueuedBuilds(value) {
+    this._maxQueuedBuilds = boundedManagerInteger(
+      value,
+      1,
+      CHUNK_MANAGER_LIMITS.maxQueuedBuilds,
+      "maximum queued builds",
+    );
   }
 
   setRenderLogger(logger) {
@@ -128,8 +174,13 @@ export class ChunkManager {
       ? Math.max(1, Math.trunc(Number(revision) || 1))
       : Math.max(0, Math.trunc(Number(revision) || 0));
     this.materialVersion += 1;
-    for (const worker of this.workers) {
-      worker.postMessage({ type: "setSurfaceDecorationRules", rules: compiled.rules, revision: this.surfaceDecorationRulesRevision });
+    for (const worker of [...this.workers]) {
+      if (!this.useWorkers) break;
+      try {
+        worker.postMessage({ type: "setSurfaceDecorationRules", rules: compiled.rules, revision: this.surfaceDecorationRulesRevision });
+      } catch (error) {
+        this.handleWorkerError(worker, error, { allowRestart: false });
+      }
     }
     for (const chunk of this.chunks.values()) {
       chunk.surfaceDecorationRules = compiled;
@@ -179,7 +230,8 @@ export class ChunkManager {
 
   setBuildConcurrencyLimit(limit = this.workerCount) {
     if (!this.useWorkers) return;
-    const next = Math.max(0, Math.min(this.workerCount, Math.trunc(Number(limit) || 0)));
+    const requested = boundedManagerInteger(limit, 0, CHUNK_MANAGER_LIMITS.maxWorkers, "worker concurrency limit");
+    const next = Math.min(this.workerCount, requested);
     if (next > this.workers.length) this.initWorkers(next);
     if (next === this.activeBuildLimit) return;
     this.activeBuildLimit = next;
@@ -194,14 +246,15 @@ export class ChunkManager {
   }
 
   setViewDistance(viewDistance, { preloadMargin = this.preloadMargin } = {}) {
-    this.viewDistance = Math.max(1, Math.trunc(Number(viewDistance) || DEFAULT_VIEW_DISTANCE));
-    this.preloadMargin = Math.max(0, Math.trunc(Number(preloadMargin) || 0));
+    this.viewDistance = boundedManagerInteger(viewDistance, 1, CHUNK_MANAGER_LIMITS.maxViewDistance, "view distance");
+    this.preloadMargin = boundedManagerInteger(preloadMargin, 0, CHUNK_MANAGER_LIMITS.maxPreloadMargin, "preload margin");
     this.preloadDistance = this.viewDistance + this.preloadMargin;
     this.lastEnsuredRangeKey = "";
     this.ensureChunkRange(this.centerChunkX, this.centerChunkZ, { force: true });
   }
 
   ensureChunk(chunkX, chunkZ) {
+    if (this.disposed) throw new Error("Cannot use a disposed ChunkManager.");
     const id = chunkId(chunkX, chunkZ);
     let chunk = this.chunks.get(id);
     if (chunk) return chunk;
@@ -211,6 +264,7 @@ export class ChunkManager {
       chunkSize: this.chunkSize,
       height: this.height,
       minY: this.minY,
+      maxBuildY: this.maxBuildY,
       generationVersion: this.generationVersion,
       resourceRuleVersion: this.resourceRuleVersion,
       materialVersion: this.materialVersion,
@@ -235,6 +289,9 @@ export class ChunkManager {
     }
     this.buildQueue = this.buildQueue.filter((task) => this.chunks.has(task.id));
     this.completedBuilds = this.completedBuilds.filter((chunk) => this.chunks.has(chunk.id));
+    for (const task of this.inFlightBuilds.values()) {
+      if (!this.chunks.has(task.id)) task.cancelled = true;
+    }
     for (const id of this.workerBuildFailures.keys()) {
       if (!this.chunks.has(id)) this.workerBuildFailures.delete(id);
     }
@@ -335,10 +392,10 @@ export class ChunkManager {
         if (base !== BLOCK_ID.air) return base;
         const loadedTreeBlock = this.getLoadedTreeBlockAtWorld(coord.worldX, coord.worldY, coord.worldZ);
         if (loadedTreeBlock !== null) return loadedTreeBlock;
-        return getGeneratedTreeBlockAt(this.worldSeed, coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions());
+        return getGeneratedTreeBlockAt(managerWorldSeed(this), coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions());
       }
     }
-    return getBlockAt(this.worldSeed, coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions());
+    return getBlockAt(managerWorldSeed(this), coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions());
   }
 
   getDeltaAtWorld(worldX, worldY, worldZ) {
@@ -421,10 +478,10 @@ export class ChunkManager {
         if (base !== BLOCK_ID.air) return base;
         const loadedTreeBlock = this.getLoadedTreeTrunkBlockAtWorld(coord.worldX, coord.worldY, coord.worldZ);
         if (loadedTreeBlock !== null) return loadedTreeBlock;
-        return collisionBlockId(getGeneratedTreeTrunkBlockAt(this.worldSeed, coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions()));
+        return collisionBlockId(getGeneratedTreeTrunkBlockAt(managerWorldSeed(this), coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions()));
       }
     }
-    return collisionBlockId(getBlockAt(this.worldSeed, coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions()));
+    return collisionBlockId(getBlockAt(managerWorldSeed(this), coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions()));
   }
 
   getCollisionTopAtWorld(worldX, worldZ, maxBlockY = Infinity) {
@@ -540,8 +597,10 @@ export class ChunkManager {
 
   applyChainDelta(chunkKeyOrDeltas, maybeDeltas) {
     const deltas = Array.isArray(chunkKeyOrDeltas) ? chunkKeyOrDeltas : maybeDeltas;
+    const groups = groupDeltasByChunk(deltas, this);
+    assertManagerResidentCapacity(groups, this, "chainDeltas");
     let changedChunks = 0;
-    for (const group of groupDeltasByChunk(deltas, this.chunkSize).values()) {
+    for (const group of groups.values()) {
       const chunk = this.ensureChunk(group.chunkX, group.chunkZ);
       const result = chunk.applyChainDelta(group.deltas);
       if (result.changed) changedChunks += 1;
@@ -584,7 +643,9 @@ export class ChunkManager {
   applyPendingDelta(chunkKeyOrDeltas, maybeDeltas, maybeTxId) {
     const deltas = Array.isArray(chunkKeyOrDeltas) ? chunkKeyOrDeltas : maybeDeltas;
     const txId = Array.isArray(chunkKeyOrDeltas) ? maybeDeltas : maybeTxId;
-    for (const group of groupDeltasByChunk(deltas, this.chunkSize).values()) {
+    const groups = groupDeltasByChunk(deltas, this);
+    assertManagerResidentCapacity(groups, this, "pendingDeltas");
+    for (const group of groups.values()) {
       const chunk = this.ensureChunk(group.chunkX, group.chunkZ);
       const result = chunk.applyPendingDelta(group.deltas, txId);
       this.markBoundaryNeighborsDirty(chunk, result.boundaryMask);
@@ -624,8 +685,9 @@ export class ChunkManager {
   }
 
   ensureChunkForDelta(delta) {
-    const coord = worldToChunk(delta.worldX, delta.worldY, delta.worldZ, this.chunkSize);
-    return this.ensureChunk(coord.chunkX, coord.chunkZ);
+    const normalized = normalizeDelta(delta, this.chunkSize);
+    assertDeltaInBuildRange(normalized, this.config.minY, this.config.maxBuildY);
+    return this.ensureChunk(normalized.chunkX, normalized.chunkZ);
   }
 
   surfaceYAt(worldX, worldZ) {
@@ -679,15 +741,29 @@ export class ChunkManager {
   }
 
   dispose() {
-    for (const worker of this.workers) worker.terminate();
+    if (this.disposed) return;
+    this.disposed = true;
+    if (this.dispatchTimer !== null) clearTimeout(this.dispatchTimer);
+    this.dispatchTimer = null;
+    for (const worker of this.workers) this.terminateWorker(worker);
     this.workers = [];
     this.idleWorkers = [];
     this.buildQueue.length = 0;
     this.buildQueueNeedsSort = false;
     this.inFlightBuilds.clear();
+    this.settledWorkerTaskIds = new WeakMap();
     this.completedBuilds.length = 0;
     this.workerBuildFailures.clear();
+    this.consecutiveWorkerFailures = 0;
     this.dispatchScheduled = false;
+    this.useWorkers = false;
+    this.workerCount = 0;
+    this.activeBuildLimit = 0;
+    this.chunks.clear();
+    this.visibleChunkMemory.clear();
+    this.collisionColumnTopCache.clear();
+    this.supplementalCollisionProvider = null;
+    this.renderLogger = null;
   }
 
   logRenderEvent(type, data = {}) {
@@ -695,26 +771,153 @@ export class ChunkManager {
   }
 
   initWorkers(targetCount = this.workerCount) {
+    if (this.disposed || !this.useWorkers) return false;
     try {
-      const target = Math.max(0, Math.min(this.workerCount, Math.trunc(Number(targetCount) || 0)));
+      const requested = boundedManagerInteger(targetCount, 0, CHUNK_MANAGER_LIMITS.maxWorkers, "worker pool target");
+      const target = Math.min(this.workerCount, requested);
       for (let i = this.workers.length; i < target; i += 1) {
         const worker = new Worker(new URL("./chunk-build-worker.js", import.meta.url), { type: "module" });
-        worker.onmessage = (event) => this.handleWorkerMessage(worker, event.data);
-        worker.onerror = (event) => this.handleWorkerError(worker, event);
-        this.workers.push(worker);
-        this.idleWorkers.push(worker);
-        worker.postMessage({
-          type: "setSurfaceDecorationRules",
-          rules: this.surfaceDecorationRules.rules,
-          revision: this.surfaceDecorationRulesRevision,
-        });
+        try {
+          worker.onmessage = (event) => this.handleWorkerMessage(worker, event.data);
+          worker.onerror = (event) => this.handleWorkerError(worker, event);
+          worker.onmessageerror = (event) => this.handleWorkerError(worker, event, { allowRestart: false });
+          worker.postMessage({
+            type: "setSurfaceDecorationRules",
+            rules: this.surfaceDecorationRules.rules,
+            revision: this.surfaceDecorationRulesRevision,
+          });
+          this.workers.push(worker);
+          this.idleWorkers.push(worker);
+        } catch (error) {
+          this.terminateWorker(worker);
+          throw error;
+        }
       }
+      return this.workers.length >= target;
     } catch (error) {
-      this.lastBuildError = error?.message || String(error);
-      this.useWorkers = false;
-      this.workerCount = 0;
-      this.dispose();
+      this.disableWorkerMode(error);
+      return false;
     }
+  }
+
+  terminateWorker(worker) {
+    if (!worker) return;
+    worker.onmessage = null;
+    worker.onerror = null;
+    worker.onmessageerror = null;
+    try {
+      worker.terminate();
+    } catch {
+      // A failed Worker may already be terminated by the browser.
+    }
+  }
+
+  recoverWorkerTasks(worker, error) {
+    let recovered = 0;
+    for (const [taskId, task] of Array.from(this.inFlightBuilds.entries())) {
+      if (task.worker !== worker) continue;
+      const chunk = this.chunks.get(task.id);
+      const obsolete = task.cancelled
+        || !chunk
+        || (task.phase === "chunk" && chunk.buildTaskId !== taskId);
+      if (!obsolete && task.phase === "visual" && chunk.mesh) {
+        this.logRenderEvent("visual-build-error", {
+          chunkX: task.chunkX,
+          chunkZ: task.chunkZ,
+          error: error?.message || String(error),
+        });
+      } else if (!obsolete) {
+        chunk.markBuildError(error);
+        this.recordWorkerBuildFailure(chunk, error);
+      }
+      this.rememberSettledWorkerTask(worker, taskId);
+      this.inFlightBuilds.delete(taskId);
+      recovered += 1;
+    }
+    return recovered;
+  }
+
+  rememberSettledWorkerTask(worker, taskId) {
+    if (!worker || !Number.isSafeInteger(taskId)) return;
+    let taskIds = this.settledWorkerTaskIds.get(worker);
+    if (!taskIds) {
+      taskIds = new Set();
+      this.settledWorkerTaskIds.set(worker, taskIds);
+    }
+    taskIds.add(taskId);
+    while (taskIds.size > 64) taskIds.delete(taskIds.values().next().value);
+  }
+
+  settleWorkerTask(taskId, task) {
+    if (!task || this.inFlightBuilds.get(taskId) !== task) return false;
+    this.inFlightBuilds.delete(taskId);
+    this.rememberSettledWorkerTask(task.worker, taskId);
+    return true;
+  }
+
+  validateWorkerResponse(worker, message) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      return { error: new Error("Chunk worker returned an invalid message.") };
+    }
+    const taskId = message.taskId;
+    if (!Number.isSafeInteger(taskId) || taskId < 1) {
+      return { error: new Error("Chunk worker response has an invalid task ID.") };
+    }
+    const task = this.inFlightBuilds.get(taskId);
+    if (!task) {
+      if (this.settledWorkerTaskIds.get(worker)?.has(taskId)) return { late: true };
+      return { error: new Error(`Chunk worker response references unknown task ${taskId}.`) };
+    }
+    if (task.worker !== worker) {
+      return { error: new Error(`Chunk worker response does not own task ${taskId}.`) };
+    }
+    if (message.chunkX !== task.chunkX || message.chunkZ !== task.chunkZ) {
+      return { error: new Error(`Chunk worker response coordinates do not match task ${taskId}.`) };
+    }
+    const phase = workerResponsePhase(message.type);
+    if (!phase || phase !== task.phase) {
+      return { error: new Error(`Chunk worker response type ${String(message.type)} is invalid during the ${task.phase} phase of task ${taskId}.`) };
+    }
+    if (message.type === "chunkBuilt" || message.type === "visualBuilt") {
+      if (message.taskVersion !== task.version || message.materialVersion !== task.materialVersion) {
+        return { error: new Error(`Chunk worker response versions do not match task ${taskId}.`) };
+      }
+      if (message.type === "chunkBuilt" && message.mode !== task.mode) {
+        return { error: new Error(`Chunk worker response mode does not match task ${taskId}.`) };
+      }
+    }
+    return { task };
+  }
+
+  disableWorkerMode(error = "chunk workers are unavailable") {
+    if (this.disposed) return;
+    this.lastBuildError = error?.message || String(error);
+    if (this.dispatchTimer !== null) clearTimeout(this.dispatchTimer);
+    this.dispatchTimer = null;
+    this.dispatchScheduled = false;
+    for (const task of this.inFlightBuilds.values()) {
+      const chunk = this.chunks.get(task.id);
+      chunk?.markBuildError(this.lastBuildError);
+      if (chunk) this.recordWorkerBuildFailure(chunk, this.lastBuildError);
+    }
+    for (const worker of this.workers) this.terminateWorker(worker);
+    for (const chunk of this.chunks.values()) {
+      if (chunk.buildState === "queued" || chunk.buildState === "building" || chunk.buildState === "error") {
+        chunk.markBuildStale();
+      }
+    }
+    this.workers = [];
+    this.idleWorkers = [];
+    this.buildQueue.length = 0;
+    this.inFlightBuilds.clear();
+    this.useWorkers = false;
+    this.workerCount = 0;
+    this.activeBuildLimit = 0;
+  }
+
+  markWorkerIdle(worker) {
+    if (!this.workers.includes(worker) || this.idleWorkers.includes(worker)) return;
+    this.idleWorkers.push(worker);
   }
 
   enqueueBuild(chunk) {
@@ -777,6 +980,20 @@ export class ChunkManager {
         this.idleWorkers.push(worker);
         continue;
       }
+      let finalDeltas;
+      let neighborDeltas;
+      let treeDeltas;
+      try {
+        finalDeltas = task.mode === "remesh" ? packedFinalDeltasForWorker(chunk) : EMPTY_PACKED_DELTAS;
+        neighborDeltas = this.neighborDeltasForWorker(chunk.chunkX, chunk.chunkZ);
+        treeDeltas = this.treeNeighborDeltasForWorker(chunk.chunkX, chunk.chunkZ);
+      } catch (error) {
+        this.lastBuildError = error?.message || String(error);
+        chunk.markBuildError(error);
+        this.recordWorkerBuildFailure(chunk, error);
+        this.markWorkerIdle(worker);
+        continue;
+      }
       const taskId = this.taskSerial++;
       const startedAt = performance.now();
       const waitMs = Number.isFinite(task.queuedAt) ? startedAt - task.queuedAt : 0;
@@ -791,6 +1008,9 @@ export class ChunkManager {
         waitMs,
         mode: task.mode || "base",
         version: task.version,
+        materialVersion: this.materialVersion,
+        phase: "chunk",
+        cancelled: false,
       });
       this.logRenderEvent("chunk-build-start", {
         chunkId: chunk.id,
@@ -799,13 +1019,10 @@ export class ChunkManager {
         waitMs,
         queueLength: this.buildQueue.length,
       });
-      const finalDeltas = task.mode === "remesh" ? packedFinalDeltasForWorker(chunk) : EMPTY_PACKED_DELTAS;
-      const neighborDeltas = this.neighborDeltasForWorker(chunk.chunkX, chunk.chunkZ);
-      const treeDeltas = this.treeNeighborDeltasForWorker(chunk.chunkX, chunk.chunkZ);
       const message = {
         type: "buildChunk",
         taskId,
-        worldSeed: this.worldSeed,
+        worldSeed: new Uint8Array(managerWorldSeed(this)),
         chunkX: chunk.chunkX,
         chunkZ: chunk.chunkZ,
         generationVersion: this.generationVersion,
@@ -822,81 +1039,119 @@ export class ChunkManager {
       if (finalDeltas.byteLength) transfer.push(finalDeltas.buffer);
       if (neighborDeltas.byteLength) transfer.push(neighborDeltas.buffer);
       if (treeDeltas.byteLength) transfer.push(treeDeltas.buffer);
-      worker.postMessage(message, transfer);
+      try {
+        worker.postMessage(message, transfer);
+      } catch (error) {
+        this.handleWorkerError(worker, error, { allowRestart: false });
+        return;
+      }
     }
   }
 
   scheduleBuildDispatch() {
-    if (this.dispatchScheduled || !this.useWorkers || !this.continuousBuildDispatch) return;
+    if (this.disposed || this.dispatchScheduled || !this.useWorkers || !this.continuousBuildDispatch) return;
     this.dispatchScheduled = true;
-    setTimeout(() => {
+    this.dispatchTimer = setTimeout(() => {
+      this.dispatchTimer = null;
       this.dispatchScheduled = false;
+      if (this.disposed) return;
       this.dispatchBuilds();
     }, 0);
   }
 
   handleWorkerMessage(worker, message) {
-    if (!message) return;
-    if (message.type === "chunkBuilt") {
-      const task = this.inFlightBuilds.get(message.taskId);
-      this.applyWorkerBuildResult(message, task);
-      if (message.visualError) {
+    if (this.disposed || !this.workers.includes(worker)) return;
+    const validation = this.validateWorkerResponse(worker, message);
+    if (validation.late) {
+      this.logRenderEvent("chunk-worker-late-response", {
+        taskId: message.taskId,
+        type: message.type,
+      });
+      return;
+    }
+    if (validation.error) {
+      this.handleWorkerError(worker, validation.error);
+      return;
+    }
+    const task = validation.task;
+    const chunk = this.chunks.get(task.id);
+    if (task.phase === "chunk" && (!chunk || chunk.buildTaskId !== message.taskId)) task.cancelled = true;
+
+    if (message.type === "chunkBuildError" || message.type === "visualBuildError") {
+      const error = new Error(message.error || (message.type === "visualBuildError" ? "Visual build failed." : "Chunk build failed."));
+      if (message.type === "visualBuildError") {
         this.logRenderEvent("visual-build-error", {
-          chunkX: message.chunkX,
-          chunkZ: message.chunkZ,
-          error: message.visualError,
+          chunkX: task.chunkX,
+          chunkZ: task.chunkZ,
+          error: error.message,
         });
       }
-      if (!message.visualPending) {
-        if (task) this.inFlightBuilds.delete(message.taskId);
-        this.idleWorkers.push(worker);
+      this.handleWorkerError(worker, error);
+      return;
+    }
+
+    this.consecutiveWorkerFailures = 0;
+    if (message.type === "chunkBuilt") {
+      try {
+        if (!task.cancelled) this.applyWorkerBuildResult(message, task);
+        if (message.visualError) {
+          this.logRenderEvent("visual-build-error", {
+            chunkX: task.chunkX,
+            chunkZ: task.chunkZ,
+            error: message.visualError,
+          });
+        }
+      } catch (error) {
+        this.handleWorkerError(worker, error);
+        return;
+      }
+      if (message.visualPending === true) {
+        task.phase = "visual";
+      } else if (this.settleWorkerTask(message.taskId, task)) {
+        this.markWorkerIdle(worker);
       }
       this.scheduleBuildDispatch();
       return;
-    } else if (message.type === "visualBuilt") {
-      const task = this.inFlightBuilds.get(message.taskId);
-      if (task) this.inFlightBuilds.delete(message.taskId);
-      this.applyWorkerVisualResult(message, task);
-      this.idleWorkers.push(worker);
-      this.scheduleBuildDispatch();
-      return;
-    } else if (message.type === "visualBuildError") {
-      const task = this.inFlightBuilds.get(message.taskId);
-      if (task) this.inFlightBuilds.delete(message.taskId);
-      this.lastBuildError = message.error || "visual build failed";
-      this.logRenderEvent("visual-build-error", {
-        chunkX: message.chunkX,
-        chunkZ: message.chunkZ,
-        error: this.lastBuildError,
-      });
-      this.idleWorkers.push(worker);
-      this.scheduleBuildDispatch();
-      return;
-    } else if (message.type === "chunkBuildError") {
-      const task = this.inFlightBuilds.get(message.taskId);
-      if (task) this.inFlightBuilds.delete(message.taskId);
-      this.lastBuildError = message.error || "chunk build failed";
-      const chunk = this.chunks.get(chunkId(message.chunkX, message.chunkZ));
-      chunk?.markBuildError(this.lastBuildError);
-      if (chunk) this.recordWorkerBuildFailure(chunk, this.lastBuildError);
-      this.idleWorkers.push(worker);
     }
+
+    try {
+      if (!task.cancelled) this.applyWorkerVisualResult(message, task);
+    } catch (error) {
+      this.handleWorkerError(worker, error);
+      return;
+    }
+    if (this.settleWorkerTask(message.taskId, task)) this.markWorkerIdle(worker);
     this.scheduleBuildDispatch();
   }
 
-  handleWorkerError(worker, event) {
-    this.lastBuildError = event?.message || "chunk worker failed";
-    for (const [taskId, task] of Array.from(this.inFlightBuilds.entries())) {
-      if (task.worker !== worker) continue;
-      const chunk = this.chunks.get(task.id);
-      chunk?.markBuildError(this.lastBuildError);
-      if (chunk) this.recordWorkerBuildFailure(chunk, this.lastBuildError);
-      this.inFlightBuilds.delete(taskId);
-    }
+  handleWorkerError(worker, event, { allowRestart = true } = {}) {
+    if (this.disposed) return;
+    const knownWorker = this.workers.includes(worker)
+      || this.idleWorkers.includes(worker)
+      || Array.from(this.inFlightBuilds.values()).some((task) => task.worker === worker);
+    if (!knownWorker) return;
+    const error = event instanceof Error ? event : new Error(event?.message || "chunk worker failed");
+    this.lastBuildError = error.message;
+    const previousPoolSize = this.workers.length;
+    this.recoverWorkerTasks(worker, error);
     this.idleWorkers = this.idleWorkers.filter((candidate) => candidate !== worker);
     this.workers = this.workers.filter((candidate) => candidate !== worker);
-    worker.terminate();
-    if (!this.workers.length) this.useWorkers = false;
+    this.terminateWorker(worker);
+    this.consecutiveWorkerFailures += 1;
+    if (!allowRestart || this.consecutiveWorkerFailures >= MAX_CONSECUTIVE_WORKER_FAILURES) {
+      this.disableWorkerMode(error);
+      return;
+    }
+    const replacementTarget = Math.min(
+      this.workerCount,
+      Math.max(1, this.activeBuildLimit, previousPoolSize),
+    );
+    if (this.workers.length < replacementTarget) this.initWorkers(replacementTarget);
+    if (!this.useWorkers || !this.workers.length) {
+      this.disableWorkerMode(error);
+      return;
+    }
+    this.scheduleBuildDispatch();
   }
 
   applyWorkerBuildResult(message, timingTask = null) {
@@ -1015,25 +1270,27 @@ export class ChunkManager {
   }
 
   baseBlockResolverForChunk(chunkX, chunkZ, profile = null) {
-    const originX = Math.trunc(chunkX) * this.chunkSize;
-    const originZ = Math.trunc(chunkZ) * this.chunkSize;
+    const coordinateX = Math.trunc(chunkX);
+    const coordinateZ = Math.trunc(chunkZ);
     return (localX, localY, localZ) => {
       const x = Math.trunc(localX);
       const z = Math.trunc(localZ);
+      const worldX = chunkLocalToWorldI32(coordinateX, x, this.chunkSize);
+      const worldZ = chunkLocalToWorldI32(coordinateZ, z, this.chunkSize);
       if (profile?.surfaceY && profile?.waterY) {
         const column = x + z * this.chunkSize;
         const storedWater = profile.waterY[column];
         return getBaseBlockAtColumnConfig(
           this.config,
-          originX + x,
+          worldX,
           localY,
-          originZ + z,
+          worldZ,
           profile.surfaceY[column],
           storedWater === profile.noWater ? null : storedWater,
           profile.surfaceBlock?.[column],
         );
       }
-      return getBaseBlockAtConfig(this.config, originX + x, localY, originZ + z);
+      return getBaseBlockAtConfig(this.config, worldX, localY, worldZ);
     };
   }
 
@@ -1042,6 +1299,7 @@ export class ChunkManager {
       chunkSize: this.chunkSize,
       height: this.height,
       minY: this.minY,
+      maxBuildY: this.maxBuildY,
       seaLevel: this.seaLevel,
       maxTerrainHeight: this.maxTerrainHeight,
       generationVersion: this.generationVersion,
@@ -1058,7 +1316,7 @@ export class ChunkManager {
         if (!chunk) continue;
         for (const delta of finalDeltaValues(chunk)) {
           if (!deltaTouchesTargetBoundary(delta, dx, dz, this.chunkSize)) continue;
-          deltas.push(delta);
+          appendWorkerDelta(deltas, delta);
         }
       }
     }
@@ -1073,7 +1331,7 @@ export class ChunkManager {
         const chunk = this.chunks.get(chunkId(chunkX + dx, chunkZ + dz));
         if (!chunk) continue;
         for (const delta of finalDeltaValues(chunk)) {
-          if (deltaTouchesTargetVisualMargin(delta, dx, dz, this.chunkSize, 2)) deltas.push(delta);
+          if (deltaTouchesTargetVisualMargin(delta, dx, dz, this.chunkSize, 2)) appendWorkerDelta(deltas, delta);
         }
       }
     }
@@ -1179,19 +1437,76 @@ function hasDeltas(chunk) {
   return Boolean(chunk?.chainDeltas?.size || chunk?.pendingDeltas?.size);
 }
 
-function groupDeltasByChunk(deltas, chunkSize) {
+function groupDeltasByChunk(deltas, manager) {
+  const source = deltas ?? [];
+  if (Array.isArray(source) && source.length > DELTA_RESOURCE_LIMITS.maxBatchEntries) {
+    throw deltaBatchEntryLimitError();
+  }
   const groups = new Map();
-  for (const delta of deltas ?? []) {
-    if (!delta) continue;
-    const coord = worldToChunk(delta.worldX, delta.worldY, delta.worldZ, chunkSize);
-    let group = groups.get(coord.chunkId);
+  let entryCount = 0;
+  for (const rawDelta of source) {
+    entryCount += 1;
+    if (entryCount > DELTA_RESOURCE_LIMITS.maxBatchEntries) throw deltaBatchEntryLimitError();
+    const delta = normalizeDelta(rawDelta, manager.chunkSize);
+    assertDeltaInBuildRange(delta, manager.config.minY, manager.config.maxBuildY);
+    const id = chunkId(delta.chunkX, delta.chunkZ);
+    let group = groups.get(id);
     if (!group) {
-      group = { chunkX: coord.chunkX, chunkZ: coord.chunkZ, deltas: [] };
-      groups.set(coord.chunkId, group);
+      if (groups.size >= DELTA_RESOURCE_LIMITS.maxBatchChunks) {
+        throw new RangeError(
+          `Delta batch touches more than the ${DELTA_RESOURCE_LIMITS.maxBatchChunks}-chunk safety limit.`,
+        );
+      }
+      group = { chunkX: delta.chunkX, chunkZ: delta.chunkZ, deltas: [] };
+      groups.set(id, group);
     }
     group.deltas.push(delta);
   }
   return groups;
+}
+
+function assertManagerResidentCapacity(groups, manager, targetMapName) {
+  const otherMapName = targetMapName === "chainDeltas" ? "pendingDeltas" : "chainDeltas";
+  for (const [id, group] of groups) {
+    const chunk = manager.chunks.get(id);
+    const target = chunk?.[targetMapName];
+    const otherSize = chunk?.[otherMapName]?.size ?? 0;
+    let targetSize = target?.size ?? 0;
+    const addedKeys = new Set();
+    for (const delta of group.deltas) {
+      const key = deltaKey(delta.localX, delta.localY, delta.localZ, manager.chunkSize);
+      if (target?.has(key) || addedKeys.has(key)) continue;
+      addedKeys.add(key);
+      targetSize += 1;
+      if (targetSize + otherSize > DELTA_RESOURCE_LIMITS.maxResidentEntriesPerChunk) {
+        throw residentDeltaLimitError(id);
+      }
+    }
+    if (targetSize + otherSize > DELTA_RESOURCE_LIMITS.maxResidentEntriesPerChunk) {
+      throw residentDeltaLimitError(id);
+    }
+  }
+}
+
+function assertDeltaInBuildRange(delta, minY, maxY) {
+  if (delta.worldY < minY || delta.worldY > maxY) {
+    throw new RangeError(
+      `Delta world Y must be an integer from the configured build minimum ${minY} to maximum ${maxY}.`,
+    );
+  }
+  return delta;
+}
+
+function deltaBatchEntryLimitError() {
+  return new RangeError(
+    `Delta batch exceeds the ${DELTA_RESOURCE_LIMITS.maxBatchEntries}-entry safety limit.`,
+  );
+}
+
+function residentDeltaLimitError(id) {
+  return new RangeError(
+    `Chunk ${id} exceeds the ${DELTA_RESOURCE_LIMITS.maxResidentEntriesPerChunk}-entry resident delta safety limit.`,
+  );
 }
 
 const EMPTY_PACKED_DELTAS = new Int32Array(0);
@@ -1205,21 +1520,62 @@ function finalDeltaValues(chunk) {
 }
 
 function packedFinalDeltasForWorker(chunk) {
+  if (typeof chunk?.getFinalDeltaMap === "function") {
+    const deltas = chunk.getFinalDeltaMap();
+    return packDeltaValues(deltas.values(), deltas.size);
+  }
   return packDeltaValues(finalDeltaValues(chunk));
 }
 
-function packDeltaValues(values) {
-  const source = Array.isArray(values) ? values : Array.from(values ?? []);
-  if (!source.length) return new Int32Array(0);
-  const packed = new Int32Array(source.length * 4);
-  let offset = 0;
-  for (const delta of source) {
-    packed[offset++] = Math.trunc(delta.worldX);
-    packed[offset++] = Math.trunc(delta.worldY);
-    packed[offset++] = Math.trunc(delta.worldZ);
-    packed[offset++] = Math.trunc(delta.blockId);
+function packDeltaValues(values, knownCount = Array.isArray(values) ? values.length : null) {
+  if (knownCount !== null) {
+    if (!Number.isSafeInteger(knownCount) || knownCount < 0) {
+      throw new RangeError("Worker delta payload length must be a non-negative safe integer.");
+    }
+    if (knownCount > DELTA_RESOURCE_LIMITS.maxWorkerPayloadEntries) throw workerDeltaLimitError();
+    return packKnownDeltaValues(values ?? [], knownCount);
   }
+
+  const source = [];
+  for (const delta of values ?? []) appendWorkerDelta(source, delta);
+  return packKnownDeltaValues(source, source.length);
+}
+
+function packKnownDeltaValues(values, count) {
+  if (!count) return new Int32Array(0);
+  const packed = new Int32Array(count * 4);
+  let offset = 0;
+  let packedCount = 0;
+  for (const delta of values) {
+    if (packedCount >= count) {
+      throw new RangeError("Worker delta collection grew while it was being packed.");
+    }
+    packed[offset++] = packedDeltaInteger(delta?.worldX, DELTA_PROTOCOL_LIMITS.minWorldXZ, DELTA_PROTOCOL_LIMITS.maxWorldXZ, "world X");
+    packed[offset++] = packedDeltaInteger(delta?.worldY, DELTA_PROTOCOL_LIMITS.minWorldY, DELTA_PROTOCOL_LIMITS.maxWorldY, "world Y");
+    packed[offset++] = packedDeltaInteger(delta?.worldZ, DELTA_PROTOCOL_LIMITS.minWorldXZ, DELTA_PROTOCOL_LIMITS.maxWorldXZ, "world Z");
+    packed[offset++] = packedDeltaInteger(delta?.blockId, DELTA_PROTOCOL_LIMITS.minBlockId, DELTA_PROTOCOL_LIMITS.maxBlockId, "block ID");
+    packedCount += 1;
+  }
+  if (packedCount !== count) throw new RangeError("Worker delta collection shrank while it was being packed.");
   return packed;
+}
+
+function appendWorkerDelta(target, delta) {
+  if (target.length >= DELTA_RESOURCE_LIMITS.maxWorkerPayloadEntries) throw workerDeltaLimitError();
+  target.push(delta);
+}
+
+function workerDeltaLimitError() {
+  return new RangeError(
+    `Worker delta payload exceeds the ${DELTA_RESOURCE_LIMITS.maxWorkerPayloadEntries}-entry safety limit.`,
+  );
+}
+
+function packedDeltaInteger(value, minimum, maximum, label) {
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new RangeError(`Worker delta ${label} must be an integer from ${minimum} to ${maximum}.`);
+  }
+  return value;
 }
 
 function deltaTouchesTargetBoundary(delta, neighborDx, neighborDz, chunkSize) {
@@ -1277,4 +1633,24 @@ function defaultWorkerCount() {
   const coarse = globalThis.matchMedia?.("(pointer: coarse)")?.matches ?? false;
   if (coarse) return Math.max(1, Math.min(3, cores - 1));
   return Math.max(1, Math.min(6, cores - 2));
+}
+
+function workerResponsePhase(type) {
+  if (type === "chunkBuilt" || type === "chunkBuildError") return "chunk";
+  if (type === "visualBuilt" || type === "visualBuildError") return "visual";
+  return null;
+}
+
+function boundedManagerInteger(value, minimum, maximum, label) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < minimum || number > maximum) {
+    throw new RangeError(`${label} must be an integer from ${minimum} to ${maximum}.`);
+  }
+  return number;
+}
+
+function managerWorldSeed(manager) {
+  const seed = managerWorldSeeds.get(manager);
+  if (!seed) throw new Error("ChunkManager world seed is unavailable.");
+  return seed;
 }

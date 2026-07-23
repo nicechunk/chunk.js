@@ -19,9 +19,14 @@ export const FORGE_WORKBENCH_SOLID_CELL_COUNT = FORGE_COMPONENT_GRID.x
   * FORGE_COMPONENT_GRID.z;
 export const FORGE_WORKBENCH_PAINT_PALETTE = Object.freeze([0xeed, 0xec6, 0xe54, 0x58f, 0xf8c]);
 export const FORGE_MACHINING_STATE_KIND = "forge-machining-state-v1";
-// All 12 equipment scores inherit by used material mass. `massWeight` is the
-// exact integer product `usedVolumeMm3 * densityScore`; one unit equals 0.1 mg
-// because one density-score point represents 100 kg/m3.
+export const FORGE_MATERIAL_DENSITY_LIMITS = Object.freeze({
+  minKgM3: 1,
+  maxKgM3: 50_000,
+});
+export const FORGE_WORKBENCH_MASS_WEIGHT_UNIT = "microgram";
+// All 12 equipment scores inherit by physical material mass. `massWeight` is
+// the exact integer product `usedVolumeMm3 * densityKgM3`, whose unit is one
+// microgram. The independent `densityScore` remains a gameplay attribute.
 export const FORGE_WORKBENCH_INHERITANCE_MODE = "used-volume-density-mass-weighted-v1";
 
 // Module-private brands let hot UI paths reuse records created here without
@@ -49,8 +54,11 @@ const SAW_CROSS_BY_ANGLE = Object.freeze({
   150: Object.freeze([-500, -866]),
 });
 
+// Archetype kg/m3 values keep legacy previews deterministic when a material
+// omits physical metadata. Profiles always mark them as fallbacks; hosts must
+// supply and validate recipe/material density for authoritative workbench use.
 export const FORGE_MATERIAL_ARCHETYPES = Object.freeze({
-  iron: materialArchetype("iron", 0x9ca, [76, 46, 65], 18, {
+  iron: materialArchetype("iron", 0x9ca, [76, 46, 65], 18, 7_850, {
     hardness: 62,
     durability: 72,
     toughness: 74,
@@ -64,7 +72,7 @@ export const FORGE_MATERIAL_ARCHETYPES = Object.freeze({
     magnetism: 70,
     workability: 62,
   }),
-  copper: materialArchetype("copper", 0xb64, [66, 40, 59], 12, {
+  copper: materialArchetype("copper", 0xb64, [66, 40, 59], 12, 8_960, {
     hardness: 42,
     durability: 58,
     toughness: 48,
@@ -78,7 +86,7 @@ export const FORGE_MATERIAL_ARCHETYPES = Object.freeze({
     magnetism: 2,
     workability: 84,
   }),
-  tin: materialArchetype("tin", 0xccb, [59, 36, 54], 10, {
+  tin: materialArchetype("tin", 0xccb, [59, 36, 54], 10, 7_310, {
     hardness: 34,
     durability: 44,
     toughness: 32,
@@ -92,7 +100,7 @@ export const FORGE_MATERIAL_ARCHETYPES = Object.freeze({
     magnetism: 0,
     workability: 78,
   }),
-  coal: materialArchetype("coal", 0x222, [58, 36, 54], 38, {
+  coal: materialArchetype("coal", 0x222, [58, 36, 54], 38, 250, {
     hardness: 18,
     durability: 35,
     toughness: 22,
@@ -106,7 +114,7 @@ export const FORGE_MATERIAL_ARCHETYPES = Object.freeze({
     magnetism: 0,
     workability: 58,
   }),
-  handle: materialArchetype("handle", 0x753, [27, 76, 27], 6, {
+  handle: materialArchetype("handle", 0x753, [27, 76, 27], 6, 700, {
     hardness: 12,
     durability: 38,
     toughness: 48,
@@ -120,7 +128,7 @@ export const FORGE_MATERIAL_ARCHETYPES = Object.freeze({
     magnetism: 0,
     workability: 86,
   }),
-  cloth: materialArchetype("cloth", 0xedc, [80, 8, 80], 4, {
+  cloth: materialArchetype("cloth", 0xedc, [80, 8, 80], 4, 150, {
     hardness: 6,
     durability: 48,
     toughness: 62,
@@ -185,10 +193,14 @@ export function parseForgeMaterialProfile(input = {}, options = {}) {
     attributes[key] = clampInteger(firstAttributeValue(attributeSources, key, archetype.attributes[key]), 0, 100);
   }
 
+  const physicalDensity = resolveForgePhysicalDensity(existing ?? input, archetype);
   const densityScore = clampInteger(firstDefined(
     directMaterialValue(existing ?? input, "densityScore"),
-    densityScoreFromPhysicalInput(existing ?? input),
-    attributes.density,
+    firstAttributeValue(attributeSources, "density", undefined),
+    physicalDensity.source === "material-input"
+      ? Math.round(physicalDensity.densityKgM3 / 100)
+      : undefined,
+    archetype.attributes.density,
   ), 1, 100);
   attributes.density = densityScore;
   const derivedHeat = deriveForgeMaterialHeat(existing ?? input, attributes, archetype);
@@ -215,6 +227,9 @@ export function parseForgeMaterialProfile(input = {}, options = {}) {
       archetype.heat,
     ), 0, 100),
     densityScore,
+    densityKgM3: physicalDensity.densityKgM3,
+    densityKgM3Source: physicalDensity.source,
+    physicalDensityFallback: physicalDensity.source === "archetype-fallback",
     attributes: Object.freeze(attributes),
   };
   const result = Object.freeze(profile);
@@ -1253,29 +1268,38 @@ export function forgeWorkbenchStats(input, materialInputs = null, options = {}) 
   const componentBreakdown = forgeComponentBreakdown(analysis);
   const materialBreakdown = forgeMaterialBreakdown(componentBreakdown, analysis.massWeightTotal);
   const materials = [];
-  let heatTotal = 0;
-  let heatWeight = 0;
+  const densityKgM3Sources = [];
+  let heatTotal = 0n;
+  let heatWeight = 0n;
   for (let index = 0; index < analysis.materials.length; index += 1) {
     const profile = analysis.materials[index].profile;
     if (!materials.includes(profile.resourceId)) materials.push(profile.resourceId);
-    const weight = analysis.componentMassWeights[index];
-    heatTotal = checkedSafeAdd(heatTotal, profile.heat * weight, "forge material heat weight");
-    heatWeight = checkedSafeAdd(heatWeight, weight, "forge material heat weight total");
+    if (!densityKgM3Sources.includes(profile.densityKgM3Source)) {
+      densityKgM3Sources.push(profile.densityKgM3Source);
+    }
+    const weight = BigInt(analysis.componentMassWeights[index]);
+    heatTotal += BigInt(profile.heat) * weight;
+    heatWeight += weight;
   }
   return {
     inheritanceMode: FORGE_WORKBENCH_INHERITANCE_MODE,
     equipment: analysis.equipment,
     massGrams: analysis.equipment.mass5g * 5,
     massWeight: analysis.massWeightTotal,
-    massMilligrams: roundedSafeIntegerRatio(analysis.massWeightTotal, 10),
-    densityScore: analysis.usedVolumeMm3
+    massWeightUnit: FORGE_WORKBENCH_MASS_WEIGHT_UNIT,
+    massMicrograms: analysis.massWeightTotal,
+    massMilligrams: roundedSafeIntegerRatio(analysis.massWeightTotal, 1_000),
+    densityScore: analysis.attributes.density,
+    densityKgM3: analysis.usedVolumeMm3
       ? roundedSafeIntegerRatio(analysis.massWeightTotal, analysis.usedVolumeMm3)
       : 0,
+    densityKgM3Sources,
+    physicalDensityFallback: analysis.materials.some((material) => material.profile.physicalDensityFallback),
     attributes: analysis.attributes,
     dimensionsQ,
     dimensions: dimensionsQ.map((value) => value / 64),
     materials,
-    heat: heatWeight ? Math.floor((heatTotal + Math.floor(heatWeight / 2)) / heatWeight) : 0,
+    heat: heatWeight ? Number((heatTotal + heatWeight / 2n) / heatWeight) : 0,
     componentCount: analysis.components.length,
     componentVolumesMm3: analysis.componentVolumesMm3,
     componentBreakdown,
@@ -1317,7 +1341,7 @@ function forgePhysicalAdvisory(analysis) {
   const originInertiaMoment12 = [0n, 0n, 0n];
   for (let componentIndex = 0; componentIndex < analysis.components.length; componentIndex += 1) {
     const material = analysis.materials[componentIndex];
-    const cellWeight = BigInt(material.volumeMm3) * BigInt(material.profile.densityScore);
+    const cellWeight = BigInt(material.volumeMm3) * BigInt(material.profile.densityKgM3);
     const moments = forgeComponentMassMoments(analysis.components[componentIndex]);
     totalMomentWeight += cellWeight * BigInt(moments.solidCellCount);
     for (let axis = 0; axis < 3; axis += 1) {
@@ -1329,6 +1353,7 @@ function forgePhysicalAdvisory(analysis) {
     return {
       kind: "forge-physics-advisory-v1",
       advisoryOnly: true,
+      physicalDensityFallback: analysis.materials.some((material) => material.profile.physicalDensityFallback),
       centerOfMassQ: [0, 0, 0],
       inertiaQ2: [0, 0, 0],
       gripTorque: forgeGripTorqueAdvisory(analysis, [0, 0, 0]),
@@ -1356,6 +1381,7 @@ function forgePhysicalAdvisory(analysis) {
   return {
     kind: "forge-physics-advisory-v1",
     advisoryOnly: true,
+    physicalDensityFallback: analysis.materials.some((material) => material.profile.physicalDensityFallback),
     centerOfMassQ,
     inertiaQ2,
     gripTorque: forgeGripTorqueAdvisory(analysis, centerOfMassQ),
@@ -1412,7 +1438,7 @@ function forgeGripTorqueAdvisory(analysis, centerOfMassQ) {
   // Gravity is a workbench-local -Y advisory only. It intentionally does not
   // assume a real-world unit conversion for Q coordinates.
   const gravityLeverArmQ = roundedIntegerHypot(centerOffsetQ[0], centerOffsetQ[2]);
-  const massMilligrams = roundedSafeIntegerRatio(analysis.massWeightTotal, 10);
+  const massMilligrams = roundedSafeIntegerRatio(analysis.massWeightTotal, 1_000);
   const radialTorque = BigInt(massMilligrams) * BigInt(radialLeverArmQ);
   const gravityTorque = BigInt(massMilligrams) * BigInt(gravityLeverArmQ);
   const maxSafe = BigInt(Number.MAX_SAFE_INTEGER);
@@ -1487,7 +1513,7 @@ function analyzeForgeWorkbench(input, materialInputs, options) {
   const componentVolumesMm3 = new Array(components.length);
   const componentSolidCellCounts = new Array(components.length);
   const componentMassWeights = new Array(components.length);
-  const attributeTotals = new Array(FORGE_ATTRIBUTE_KEYS.length).fill(0);
+  const attributeTotals = new Array(FORGE_ATTRIBUTE_KEYS.length).fill(0n);
   let solidCellCount = 0;
   let inputVolumeMm3 = 0;
   let usedVolumeMm3 = 0;
@@ -1511,15 +1537,15 @@ function analyzeForgeWorkbench(input, materialInputs, options) {
     const componentVolumeMm3 = Math.floor(material.volumeMm3 * componentSolidCells / FORGE_WORKBENCH_SOLID_CELL_COUNT);
     componentVolumesMm3[index] = componentVolumeMm3;
     usedVolumeMm3 = checkedSafeAdd(usedVolumeMm3, componentVolumeMm3, "used forge material volume");
-    const massWeight = componentVolumeMm3 * material.profile.densityScore;
+    // With integer kg/m3 and mm3 inputs, this product is an exact microgram
+    // count. The public density ceiling keeps the 24-component total inside
+    // Number's safe-integer range; BigInt below preserves exact score weights.
+    const massWeight = componentVolumeMm3 * material.profile.densityKgM3;
     componentMassWeights[index] = massWeight;
     massWeightTotal = checkedSafeAdd(massWeightTotal, massWeight, "forge material mass weight");
     for (let attributeIndex = 0; attributeIndex < FORGE_ATTRIBUTE_KEYS.length; attributeIndex += 1) {
       const key = FORGE_ATTRIBUTE_KEYS[attributeIndex];
-      attributeTotals[attributeIndex] += material.profile.attributes[key] * massWeight;
-      if (!Number.isSafeInteger(attributeTotals[attributeIndex])) {
-        throw new Ncf1ValidationError("Forge attribute weighting exceeds the safe-integer range.", "integer-out-of-range");
-      }
+      attributeTotals[attributeIndex] += BigInt(material.profile.attributes[key]) * BigInt(massWeight);
     }
   }
 
@@ -1527,13 +1553,18 @@ function analyzeForgeWorkbench(input, materialInputs, options) {
   const attributes6 = new Uint8Array(FORGE_ATTRIBUTE_KEYS.length);
   for (let index = 0; index < FORGE_ATTRIBUTE_KEYS.length; index += 1) {
     const score = massWeightTotal
-      ? clampInteger(Math.floor((attributeTotals[index] + Math.floor(massWeightTotal / 2)) / massWeightTotal), 0, 100)
+      ? clampInteger(Number(
+        (attributeTotals[index] + BigInt(Math.floor(massWeightTotal / 2))) / BigInt(massWeightTotal)
+      ), 0, 100)
       : 0;
     attributes[FORGE_ATTRIBUTE_KEYS[index]] = score;
     attributes6[index] = Math.floor((score * 63 + 50) / 100);
   }
   const volumeCm3 = Math.min(0xffff, Math.floor(usedVolumeMm3 / 1_000));
-  let mass5g = Math.min(0xffff, Math.floor((massWeightTotal + 25_000) / 50_000));
+  // Five grams equal 5,000,000 micrograms. Round the physical mass to the
+  // existing u16 NCF1 field, retaining its required nonzero sentinel when an
+  // encodable nonempty volume would otherwise round to zero.
+  let mass5g = Math.min(0xffff, Math.floor((massWeightTotal + 2_500_000) / 5_000_000));
   if (volumeCm3 > 0 && mass5g === 0) mass5g = 1;
   const equipment = { mass5g, volumeCm3, attributes6 };
   if (equipment.volumeCm3 * 1_000 > inputVolumeMm3) {
@@ -1575,8 +1606,13 @@ function forgeComponentBreakdown(analysis) {
       totalCellCount: FORGE_WORKBENCH_SOLID_CELL_COUNT,
       solidFractionBps: Math.floor(solidCellCount * 10_000 / FORGE_WORKBENCH_SOLID_CELL_COUNT),
       densityScore: material.profile.densityScore,
+      densityKgM3: material.profile.densityKgM3,
+      densityKgM3Source: material.profile.densityKgM3Source,
+      physicalDensityFallback: material.profile.physicalDensityFallback,
       massWeight,
-      massMilligrams: roundedSafeIntegerRatio(massWeight, 10),
+      massWeightUnit: FORGE_WORKBENCH_MASS_WEIGHT_UNIT,
+      massMicrograms: massWeight,
+      massMilligrams: roundedSafeIntegerRatio(massWeight, 1_000),
       weightBps: safeIntegerRatioBps(massWeight, analysis.massWeightTotal),
       heat: material.profile.heat,
       attributes: copyForgeAttributeScores(material.profile.attributes),
@@ -1601,8 +1637,10 @@ function forgeMaterialBreakdown(componentBreakdown, massWeightTotal) {
         solidCellCount: 0,
         totalCellCount: 0,
         massWeight: 0,
-        heatTotal: 0,
-        attributeTotals: new Array(FORGE_ATTRIBUTE_KEYS.length).fill(0),
+        physicalDensityFallback: false,
+        densityKgM3Sources: [],
+        heatTotal: 0n,
+        attributeTotals: new Array(FORGE_ATTRIBUTE_KEYS.length).fill(0n),
       };
       groups.set(component.materialId, group);
     }
@@ -1616,52 +1654,61 @@ function forgeMaterialBreakdown(componentBreakdown, massWeightTotal) {
     group.solidCellCount += component.solidCellCount;
     group.totalCellCount += component.totalCellCount;
     group.massWeight = checkedSafeAdd(group.massWeight, component.massWeight, "material breakdown mass weight");
-    group.heatTotal += component.heat * component.massWeight;
-    if (!Number.isSafeInteger(group.heatTotal)) {
-      throw new Ncf1ValidationError("Forge heat weighting exceeds the safe-integer range.", "integer-out-of-range");
+    group.physicalDensityFallback ||= component.physicalDensityFallback;
+    if (!group.densityKgM3Sources.includes(component.densityKgM3Source)) {
+      group.densityKgM3Sources.push(component.densityKgM3Source);
     }
+    group.heatTotal += BigInt(component.heat) * BigInt(component.massWeight);
     for (let index = 0; index < FORGE_ATTRIBUTE_KEYS.length; index += 1) {
-      group.attributeTotals[index] += component.attributes[FORGE_ATTRIBUTE_KEYS[index]] * component.massWeight;
-      if (!Number.isSafeInteger(group.attributeTotals[index])) {
-        throw new Ncf1ValidationError("Forge attribute weighting exceeds the safe-integer range.", "integer-out-of-range");
-      }
+      group.attributeTotals[index] += BigInt(component.attributes[FORGE_ATTRIBUTE_KEYS[index]])
+        * BigInt(component.massWeight);
     }
   }
-  return [...groups.values()].map((group) => ({
-    inheritanceMode: FORGE_WORKBENCH_INHERITANCE_MODE,
-    materialId: group.materialId,
-    resourceId: group.resourceIds[0] ?? "tin",
-    resourceIds: group.resourceIds,
-    componentCount: group.componentIndices.length,
-    componentIndices: group.componentIndices,
-    sourceKeys: group.sourceKeys,
-    slotIndices: group.slotIndices,
-    inputVolumeMm3: group.inputVolumeMm3,
-    usedVolumeMm3: group.usedVolumeMm3,
-    unusedVolumeMm3: group.unusedVolumeMm3,
-    solidCellCount: group.solidCellCount,
-    totalCellCount: group.totalCellCount,
-    solidFractionBps: group.totalCellCount
-      ? Math.floor(group.solidCellCount * 10_000 / group.totalCellCount)
-      : 0,
-    densityScore: group.usedVolumeMm3
-      ? roundedSafeIntegerRatio(group.massWeight, group.usedVolumeMm3)
-      : 0,
-    massWeight: group.massWeight,
-    massMilligrams: roundedSafeIntegerRatio(group.massWeight, 10),
-    weightBps: safeIntegerRatioBps(group.massWeight, massWeightTotal),
-    heat: group.massWeight
-      ? roundedSafeIntegerRatio(group.heatTotal, group.massWeight)
-      : 0,
-    attributes: forgeInheritedAttributeScores(group.attributeTotals, group.massWeight),
-  }));
+  return [...groups.values()].map((group) => {
+    const attributes = forgeInheritedAttributeScores(group.attributeTotals, group.massWeight);
+    return {
+      inheritanceMode: FORGE_WORKBENCH_INHERITANCE_MODE,
+      materialId: group.materialId,
+      resourceId: group.resourceIds[0] ?? "tin",
+      resourceIds: group.resourceIds,
+      componentCount: group.componentIndices.length,
+      componentIndices: group.componentIndices,
+      sourceKeys: group.sourceKeys,
+      slotIndices: group.slotIndices,
+      inputVolumeMm3: group.inputVolumeMm3,
+      usedVolumeMm3: group.usedVolumeMm3,
+      unusedVolumeMm3: group.unusedVolumeMm3,
+      solidCellCount: group.solidCellCount,
+      totalCellCount: group.totalCellCount,
+      solidFractionBps: group.totalCellCount
+        ? Math.floor(group.solidCellCount * 10_000 / group.totalCellCount)
+        : 0,
+      densityScore: attributes.density,
+      densityKgM3: group.usedVolumeMm3
+        ? roundedSafeIntegerRatio(group.massWeight, group.usedVolumeMm3)
+        : 0,
+      densityKgM3Sources: group.densityKgM3Sources,
+      physicalDensityFallback: group.physicalDensityFallback,
+      massWeight: group.massWeight,
+      massWeightUnit: FORGE_WORKBENCH_MASS_WEIGHT_UNIT,
+      massMicrograms: group.massWeight,
+      massMilligrams: roundedSafeIntegerRatio(group.massWeight, 1_000),
+      weightBps: safeIntegerRatioBps(group.massWeight, massWeightTotal),
+      heat: group.massWeight
+        ? Number((group.heatTotal + BigInt(Math.floor(group.massWeight / 2))) / BigInt(group.massWeight))
+        : 0,
+      attributes,
+    };
+  });
 }
 
 function forgeInheritedAttributeScores(attributeTotals, massWeight) {
   const attributes = {};
   for (let index = 0; index < FORGE_ATTRIBUTE_KEYS.length; index += 1) {
     attributes[FORGE_ATTRIBUTE_KEYS[index]] = massWeight
-      ? clampInteger(roundedSafeIntegerRatio(attributeTotals[index], massWeight), 0, 100)
+      ? clampInteger(Number(
+        (attributeTotals[index] + BigInt(Math.floor(massWeight / 2))) / BigInt(massWeight)
+      ), 0, 100)
       : 0;
   }
   return attributes;
@@ -1716,13 +1763,14 @@ function unpackWorkbench(input, materialInputs = null) {
   };
 }
 
-function materialArchetype(id, color444, dimsQ, heat, attributes) {
+function materialArchetype(id, color444, dimsQ, heat, densityKgM3, attributes) {
   return Object.freeze({
     id,
     resourceId: id,
     color444,
     dimsQ: Object.freeze(dimsQ),
     heat,
+    densityKgM3,
     attributes: Object.freeze(attributes),
   });
 }
@@ -1770,12 +1818,75 @@ function directMaterialValue(input, key) {
   );
 }
 
-function densityScoreFromPhysicalInput(input) {
-  const densityGcm3 = Number(directMaterialValue(input, "densityGcm3"));
-  if (Number.isFinite(densityGcm3) && densityGcm3 > 0) return Math.round(densityGcm3 * 10);
-  const densityKgM3 = Number(directMaterialValue(input, "densityKgM3"));
-  if (Number.isFinite(densityKgM3) && densityKgM3 > 0) return Math.round(densityKgM3 / 100);
-  return undefined;
+function resolveForgePhysicalDensity(input, archetype) {
+  for (const source of physicalMaterialSources(input)) {
+    const rawDensityKgM3 = firstDefined(source?.densityKgM3, source?.physical?.densityKgM3);
+    if (rawDensityKgM3 != null) {
+      return {
+        densityKgM3: normalizeForgePhysicalDensity(rawDensityKgM3),
+        source: normalizePhysicalDensitySource(input, "material-input"),
+      };
+    }
+    const rawDensityGcm3 = firstDefined(source?.densityGcm3, source?.physical?.densityGcm3);
+    if (rawDensityGcm3 != null) {
+      const densityGcm3 = forgePhysicalDensityNumber(rawDensityGcm3, "densityGcm3");
+      return {
+        densityKgM3: normalizeForgePhysicalDensity(densityGcm3 * 1_000),
+        source: normalizePhysicalDensitySource(input, "material-input"),
+      };
+    }
+  }
+  return {
+    densityKgM3: archetype.densityKgM3,
+    source: "archetype-fallback",
+  };
+}
+
+function physicalMaterialSources(input) {
+  return [
+    input,
+    input?.materialProperties,
+    input?.properties,
+    input?.transactionInput?.materialProperties,
+    input?.transactionInput,
+    input?.slot?.materialProperties,
+    input?.slot,
+    input?.material?.materialProperties,
+    input?.material,
+    input?.slot?.material,
+  ].filter((source) => source && typeof source === "object");
+}
+
+function normalizePhysicalDensitySource(input, fallback) {
+  return directMaterialValue(input, "densityKgM3Source") === "archetype-fallback"
+    || directMaterialValue(input, "physicalDensityFallback") === true
+    ? "archetype-fallback"
+    : fallback;
+}
+
+function normalizeForgePhysicalDensity(input) {
+  const densityKgM3 = forgePhysicalDensityNumber(input, "densityKgM3");
+  const rounded = Math.round(densityKgM3);
+  if (rounded < FORGE_MATERIAL_DENSITY_LIMITS.minKgM3
+    || rounded > FORGE_MATERIAL_DENSITY_LIMITS.maxKgM3) {
+    throw new Ncf1ValidationError(
+      `Forge material densityKgM3 must round to ${FORGE_MATERIAL_DENSITY_LIMITS.minKgM3}-${FORGE_MATERIAL_DENSITY_LIMITS.maxKgM3}.`,
+      "invalid-material-density",
+    );
+  }
+  return rounded;
+}
+
+function forgePhysicalDensityNumber(input, label) {
+  if ((typeof input !== "number" && typeof input !== "string")
+    || (typeof input === "string" && !input.trim())) {
+    throw new Ncf1ValidationError(`Forge material ${label} must be a positive finite number.`, "invalid-material-density");
+  }
+  const numeric = Number(input);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    throw new Ncf1ValidationError(`Forge material ${label} must be a positive finite number.`, "invalid-material-density");
+  }
+  return numeric;
 }
 
 function deriveForgeMaterialHeat(input, attributes, archetype) {

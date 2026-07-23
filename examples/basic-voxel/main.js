@@ -1,10 +1,15 @@
-import { createChunkEngine } from "../../src/index.js";
+import { createChunkEngine } from "../../engine/create-chunk-engine.js";
 
 const canvas = document.querySelector("#engineCanvas");
 const engine = await createChunkEngine({
-  backend: "webgl2",
   canvas,
   onStats: (stats) => console.debug("chunk.js stats", stats),
 });
 
-if (engine.supported) engine.start();
+addEventListener("pagehide", () => engine.destroy(), { once: true });
+
+if (engine.supported) {
+  engine.start();
+} else {
+  console.error(engine.support.label || engine.support.reason || "WebGL2 is unavailable.");
+}

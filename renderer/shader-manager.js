@@ -261,30 +261,43 @@ void main() {
 `;
 
 export function createProgram(gl, vertexSource, fragmentSource) {
-  const vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
-  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
-  const program = gl.createProgram();
-  gl.attachShader(program, vertex);
-  gl.attachShader(program, fragment);
-  gl.linkProgram(program);
-  gl.deleteShader(vertex);
-  gl.deleteShader(fragment);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const log = gl.getProgramInfoLog(program) || "Unknown WebGL2 program link error.";
-    gl.deleteProgram(program);
-    throw new Error(log);
+  let vertex = null;
+  let fragment = null;
+  let program = null;
+  let linked = false;
+  try {
+    vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
+    fragment = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
+    program = gl.createProgram();
+    if (!program) throw new Error("WebGL2 program allocation failed.");
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(program) || "Unknown WebGL2 program link error.");
+    }
+    linked = true;
+    return program;
+  } finally {
+    if (vertex) gl.deleteShader(vertex);
+    if (fragment) gl.deleteShader(fragment);
+    if (program && !linked) gl.deleteProgram(program);
   }
-  return program;
 }
 
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    const log = gl.getShaderInfoLog(shader) || "Unknown WebGL2 shader compile error.";
-    gl.deleteShader(shader);
-    throw new Error(log);
+  if (!shader) throw new Error("WebGL2 shader allocation failed.");
+  let compiled = false;
+  try {
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      throw new Error(gl.getShaderInfoLog(shader) || "Unknown WebGL2 shader compile error.");
+    }
+    compiled = true;
+    return shader;
+  } finally {
+    if (!compiled) gl.deleteShader(shader);
   }
-  return shader;
 }

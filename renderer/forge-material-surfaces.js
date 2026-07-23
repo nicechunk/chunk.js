@@ -212,17 +212,26 @@ export function createForgeMaterialTextureArray(gl, options = {}) {
   const materials = forgeMaterialTextureMaterials(active.recipes);
   const manager = new TextureArrayManager(gl, {
     tileSize,
-    seed: options.seed ?? "",
+    ...(options.seed == null ? {} : { seed: options.seed }),
     materials,
   });
-  manager.createTextureArray(active.recipes.map((recipe) => (
-    bakeForgeMaterialSurfaceTile(recipe, {
-      tileSize,
-      seed: options.seed,
-      ruleSet: catalogRuleSet(options.catalog, options.ruleSet),
-    })
-  )));
-  return textureArrayResult(active, tileSize, manager);
+  try {
+    manager.createTextureArray(active.recipes.map((recipe) => (
+      bakeForgeMaterialSurfaceTile(recipe, {
+        tileSize,
+        seed: options.seed,
+        ruleSet: catalogRuleSet(options.catalog, options.ruleSet),
+      })
+    )));
+    return textureArrayResult(active, tileSize, manager);
+  } catch (error) {
+    try {
+      manager.dispose();
+    } catch {
+      // Preserve the texture creation error after best-effort rollback.
+    }
+    throw error;
+  }
 }
 
 export function renderForgeMaterialSurfaceCanvas(canvas, materialOrId, options = {}) {

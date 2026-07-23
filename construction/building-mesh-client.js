@@ -3,6 +3,17 @@ import {
   parseNcm3Building,
 } from "./building-parser.js";
 import { createBuildingChunkMeshes } from "./building-mesher.js";
+import {
+  createBuildingMeshResult,
+  validateBuildingMeshResult,
+} from "./building-mesh-result.js";
+import {
+  NCM3_MAX_PAYLOAD_BYTES,
+  NCM3_PREFIX,
+} from "../ncm/blueprint-codec.js";
+
+const MAX_BUILDING_REQUEST_CODE_LENGTH = NCM3_PREFIX.length + Math.ceil(NCM3_MAX_PAYLOAD_BYTES * 4 / 3);
+const MAX_BUILDING_REQUEST_LABEL_LENGTH = 1_024;
 
 export function createBuildingMeshWorkerClient({
   useWorker = true,
@@ -35,6 +46,7 @@ export function createBuildingMeshWorkerClient({
         priority: finiteNumber(priority),
         scope: String(scope || ""),
         input,
+        request: null,
         signal,
         resolve,
         reject,
@@ -65,12 +77,20 @@ export function createBuildingMeshWorkerClient({
       return;
     }
     activeJob = job;
+    try {
+      job.request = snapshotRequest(job.input, job.requestId);
+    } catch (error) {
+      activeJob = null;
+      settleJob(job, "reject", error);
+      queueMicrotask(pump);
+      return;
+    }
     const activeWorker = ensureWorker();
     if (activeWorker) {
       try {
-        activeWorker.postMessage({ ...job.input, requestId: job.requestId });
+        activeWorker.postMessage(job.request);
       } catch (error) {
-        handleWorkerFailure(error);
+        handleWorkerFailure(activeWorker, error);
       }
       return;
     }
@@ -79,46 +99,88 @@ export function createBuildingMeshWorkerClient({
 
   function ensureWorker() {
     if (worker || workerUnavailable || disposed) return worker;
+    let candidate = null;
     try {
-      worker = workerFactory
+      candidate = workerFactory
         ? workerFactory()
         : new Worker(new URL("./building-mesh-worker.js", import.meta.url), { type: "module" });
-      worker.onmessage = handleMessage;
-      worker.onerror = handleWorkerFailure;
-      worker.onmessageerror = handleWorkerFailure;
-      return worker;
+      worker = candidate;
+      candidate.onmessage = (event) => handleMessage(candidate, event);
+      candidate.onerror = (event) => handleWorkerFailure(candidate, event);
+      candidate.onmessageerror = (event) => handleWorkerFailure(candidate, event);
+      return candidate;
     } catch {
+      if (candidate) terminateWorker(candidate);
       workerUnavailable = true;
       worker = null;
       return null;
     }
   }
 
-  function handleMessage(event) {
-    const response = event.data ?? {};
+  function handleMessage(source, event) {
+    if (source !== worker) return;
+    const response = event?.data;
     const job = activeJob;
-    if (!job || Number(response.requestId) !== job.requestId) return;
+    if (!job) {
+      handleWorkerFailure(source, clientError(
+        "building-mesh-worker-protocol",
+        "Building mesh worker responded without an active request.",
+      ));
+      return;
+    }
+    if (!response || typeof response !== "object" || Array.isArray(response) || response.requestId !== job.requestId) {
+      handleWorkerFailure(source, clientError(
+        "building-mesh-worker-protocol",
+        `Building mesh worker response does not match active request ${job.requestId}.`,
+      ));
+      return;
+    }
+    if (typeof response.ok !== "boolean") {
+      handleWorkerFailure(source, clientError(
+        "building-mesh-worker-protocol",
+        `Building mesh worker response for request ${job.requestId} has no result status.`,
+      ));
+      return;
+    }
+    let outcome;
+    try {
+      outcome = response.ok
+        ? validateBuildingMeshResult(response.result, { request: job.request })
+        : workerError(response.error);
+    } catch (error) {
+      handleWorkerFailure(source, response.ok
+        ? clientError(
+          "building-mesh-worker-protocol",
+          String(error?.message || "Building mesh worker returned an invalid result."),
+        )
+        : error);
+      return;
+    }
     activeJob = null;
-    if (response.ok) settleJob(job, "resolve", response.result);
-    else settleJob(job, "reject", workerError(response.error));
+    if (response.ok) settleJob(job, "resolve", outcome);
+    else settleJob(job, "reject", outcome);
     pump();
   }
 
-  function handleWorkerFailure(event) {
+  function handleWorkerFailure(source, event) {
+    if (source !== worker) return;
     const job = activeJob;
     activeJob = null;
-    terminateWorker();
+    terminateWorker(source);
     workerUnavailable = true;
     if (job) {
       const message = String(event?.message || event || "Building mesh worker failed.");
-      settleJob(job, "reject", clientError("building-mesh-worker-failed", message));
+      const code = event?.code === "building-mesh-worker-protocol"
+        ? event.code
+        : "building-mesh-worker-failed";
+      settleJob(job, "reject", clientError(code, message));
     }
     pump();
   }
 
   async function runOnMainThread(job) {
     try {
-      const result = await buildOnMainThread(job.input, job.signal);
+      const result = await buildOnMainThread(job.request, job.signal);
       if (job !== activeJob || job.settled) return;
       activeJob = null;
       settleJob(job, "resolve", result);
@@ -152,7 +214,7 @@ export function createBuildingMeshWorkerClient({
     if (queuedIndex >= 0) queue.splice(queuedIndex, 1);
     if (activeJob === job) {
       activeJob = null;
-      if (worker) terminateWorker();
+      if (worker) terminateWorker(worker);
     }
     settleJob(job, "reject", error);
     pump();
@@ -176,13 +238,13 @@ export function createBuildingMeshWorkerClient({
     });
   }
 
-  function terminateWorker() {
-    if (!worker) return;
-    worker.onmessage = null;
-    worker.onerror = null;
-    worker.onmessageerror = null;
-    worker.terminate?.();
-    worker = null;
+  function terminateWorker(target = worker) {
+    if (!target) return;
+    target.onmessage = null;
+    target.onerror = null;
+    target.onmessageerror = null;
+    target.terminate?.();
+    if (worker === target) worker = null;
   }
 
   function dispose() {
@@ -192,7 +254,7 @@ export function createBuildingMeshWorkerClient({
     if (activeJob) settleJob(activeJob, "reject", error);
     activeJob = null;
     for (const job of queue.splice(0)) settleJob(job, "reject", error);
-    terminateWorker();
+    terminateWorker(worker);
     workerUnavailable = true;
   }
 }
@@ -214,7 +276,55 @@ async function buildOnMainThread(input, signal) {
     revision: input.revision,
   });
   if (signal?.aborted) throw abortError();
-  return { building, placement, chunks };
+  return validateBuildingMeshResult(
+    createBuildingMeshResult(building, placement, chunks),
+    { request: input },
+  );
+}
+
+function snapshotRequest(input, requestId) {
+  const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const code = String(source.code ?? "").trim();
+  if (code.length > MAX_BUILDING_REQUEST_CODE_LENGTH) {
+    throw clientError("building-mesh-input-invalid", "Building code exceeds the NCM3 input limit.");
+  }
+  const foundation = snapshotFoundation(source.foundation);
+  return {
+    requestId,
+    code,
+    buildingId: requestLabel(source.buildingId, "buildingId", true),
+    foundation,
+    quarterTurns: source.quarterTurns,
+    placementId: requestLabel(source.placementId, "placementId", true),
+    allowFoundationOverflow: source.allowFoundationOverflow === true,
+    offsetX: source.offsetX,
+    offsetZ: source.offsetZ,
+    chunkSize: source.chunkSize,
+    revision: source.revision,
+  };
+}
+
+function snapshotFoundation(input) {
+  const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  return {
+    id: requestLabel(source.id || `${source.owner || "foundation"}:${source.foundationId ?? 0}`, "foundation id"),
+    minX: source.minX ?? source.worldX ?? source.x,
+    minZ: source.minZ ?? source.worldZ ?? source.z,
+    surfaceY: source.surfaceY ?? source.y,
+    width: source.width,
+    depth: source.depth,
+  };
+}
+
+function requestLabel(value, label, optional = false) {
+  const text = value ? String(value) : "";
+  if ((!optional && !text) || text.length > MAX_BUILDING_REQUEST_LABEL_LENGTH) {
+    throw clientError(
+      "building-mesh-input-invalid",
+      `Building ${label} must be ${optional ? "an optional" : "a non-empty"} string of at most ${MAX_BUILDING_REQUEST_LABEL_LENGTH} characters.`,
+    );
+  }
+  return text;
 }
 
 function compareJobs(left, right) {
@@ -239,8 +349,10 @@ function clientError(code, message) {
 }
 
 function workerError(input = {}) {
+  const details = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const fallbackMessage = typeof input === "string" && input ? input : "Building mesh failed.";
   return clientError(
-    String(input.code || "building-mesh-failed"),
-    String(input.message || "Building mesh failed."),
+    String(details.code || "building-mesh-failed"),
+    String(details.message || fallbackMessage),
   );
 }

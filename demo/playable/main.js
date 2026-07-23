@@ -182,7 +182,7 @@ async function boot() {
   bindPositionPersistence();
   savePlayerPosition(performance.now(), { force: true });
   fps.reset(performance.now());
-  elements.status.textContent = `Running seed ${PLAYABLE_WORLD_SEED}. Canonical terrain + baked TextureArray + visual water/cloud/trees + low-cost 3D grass/flower detail layer. View distance ${viewDistance}, mesh budget ${meshBudgetMs}ms, workers ${chunks.workerCount}.`;
+  elements.status.textContent = `Running seed ${PLAYABLE_WORLD_SEED}. Canonical terrain + baked TextureArray + visual water/cloud/trees. Non-tree surface decorations remain disabled until rules are supplied. View distance ${viewDistance}, mesh budget ${meshBudgetMs}ms, workers ${chunks.workerCount}.`;
   requestAnimationFrame(frame);
 }
 

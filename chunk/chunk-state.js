@@ -1,8 +1,17 @@
 import { REVEAL_STATE, DEFAULT_CHUNK_HEIGHT, DEFAULT_CHUNK_SIZE, DEFAULT_MIN_WORLD_Y } from "../core/constants.js";
 import { chunkId, containsLocal, localIndex } from "../core/coordinates.js";
+import { normalizeSeedBytes } from "../core/hash.js";
 import { BLOCK_ID } from "../world/block-registry.js";
-import { DEFAULT_GENERATION_VERSION, DEFAULT_RESOURCE_RULE_VERSION } from "../world/world-generator.js";
-import { deltaKey, normalizeDelta } from "./chunk-delta.js";
+import {
+  assertSupportedGenerationVersion,
+  assertSupportedResourceRuleVersion,
+  DEFAULT_GENERATION_VERSION,
+  DEFAULT_RESOURCE_RULE_VERSION,
+  normalizeWorldGeneratorDimensions,
+} from "../world/world-generator.js";
+import { DELTA_RESOURCE_LIMITS, deltaKey, normalizeDelta } from "./chunk-delta.js";
+
+const chunkStateWorldSeeds = new WeakMap();
 
 export const CHUNK_BOUNDARY_MASK = Object.freeze({
   NEGATIVE_X: 1,
@@ -18,6 +27,7 @@ export class ChunkState {
     chunkSize = DEFAULT_CHUNK_SIZE,
     height = DEFAULT_CHUNK_HEIGHT,
     minY = DEFAULT_MIN_WORLD_Y,
+    maxBuildY = undefined,
     generationVersion = DEFAULT_GENERATION_VERSION,
     resourceRuleVersion = DEFAULT_RESOURCE_RULE_VERSION,
     materialVersion = 1,
@@ -29,16 +39,31 @@ export class ChunkState {
     treeInstances = [],
     baseBlocksReady = baseBlocks !== null || baseProfile !== null,
   } = {}) {
+    const dimensions = normalizeWorldGeneratorDimensions({
+      chunkSize,
+      height,
+      minY,
+      maxBuildY: maxBuildY ?? baseProfile?.maxBuildY,
+    });
     this.id = chunkId(chunkX, chunkZ);
     this.chunkX = Math.trunc(chunkX);
     this.chunkZ = Math.trunc(chunkZ);
-    this.chunkSize = Math.trunc(chunkSize);
-    this.height = Math.trunc(height);
-    this.minY = Math.trunc(minY);
-    this.generationVersion = generationVersion;
-    this.resourceRuleVersion = resourceRuleVersion;
+    this.chunkSize = dimensions.chunkSize;
+    this.height = dimensions.height;
+    this.minY = dimensions.minY;
+    this.maxBuildY = dimensions.maxBuildY;
+    this.generationVersion = assertSupportedGenerationVersion(generationVersion);
+    this.resourceRuleVersion = assertSupportedResourceRuleVersion(resourceRuleVersion);
     this.materialVersion = materialVersion;
-    this.worldSeed = worldSeed;
+    setChunkStateWorldSeed(this, worldSeed);
+    Object.defineProperty(this, "worldSeed", {
+      enumerable: true,
+      get: () => {
+        const seed = chunkStateWorldSeeds.get(this);
+        return seed ? new Uint8Array(seed) : null;
+      },
+      set: (value) => setChunkStateWorldSeed(this, value),
+    });
     this.surfaceDecorationRules = surfaceDecorationRules;
     this.version = 0;
     // World edits can advance while the previous mesh is still on the GPU.
@@ -72,10 +97,14 @@ export class ChunkState {
 
   getBaseBlock(localX, localY, localZ) {
     if (!containsLocal(localX, localY, localZ, this)) return BLOCK_ID.air;
+    const y = Math.trunc(localY);
+    const profileMaxBuildY = Number.isInteger(this.baseProfile?.maxBuildY)
+      ? this.baseProfile.maxBuildY
+      : this.maxBuildY;
+    if (y > Math.min(this.maxBuildY, profileMaxBuildY)) return BLOCK_ID.air;
     if (this.baseBlocks) return this.baseBlocks[localIndex(localX, localY, localZ, this)] ?? BLOCK_ID.air;
     if (this.baseProfile) {
       const x = Math.trunc(localX);
-      const y = Math.trunc(localY);
       const z = Math.trunc(localZ);
       const column = x + z * this.chunkSize;
       const surfaceY = this.baseProfile.surfaceY?.[column];
@@ -132,43 +161,72 @@ export class ChunkState {
   }
 
   applyChainDelta(deltas = [], { protectUntilSnapshot = true } = {}) {
+    const normalizedDeltas = normalizeDeltaBatch(deltas, this);
+    assertProjectedResidentDeltaCapacity(this, normalizedDeltas, "chainDeltas");
+    const nextChainDeltas = new Map(this.chainDeltas);
+    const nextUnobservedChainDeltaKeys = new Set(this.unobservedChainDeltaKeys);
     let meshChanged = false;
     let deltaChanged = false;
     let boundaryMask = 0;
     let accepted = 0;
-    for (const raw of deltas) {
-      const delta = normalizeDelta(raw, this.chunkSize);
+    for (const normalized of normalizedDeltas) {
+      const delta = { ...normalized, source: "chain" };
       if (delta.chunkX !== this.chunkX || delta.chunkZ !== this.chunkZ) continue;
       const key = deltaKey(delta.localX, delta.localY, delta.localZ, this.chunkSize);
-      const previous = this.chainDeltas.get(key);
-      const before = meshChanged ? null : this.getFinalBlock(delta.localX, delta.localY, delta.localZ);
-      delta.source = "chain";
-      this.chainDeltas.set(key, delta);
-      if (protectUntilSnapshot) this.unobservedChainDeltaKeys.add(key);
-      else this.unobservedChainDeltaKeys.delete(key);
-      if (!meshChanged) meshChanged = before !== this.getFinalBlock(delta.localX, delta.localY, delta.localZ);
+      const previous = nextChainDeltas.get(key);
+      const before = meshChanged
+        ? null
+        : finalBlockFromMaps(this, delta, nextChainDeltas, this.pendingDeltas);
+      nextChainDeltas.set(key, delta);
+      if (protectUntilSnapshot) nextUnobservedChainDeltaKeys.add(key);
+      else nextUnobservedChainDeltaKeys.delete(key);
+      if (!meshChanged) {
+        meshChanged = before !== finalBlockFromMaps(this, delta, nextChainDeltas, this.pendingDeltas);
+      }
       if (previous?.blockId !== delta.blockId) {
         deltaChanged = true;
         boundaryMask |= boundaryMaskForDelta(delta, this.chunkSize);
       }
       accepted += 1;
     }
-    if (accepted) {
-      this.finalDeltaMapCache = null;
-      this.chainRevision += 1;
-      this.chainSnapshotToken = 0;
+    assertResidentDeltaCapacity(nextChainDeltas, this.pendingDeltas, this.id);
+    if (!accepted) {
+      return {
+        applied: false,
+        accepted: 0,
+        changed: false,
+        boundaryMask: 0,
+        chainRevision: this.chainRevision,
+      };
     }
+    this.chainDeltas = nextChainDeltas;
+    this.unobservedChainDeltaKeys = nextUnobservedChainDeltaKeys;
+    this.finalDeltaMapCache = null;
+    this.chainRevision += 1;
+    this.chainSnapshotToken = 0;
     if (meshChanged || deltaChanged) this.markDirty(REVEAL_STATE.MODIFIED);
     else this.revealState = REVEAL_STATE.MODIFIED;
     return { applied: accepted > 0, accepted, changed: meshChanged || deltaChanged, boundaryMask, chainRevision: this.chainRevision };
   }
 
   replaceChainDeltas(deltas = [], { expectedChainRevision = null, snapshotToken = 0, snapshotSlot = 0 } = {}) {
-    const expected = Number(expectedChainRevision);
-    if (Number.isFinite(expected) && Math.trunc(expected) !== this.chainRevision) {
+    const expected = expectedChainRevision === null
+      ? null
+      : nonNegativeSafeInteger(expectedChainRevision, "Expected chain revision");
+    const nextSnapshotToken = nonNegativeSafeInteger(snapshotToken, "Snapshot token");
+    const incomingSlot = nonNegativeSafeInteger(snapshotSlot, "Snapshot slot");
+    const normalizedDeltas = normalizeDeltaBatch(deltas ?? [], this);
+    for (const delta of normalizedDeltas) {
+      if (delta.chunkX !== this.chunkX || delta.chunkZ !== this.chunkZ) {
+        throw new RangeError(
+          `Chain snapshot delta belongs to chunk ${delta.chunkX},${delta.chunkZ}; expected ${this.id}.`,
+        );
+      }
+    }
+
+    if (expected !== null && expected !== this.chainRevision) {
       return { applied: false, reason: "stale-chain-revision", changed: false, chainRevision: this.chainRevision };
     }
-    const incomingSlot = Math.max(0, Math.trunc(Number(snapshotSlot) || 0));
     if (this.chainSnapshotSlot > 0 && incomingSlot < this.chainSnapshotSlot) {
       return {
         applied: false,
@@ -180,28 +238,28 @@ export class ChunkState {
     }
 
     const next = new Map();
-    for (const raw of deltas ?? []) {
-      const delta = normalizeDelta(raw, this.chunkSize);
-      if (delta.chunkX !== this.chunkX || delta.chunkZ !== this.chunkZ) continue;
-      delta.source = "chain";
+    for (const normalized of normalizedDeltas) {
+      const delta = { ...normalized, source: "chain" };
       next.set(deltaKey(delta.localX, delta.localY, delta.localZ, this.chunkSize), delta);
     }
 
     // A confirmed transaction can be newer than a lagging RPC node. Keep its
     // delta until a full account snapshot has observed the same value once.
-    for (const key of this.unobservedChainDeltaKeys) {
+    const nextUnobservedChainDeltaKeys = new Set(this.unobservedChainDeltaKeys);
+    for (const key of nextUnobservedChainDeltaKeys) {
       const protectedDelta = this.chainDeltas.get(key);
       if (!protectedDelta) {
-        this.unobservedChainDeltaKeys.delete(key);
+        nextUnobservedChainDeltaKeys.delete(key);
         continue;
       }
       const observed = next.get(key);
       if (observed?.blockId === protectedDelta.blockId) {
-        this.unobservedChainDeltaKeys.delete(key);
+        nextUnobservedChainDeltaKeys.delete(key);
       } else {
         next.set(key, protectedDelta);
       }
     }
+    assertResidentDeltaCapacity(next, this.pendingDeltas, this.id);
 
     let meshChanged = false;
     let deltaChanged = false;
@@ -229,9 +287,10 @@ export class ChunkState {
     }
 
     this.chainDeltas = next;
+    this.unobservedChainDeltaKeys = nextUnobservedChainDeltaKeys;
     this.finalDeltaMapCache = null;
     this.chainRevision += 1;
-    this.chainSnapshotToken = Math.max(0, Math.trunc(Number(snapshotToken) || 0));
+    this.chainSnapshotToken = nextSnapshotToken;
     this.chainSnapshotSlot = Math.max(this.chainSnapshotSlot, incomingSlot);
     if (meshChanged || deltaChanged) this.markDirty(REVEAL_STATE.MODIFIED);
     else this.revealState = next.size ? REVEAL_STATE.CONFIRMED : (this.pendingDeltas.size ? REVEAL_STATE.DIRTY : REVEAL_STATE.REVEALED);
@@ -249,8 +308,8 @@ export class ChunkState {
   }
 
   acknowledgeChainSnapshot({ snapshotToken = 0, snapshotSlot = 0 } = {}) {
-    const token = Math.max(0, Math.trunc(Number(snapshotToken) || 0));
-    const slot = Math.max(0, Math.trunc(Number(snapshotSlot) || 0));
+    const token = nonNegativeSafeInteger(snapshotToken, "Snapshot token");
+    const slot = nonNegativeSafeInteger(snapshotSlot, "Snapshot slot");
     if (!token || token !== this.chainSnapshotToken || slot < this.chainSnapshotSlot) return false;
     this.chainSnapshotSlot = Math.max(this.chainSnapshotSlot, slot);
     return true;
@@ -291,28 +350,37 @@ export class ChunkState {
   }
 
   applyPendingDelta(deltas = [], txId) {
+    const normalizedDeltas = normalizeDeltaBatch(deltas, this);
+    assertProjectedResidentDeltaCapacity(this, normalizedDeltas, "pendingDeltas");
+    const nextPendingDeltas = new Map(this.pendingDeltas);
     let meshChanged = false;
     let deltaChanged = false;
     let boundaryMask = 0;
     let accepted = 0;
-    for (const raw of deltas) {
-      const delta = normalizeDelta(raw, this.chunkSize);
-      delta.txId = txId;
+    for (const normalized of normalizedDeltas) {
+      const delta = { ...normalized, source: "pending", txId };
       if (delta.chunkX !== this.chunkX || delta.chunkZ !== this.chunkZ) continue;
       const key = deltaKey(delta.localX, delta.localY, delta.localZ, this.chunkSize);
-      const previous = this.pendingDeltas.get(key) ?? this.chainDeltas.get(key);
-      const before = this.getFinalBlock(delta.localX, delta.localY, delta.localZ);
-      this.pendingDeltas.set(key, { ...delta, source: "pending", txId });
-      meshChanged ||= before !== this.getFinalBlock(delta.localX, delta.localY, delta.localZ);
+      const previous = nextPendingDeltas.get(key) ?? this.chainDeltas.get(key);
+      const before = meshChanged
+        ? null
+        : finalBlockFromMaps(this, delta, this.chainDeltas, nextPendingDeltas);
+      nextPendingDeltas.set(key, delta);
+      if (!meshChanged) {
+        meshChanged = before !== finalBlockFromMaps(this, delta, this.chainDeltas, nextPendingDeltas);
+      }
       if (previous?.blockId !== delta.blockId) {
         deltaChanged = true;
         boundaryMask |= boundaryMaskForDelta(delta, this.chunkSize);
       }
       accepted += 1;
     }
+    assertResidentDeltaCapacity(this.chainDeltas, nextPendingDeltas, this.id);
+    if (!accepted) return { applied: false, accepted: 0, changed: false, boundaryMask: 0 };
+    this.pendingDeltas = nextPendingDeltas;
+    this.finalDeltaMapCache = null;
     if (meshChanged || deltaChanged) this.markDirty(REVEAL_STATE.DIRTY);
     else this.revealState = REVEAL_STATE.DIRTY;
-    if (accepted) this.finalDeltaMapCache = null;
     return { applied: accepted > 0, accepted, changed: meshChanged || deltaChanged, boundaryMask };
   }
 
@@ -450,6 +518,79 @@ function normalizedMeshVersion(value, fallback) {
   return Number.isFinite(revision) ? Math.trunc(revision) : Math.trunc(Number(fallback) || 0);
 }
 
+function normalizeDeltaBatch(deltas, chunk) {
+  const source = deltas ?? [];
+  if (Array.isArray(source) && source.length > DELTA_RESOURCE_LIMITS.maxBatchEntries) {
+    throw deltaBatchEntryLimitError();
+  }
+  const normalized = [];
+  for (const delta of source) {
+    if (normalized.length >= DELTA_RESOURCE_LIMITS.maxBatchEntries) throw deltaBatchEntryLimitError();
+    const entry = normalizeDelta(delta, chunk.chunkSize);
+    if (entry.worldY < chunk.minY || entry.worldY > chunk.maxBuildY) {
+      throw new RangeError(
+        `Delta world Y must be an integer from the configured build minimum ${chunk.minY} to maximum ${chunk.maxBuildY}.`,
+      );
+    }
+    normalized.push(entry);
+  }
+  return normalized;
+}
+
+function assertResidentDeltaCapacity(chainDeltas, pendingDeltas, id) {
+  if (chainDeltas.size + pendingDeltas.size <= DELTA_RESOURCE_LIMITS.maxResidentEntriesPerChunk) return;
+  throw new RangeError(
+    `Chunk ${id} exceeds the ${DELTA_RESOURCE_LIMITS.maxResidentEntriesPerChunk}-entry resident delta safety limit.`,
+  );
+}
+
+function assertProjectedResidentDeltaCapacity(chunk, normalizedDeltas, targetMapName) {
+  const target = chunk[targetMapName];
+  const other = targetMapName === "chainDeltas" ? chunk.pendingDeltas : chunk.chainDeltas;
+  let projectedTargetSize = target.size;
+  if (projectedTargetSize + other.size > DELTA_RESOURCE_LIMITS.maxResidentEntriesPerChunk) {
+    assertResidentDeltaCapacity(
+      targetMapName === "chainDeltas" ? target : other,
+      targetMapName === "pendingDeltas" ? target : other,
+      chunk.id,
+    );
+  }
+  const addedKeys = new Set();
+  for (const delta of normalizedDeltas) {
+    if (delta.chunkX !== chunk.chunkX || delta.chunkZ !== chunk.chunkZ) continue;
+    const key = deltaKey(delta.localX, delta.localY, delta.localZ, chunk.chunkSize);
+    if (target.has(key) || addedKeys.has(key)) continue;
+    addedKeys.add(key);
+    projectedTargetSize += 1;
+    if (projectedTargetSize + other.size > DELTA_RESOURCE_LIMITS.maxResidentEntriesPerChunk) {
+      throw new RangeError(
+        `Chunk ${chunk.id} exceeds the ${DELTA_RESOURCE_LIMITS.maxResidentEntriesPerChunk}-entry resident delta safety limit.`,
+      );
+    }
+  }
+}
+
+function deltaBatchEntryLimitError() {
+  return new RangeError(
+    `Delta batch exceeds the ${DELTA_RESOURCE_LIMITS.maxBatchEntries}-entry safety limit.`,
+  );
+}
+
+function finalBlockFromMaps(chunk, delta, chainDeltas, pendingDeltas) {
+  if (!containsLocal(delta.localX, delta.localY, delta.localZ, chunk)) return BLOCK_ID.air;
+  const key = deltaKey(delta.localX, delta.localY, delta.localZ, chunk.chunkSize);
+  return pendingDeltas.get(key)?.blockId
+    ?? chainDeltas.get(key)?.blockId
+    ?? chunk.getBaseBlock(delta.localX, delta.localY, delta.localZ);
+}
+
+function nonNegativeSafeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${label} must be a non-negative safe integer.`);
+  }
+  return value === 0 ? 0 : value;
+}
+
 function boundaryMaskForDelta(delta, chunkSize) {
   let mask = 0;
   // Tree canopies extend two blocks beyond their root chunk. Dirtifying this
@@ -461,4 +602,8 @@ function boundaryMaskForDelta(delta, chunkSize) {
   if (delta.localZ < visualMargin) mask |= CHUNK_BOUNDARY_MASK.NEGATIVE_Z;
   if (delta.localZ >= chunkSize - visualMargin) mask |= CHUNK_BOUNDARY_MASK.POSITIVE_Z;
   return mask;
+}
+
+function setChunkStateWorldSeed(chunk, value) {
+  chunkStateWorldSeeds.set(chunk, value == null ? null : normalizeSeedBytes(value));
 }

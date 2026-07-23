@@ -154,6 +154,37 @@ test("building collision masks follow material physics across rotated negative c
   }
 });
 
+test("building collision partitioning is exact at safe-integer endpoints for every supported chunk size", () => {
+  const building = parseNcm3Building(encodeNcm3(
+    createBlueprint({ x: 1, y: 1, z: 1 }, "safe-integer-endpoint")
+      .box(64, 0, 0, 0, 1, 1, 1),
+  ), { id: "safe-integer-endpoint" });
+
+  for (const endpoint of [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]) {
+    for (let chunkSize = 1; chunkSize <= 16; chunkSize += 1) {
+      const placement = createBuildingPlacement(building, {
+        id: `endpoint-${endpoint}-${chunkSize}`,
+        minX: endpoint,
+        minZ: endpoint,
+        surfaceY: 0,
+        width: 1,
+        depth: 1,
+      });
+      const [chunk] = createBuildingChunkMeshes(placement, { chunkSize });
+      const expected = exactChunkLocal(endpoint, chunkSize);
+
+      assert.equal(chunk.chunkX, expected.chunk);
+      assert.equal(chunk.chunkZ, expected.chunk);
+      assert.equal(chunk.collisionBlockCount, 1);
+      assert.equal(buildingChunkHasCollisionAt(chunk, endpoint, 0, endpoint), true);
+      assert.equal(buildingChunkCollisionTopAt(chunk, endpoint, endpoint), 1);
+
+      const adjacent = endpoint === Number.MIN_SAFE_INTEGER ? endpoint + 1 : endpoint - 1;
+      assert.equal(buildingChunkHasCollisionAt(chunk, adjacent, 0, endpoint), false);
+    }
+  }
+});
+
 function meshDigest(chunks) {
   const hash = createHash("sha256");
   for (const chunk of chunks) {
@@ -175,6 +206,17 @@ function meshDigest(chunks) {
     }
   }
   return hash.digest("hex");
+}
+
+function exactChunkLocal(world, chunkSize) {
+  const divisor = BigInt(chunkSize);
+  let chunk = BigInt(world) / divisor;
+  let local = BigInt(world) % divisor;
+  if (local < 0n) {
+    chunk -= 1n;
+    local += divisor;
+  }
+  return { chunk: Number(chunk), local: Number(local) };
 }
 
 function targetFaceLight(obstacleMaterial) {

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Request a private security contact
+    url: https://github.com/nicechunk/chunk.js/issues/new?template=security_contact.yml
+    about: Request a private reporting route without including vulnerability details.
+  - name: Support guide
+    url: https://github.com/nicechunk/chunk.js/blob/main/SUPPORT.md
+    about: Review setup requirements, support boundaries, and the information needed for troubleshooting.

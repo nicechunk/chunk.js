@@ -2,16 +2,73 @@
   "name": "@nicechunk/chunk-js",
   "version": "0.0.1",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Standalone WebGL2-first voxel renderer foundation for NiceChunk.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicechunk/chunk.js.git"
+  },
+  "homepage": "https://github.com/nicechunk/chunk.js#readme",
+  "bugs": {
+    "url": "https://github.com/nicechunk/chunk.js/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "voxel",
+    "webgl2",
+    "renderer",
+    "game-engine"
+  ],
+  "files": [
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "chunk/**/*.js",
+    "construction/**/*.js",
+    "core/**/*.js",
+    "debug/block-inspector.js",
+    "debug/render-log.js",
+    "debug/stats.js",
+    "debug/webgl2-info.js",
+    "docs/**/*.md",
+    "engine/**/*.js",
+    "forge/**/*.js",
+    "index.js",
+    "input/**/*.js",
+    "ncm/**/*.js",
+    "physics/**/*.js",
+    "play.js",
+    "renderer/**/*.js",
+    "src/**/*.js",
+    "world/**/*.js"
+  ],
   "exports": {
     ".": "./src/index.js",
     "./src": "./src/index.js",
-    "./engine": "./engine/index.js"
+    "./engine": "./engine/index.js",
+    "./engine/create": "./engine/create-chunk-engine.js",
+    "./play": "./play.js",
+    "./world": "./src/world.js",
+    "./renderer": "./src/renderer.js",
+    "./capabilities": "./src/capabilities.js",
+    "./math": "./src/math.js",
+    "./ncm/blueprint": "./ncm/blueprint-codec.js",
+    "./ncm/character": "./ncm/character-codec.js"
   },
   "scripts": {
-    "check": "npm run check:policy && node tools/check.mjs && npm test",
+    "check": "npm run check:policy && node tools/check.mjs && npm run check:package && npm test",
+    "check:package": "node tools/check-package.mjs",
     "check:policy": "node tools/repository-policy.mjs",
-    "test": "node tests/forge-spatial.test.mjs && node tests/smoke.test.mjs && node tests/voxel-fracture.test.mjs && node tests/forge-runtime-cache.test.mjs && node tests/forge-cloth.test.mjs && node tests/forge-dyes.test.mjs && node tests/ncm-blueprint.test.mjs && node tests/ncm-character.test.mjs && node tests/ncm4-avatar-renderer.test.mjs && node tests/building-parser.test.mjs"
+    "test": "node tools/run-tests.mjs",
+    "test:integration": "node tools/run-tests.mjs --integration",
+    "test:all": "node tools/run-tests.mjs --all",
+    "benchmark:building": "node --expose-gc benchmarks/building-mesher.mjs 1"
   }
 }

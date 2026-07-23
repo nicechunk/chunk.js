@@ -1,3 +1,5 @@
+import { createProgram as createShaderProgram } from "./shader-manager.js";
+
 const DEFAULT_MAX_PIXEL_RATIO = 1.25;
 
 const VERTEX_SOURCE = `#version 300 es
@@ -128,13 +130,15 @@ export function createSmeltingCoreRenderer(containerOrCanvas, options = {}) {
   const target = containerOrCanvas;
   if (!target || typeof document === "undefined") return null;
 
-  const canvas = target instanceof HTMLCanvasElement
+  const canvasTarget = target instanceof HTMLCanvasElement;
+  const existingCanvas = canvasTarget
     ? target
-    : target.querySelector?.("canvas[data-nicechunk-smelting-core]") || document.createElement("canvas");
-  if (!(target instanceof HTMLCanvasElement)) {
+    : target.querySelector?.("canvas[data-nicechunk-smelting-core]");
+  const ownsCanvas = !canvasTarget && !existingCanvas;
+  const canvas = existingCanvas || document.createElement("canvas");
+  if (!canvasTarget) {
     canvas.className = options.className || "smelting-core-canvas";
     canvas.dataset.nicechunkSmeltingCore = "true";
-    if (canvas.parentNode !== target) target.prepend(canvas);
   }
 
   const gl = canvas.getContext("webgl2", {
@@ -151,37 +155,47 @@ export function createSmeltingCoreRenderer(containerOrCanvas, options = {}) {
   const program = createProgram(gl, VERTEX_SOURCE, FRAGMENT_SOURCE);
   if (!program) return null;
 
-  const buffer = gl.createBuffer();
-  const vao = gl.createVertexArray();
-  const positionLocation = gl.getAttribLocation(program, "aPosition");
-  gl.bindVertexArray(vao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(positionLocation);
-  gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
-  gl.bindVertexArray(null);
-  gl.bindBuffer(gl.ARRAY_BUFFER, null);
-
-  const uniforms = {
-    resolution: gl.getUniformLocation(program, "uResolution"),
-    time: gl.getUniformLocation(program, "uTime"),
-    intensity: gl.getUniformLocation(program, "uIntensity"),
-    heatTier: gl.getUniformLocation(program, "uHeatTier"),
-    progress: gl.getUniformLocation(program, "uProgress"),
-    running: gl.getUniformLocation(program, "uRunning"),
-  };
-
   const state = {
     disposed: false,
     maxPixelRatio: finiteNumber(options.maxPixelRatio, DEFAULT_MAX_PIXEL_RATIO),
     lastWidth: 0,
     lastHeight: 0,
   };
+  let buffer = null;
+  let vao = null;
+  let uniforms = null;
+  try {
+    buffer = gl.createBuffer();
+    if (!buffer) throw new Error("Smelting core vertex buffer allocation failed.");
+    vao = gl.createVertexArray();
+    if (!vao) throw new Error("Smelting core vertex array allocation failed.");
+    const positionLocation = gl.getAttribLocation(program, "aPosition");
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(positionLocation);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
-  gl.disable(gl.DEPTH_TEST);
-  gl.disable(gl.CULL_FACE);
-  gl.enable(gl.BLEND);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    uniforms = {
+      resolution: gl.getUniformLocation(program, "uResolution"),
+      time: gl.getUniformLocation(program, "uTime"),
+      intensity: gl.getUniformLocation(program, "uIntensity"),
+      heatTier: gl.getUniformLocation(program, "uHeatTier"),
+      progress: gl.getUniformLocation(program, "uProgress"),
+      running: gl.getUniformLocation(program, "uRunning"),
+    };
+
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    if (ownsCanvas) target.prepend(canvas);
+  } catch (error) {
+    releaseResources();
+    throw error;
+  }
 
   return {
     canvas,
@@ -215,14 +229,26 @@ export function createSmeltingCoreRenderer(containerOrCanvas, options = {}) {
     dispose() {
       if (state.disposed) return;
       state.disposed = true;
-      gl.bindVertexArray(null);
-      gl.bindBuffer(gl.ARRAY_BUFFER, null);
-      gl.deleteBuffer(buffer);
-      gl.deleteVertexArray(vao);
-      gl.deleteProgram(program);
-      if (!(target instanceof HTMLCanvasElement) && canvas.parentNode === target) canvas.remove();
+      releaseResources();
     },
   };
+
+  function releaseResources() {
+    try { gl.bindVertexArray(null); } catch { /* Continue releasing resources. */ }
+    try { gl.bindBuffer(gl.ARRAY_BUFFER, null); } catch { /* Continue releasing resources. */ }
+    try { if (buffer) gl.deleteBuffer(buffer); } catch { /* Continue releasing resources. */ }
+    try { if (vao) gl.deleteVertexArray(vao); } catch { /* Continue releasing resources. */ }
+    try { gl.deleteProgram(program); } catch { /* Best-effort cleanup. */ }
+    buffer = null;
+    vao = null;
+    if (ownsCanvas && canvas.parentNode === target) {
+      try {
+        canvas.remove?.();
+      } catch {
+        // DOM cleanup is best effort during rollback and disposal.
+      }
+    }
+  }
 }
 
 function resizeCanvas(canvas, gl, state) {
@@ -242,33 +268,12 @@ function resizeCanvas(canvas, gl, state) {
 }
 
 function createProgram(gl, vertexSource, fragmentSource) {
-  const vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
-  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
-  if (!vertex || !fragment) return null;
-  const program = gl.createProgram();
-  gl.attachShader(program, vertex);
-  gl.attachShader(program, fragment);
-  gl.linkProgram(program);
-  gl.deleteShader(vertex);
-  gl.deleteShader(fragment);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    console.warn("NiceChunk smelting core shader link failed:", gl.getProgramInfoLog(program));
-    gl.deleteProgram(program);
+  try {
+    return createShaderProgram(gl, vertexSource, fragmentSource);
+  } catch (error) {
+    console.warn("NiceChunk smelting core shader setup failed:", error?.message || error);
     return null;
   }
-  return program;
-}
-
-function compileShader(gl, type, source) {
-  const shader = gl.createShader(type);
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    console.warn("NiceChunk smelting core shader compile failed:", gl.getShaderInfoLog(shader));
-    gl.deleteShader(shader);
-    return null;
-  }
-  return shader;
 }
 
 function finiteNumber(value, fallback) {

@@ -148,13 +148,13 @@ export function encodeNcm4(model) {
   }
 
   const body = Uint8Array.from(bytes);
+  if (body.length + 4 > NCM4_MAX_PAYLOAD_BYTES) {
+    throw new Error(`NCM4 payload is ${body.length + 4} bytes; the on-chain limit is ${NCM4_MAX_PAYLOAD_BYTES} bytes.`);
+  }
   const checksum = ncm4Crc32c(body);
   const raw = new Uint8Array(body.length + 4);
   raw.set(body);
   new DataView(raw.buffer).setUint32(body.length, checksum, true);
-  if (raw.length > NCM4_MAX_PAYLOAD_BYTES) {
-    throw new Error(`NCM4 payload is ${raw.length} bytes; the on-chain limit is ${NCM4_MAX_PAYLOAD_BYTES} bytes.`);
-  }
   return `${NCM4_PREFIX}${base64UrlEncode(raw)}`;
 }
 
@@ -342,7 +342,16 @@ export function ncm4PayloadByteLength(code) {
 
 /** Castagnoli CRC-32 used by the NCM4 envelope. */
 export function ncm4Crc32c(input) {
-  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input ?? 0);
+  let byteLength;
+  if (input instanceof ArrayBuffer) byteLength = input.byteLength;
+  else if (ArrayBuffer.isView(input)) byteLength = input.byteLength;
+  else throw new TypeError("NCM4 CRC32C input must be an ArrayBuffer or ArrayBufferView.");
+  if (byteLength > NCM4_MAX_PAYLOAD_BYTES) {
+    throw new RangeError(`NCM4 CRC32C input exceeds ${NCM4_MAX_PAYLOAD_BYTES} bytes.`);
+  }
+  const bytes = input instanceof ArrayBuffer
+    ? new Uint8Array(input)
+    : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
   let crc = 0xffffffff;
   for (const byte of bytes) crc = CRC32C_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
   return (crc ^ 0xffffffff) >>> 0;
@@ -583,6 +592,9 @@ function readEnvelope(code) {
   const text = String(code ?? "");
   if (!text.startsWith(NCM4_PREFIX)) throw new Error("Expected a canonical NCM4 payload.");
   const encoded = text.slice(NCM4_PREFIX.length);
+  if (encoded.length > Math.ceil(NCM4_MAX_PAYLOAD_BYTES * 4 / 3)) {
+    throw new Error("NCM4 payload exceeds the on-chain safety limit.");
+  }
   if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded) || encoded.length % 4 === 1) {
     throw new Error("Invalid canonical NCM4 Base64URL payload.");
   }

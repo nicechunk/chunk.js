@@ -53,6 +53,30 @@ const shiftedOverflow = createBuildingPlacement(parsed, {
 assert.equal(shiftedOverflow.fitsFoundation, false);
 assert.deepEqual(shiftedOverflow.origin, { x: 105, y: 30, z: 200 });
 assert.throws(
+  () => createBuildingPlacement(parsed, {
+    id: "foundation:unsafe-offset",
+    minX: Number.MAX_SAFE_INTEGER - 2,
+    minZ: 0,
+    surfaceY: 0,
+    width: 3,
+    depth: 4,
+  }, { offsetX: 1, allowFoundationOverflow: true }),
+  (error) => error?.code === "unsafe-coordinate",
+  "placement offsets must not move a building beyond safe world coordinates",
+);
+assert.throws(
+  () => createBuildingPlacement(parsed, {
+    id: "foundation:unsafe-height",
+    minX: 0,
+    minZ: 0,
+    surfaceY: Number.MAX_SAFE_INTEGER,
+    width: 3,
+    depth: 4,
+  }),
+  (error) => error?.code === "unsafe-coordinate",
+  "a building's vertical range must remain within safe world coordinates",
+);
+assert.throws(
   () => createBuildingPlacement(parsed, { minX: 0, minZ: 0, surfaceY: 1, width: 3, depth: 3 }, { quarterTurns: 1 }),
   (error) => error?.code === "building-does-not-fit",
   "an undersized foundation must reject the building instead of scaling it",

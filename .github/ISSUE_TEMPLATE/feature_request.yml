@@ -1,0 +1,79 @@
+name: Feature request
+description: Propose a focused capability or API improvement for Chunk.js.
+title: "[Feature]: "
+labels:
+  - enhancement
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user or integration need before proposing an implementation. Chunk.js is NiceChunk-specific, native ESM, and WebGL2-first; it is not currently published to npm.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Who needs this, what are they trying to do, and why do current APIs or behavior not meet the need?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - World or chunk generation
+        - Chunk state or chain snapshots
+        - Meshing or rendering
+        - Worker protocol
+        - NCM or NCF codec
+        - Forge or construction
+        - Physics, collision, or input
+        - Package exports or documentation
+        - Tests or tooling
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe observable behavior, API shape, and acceptance criteria. Avoid prescribing internals unless they are part of the requirement.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain current workarounds and important alternatives or tradeoffs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and integration impact
+      description: Note effects on deterministic output, binary formats, saved data, workers, WebGL2/browser requirements, performance, and NiceChunk host integrations.
+
+  - type: textarea
+    id: provenance
+    attributes:
+      label: External material and provenance
+      description: Identify any third-party code, models, data, fixtures, standards, or cross-repository files the proposal would require, together with their licenses and authorization status.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing issues and documentation for this request.
+          required: true
+        - label: I have not assumed that NiceChunk marks or external/host assets are MIT-licensed.
+          required: true
+        - label: Any proposed shared-file sync with an Apache-licensed repository will receive explicit authorization and license review before implementation.
+          required: true
+        - label: I agree to follow the Code of Conduct.
+          required: true

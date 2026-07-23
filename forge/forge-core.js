@@ -306,7 +306,6 @@ export function encodeNcf1(input) {
 export function decodeNcf1(input, { requireCanonical = false } = {}) {
   const bytes = forgeCodeToBytes(input);
   if (!bytes.length) throw new Ncf1ValidationError("Forge code is empty.", "empty-code");
-  if (bytes.length > NCF1_MAX_RAW_BYTES) throw new Ncf1ValidationError("Forge code exceeds the supported size.", "code-too-large");
   const reader = new BitReader(bytes);
   const version = reader.read(4, "version");
   if (version !== NCF1_VERSION) throw new Ncf1ValidationError(`Unsupported forge code version: ${version}`, "unsupported-version");
@@ -326,12 +325,10 @@ export function decodeNcf1(input, { requireCanonical = false } = {}) {
 // Matches the on-chain verifier: parse only version + the 104-bit equipment
 // header. Geometry is intentionally neither decoded nor trusted here.
 export function decodeNcf1EquipmentHeader(input, { maxBytes = NCF1_CHAIN_MAX_RAW_BYTES } = {}) {
-  const bytes = forgeInputToRawBytes(input);
+  const byteLimit = normalizeNcf1ByteLimit(maxBytes);
+  const bytes = forgeInputToRawBytes(input, byteLimit);
   if (bytes.length < Math.ceil(NCF1_EQUIPMENT_HEADER_BITS / 8)) {
     throw new Ncf1ValidationError("Forge code is truncated before the equipment header ends.", "truncated-code");
-  }
-  if (bytes.length > maxBytes) {
-    throw new Ncf1ValidationError(`Forge code is ${bytes.length} bytes; the chain limit is ${maxBytes}.`, "code-too-large");
   }
   const reader = new BitReader(bytes);
   const version = reader.read(4, "version");
@@ -352,8 +349,8 @@ export function decodeNcf1EquipmentHeader(input, { maxBytes = NCF1_CHAIN_MAX_RAW
 
 export function validateNcf1(input, options = {}) {
   try {
-    const design = decodeNcf1(input, options);
     const bytes = forgeCodeToBytes(input);
+    const design = decodeNcf1(bytes, options);
     return { ok: true, design, bytes, code: forgeBytesToCode(bytes) };
   } catch (error) {
     return {
@@ -365,19 +362,53 @@ export function validateNcf1(input, options = {}) {
   }
 }
 
-export function forgeCodeToBytes(input) {
-  if (input instanceof Uint8Array) return new Uint8Array(input);
-  if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength).slice();
-  if (input instanceof ArrayBuffer) return new Uint8Array(input.slice(0));
-  if (Array.isArray(input)) return Uint8Array.from(input);
-  if (input?.bytes != null) return forgeCodeToBytes(input.bytes);
-  if (typeof input?.code === "string") return forgeCodeToBytes(input.code);
-  const text = String(input ?? "").trim();
+export function forgeCodeToBytes(input, { maxBytes = NCF1_MAX_RAW_BYTES } = {}) {
+  return forgeCodeToBytesWithinLimit(input, normalizeNcf1ByteLimit(maxBytes), new Set());
+}
+
+function forgeCodeToBytesWithinLimit(input, maxBytes, seen = new Set()) {
+  if (input instanceof Uint8Array) {
+    assertNcf1InputByteLength(input.byteLength, maxBytes);
+    return new Uint8Array(input);
+  }
+  if (ArrayBuffer.isView(input)) {
+    assertNcf1InputByteLength(input.byteLength, maxBytes);
+    return new Uint8Array(input.buffer, input.byteOffset, input.byteLength).slice();
+  }
+  if (input instanceof ArrayBuffer) {
+    assertNcf1InputByteLength(input.byteLength, maxBytes);
+    return new Uint8Array(input.slice(0));
+  }
+  if (Array.isArray(input)) {
+    const length = input.length;
+    assertNcf1InputByteLength(length, maxBytes);
+    const bytes = new Uint8Array(length);
+    for (let index = 0; index < length; index += 1) {
+      bytes[index] = integerInRange(input[index], 0, 255, "forge code byte");
+    }
+    return bytes;
+  }
+  if (input && typeof input === "object") {
+    if (seen.has(input)) throw new Ncf1ValidationError("Forge code wrapper contains a cycle.", "invalid-code-input");
+    seen.add(input);
+    const wrappedBytes = input.bytes;
+    if (wrappedBytes != null) return forgeCodeToBytesWithinLimit(wrappedBytes, maxBytes, seen);
+    const wrappedCode = input.code;
+    if (typeof wrappedCode === "string") return forgeCodeToBytesWithinLimit(wrappedCode, maxBytes, seen);
+  }
+  if (typeof input !== "string") {
+    throw new Ncf1ValidationError("Forge code input must be a string, byte array, BufferSource, or code wrapper.", "invalid-code-input");
+  }
+  const text = input.trim();
   const encoded = text.startsWith(NCF1_PREFIX) ? text.slice(NCF1_PREFIX.length) : text;
+  if (encoded.length > maxNcf1Base64UrlLength(maxBytes)) {
+    throw new Ncf1ValidationError("Forge code exceeds the supported size.", "code-too-large");
+  }
   if (!encoded || !/^[A-Za-z0-9_-]+$/u.test(encoded)) {
     throw new Ncf1ValidationError("Forge code must be unpadded base64url.", "invalid-base64url");
   }
   const bytes = base64UrlToBytes(encoded);
+  assertNcf1InputByteLength(bytes.byteLength, maxBytes);
   if (bytesToBase64Url(bytes) !== encoded) {
     throw new Ncf1ValidationError("Forge code must use canonical unpadded base64url.", "invalid-base64url");
   }
@@ -385,7 +416,7 @@ export function forgeCodeToBytes(input) {
 }
 
 export function forgeBytesToCode(input) {
-  const bytes = forgeCodeToByteArray(input);
+  const bytes = forgeCodeToBytes(input);
   return `${NCF1_PREFIX}${bytesToBase64Url(bytes)}`;
 }
 
@@ -1935,8 +1966,12 @@ function normalizeForgeMaterialRequirementsVector(input) {
   return result;
 }
 
-function forgeInputToRawBytes(input) {
-  return isForgeDesignObject(input) ? encodeNcf1Bytes(input) : forgeCodeToBytes(input);
+function forgeInputToRawBytes(input, maxBytes = NCF1_MAX_RAW_BYTES) {
+  const byteLimit = normalizeNcf1ByteLimit(maxBytes);
+  if (!isForgeDesignObject(input)) return forgeCodeToBytesWithinLimit(input, byteLimit);
+  const bytes = encodeNcf1Bytes(input);
+  assertNcf1InputByteLength(bytes.byteLength, byteLimit);
+  return bytes;
 }
 
 function validateForgeRequirementHeader(header) {
@@ -1952,6 +1987,20 @@ function forgeCodeToByteArray(input) {
   if (input instanceof ArrayBuffer) return new Uint8Array(input);
   if (Array.isArray(input)) return Uint8Array.from(input);
   return forgeCodeToBytes(input);
+}
+
+function normalizeNcf1ByteLimit(value) {
+  return integerInRange(value, 1, NCF1_MAX_RAW_BYTES, "forge code byte limit");
+}
+
+function maxNcf1Base64UrlLength(maxBytes) {
+  return Math.ceil(maxBytes * 4 / 3);
+}
+
+function assertNcf1InputByteLength(byteLength, maxBytes) {
+  if (byteLength > maxBytes) {
+    throw new Ncf1ValidationError(`Forge code is ${byteLength} bytes; the limit is ${maxBytes}.`, "code-too-large");
+  }
 }
 
 function bytesToBase64Url(bytes) {

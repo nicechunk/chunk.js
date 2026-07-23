@@ -72,11 +72,20 @@ export function createBuildingPlacement(buildingInput, foundationInput, {
   const footprint = buildingFootprint(building.size, quarterTurns);
   const normalizedOffsetX = requireInteger(offsetX, "building X offset");
   const normalizedOffsetZ = requireInteger(offsetZ, "building Z offset");
-  const originX = foundation.minX + Math.floor((foundation.width - footprint.width) / 2) + normalizedOffsetX;
+  const originX = checkedSafeCoordinateSum([
+    foundation.minX,
+    Math.floor((foundation.width - footprint.width) / 2),
+    normalizedOffsetX,
+  ], "building origin X");
   const originY = foundation.surfaceY;
-  const originZ = foundation.minZ + Math.floor((foundation.depth - footprint.depth) / 2) + normalizedOffsetZ;
-  const maxX = originX + footprint.width - 1;
-  const maxZ = originZ + footprint.depth - 1;
+  const originZ = checkedSafeCoordinateSum([
+    foundation.minZ,
+    Math.floor((foundation.depth - footprint.depth) / 2),
+    normalizedOffsetZ,
+  ], "building origin Z");
+  const maxX = checkedSafeWorldEnd(originX, footprint.width, "building X range");
+  const maxY = checkedSafeWorldEnd(originY, footprint.height, "building Y range");
+  const maxZ = checkedSafeWorldEnd(originZ, footprint.depth, "building Z range");
   const fitsFoundation = footprint.width <= foundation.width
     && footprint.depth <= foundation.depth
     && originX >= foundation.minX
@@ -127,7 +136,7 @@ export function createBuildingPlacement(buildingInput, foundationInput, {
       minY: originY,
       minZ: originZ,
       maxX,
-      maxY: originY + footprint.height - 1,
+      maxY,
       maxZ,
       width: footprint.width,
       height: footprint.height,
@@ -178,8 +187,8 @@ function normalizeFoundation(input = {}) {
   const surfaceY = requireInteger(input.surfaceY ?? input.y, "foundation surfaceY");
   const width = requirePositiveInteger(input.width, "foundation width");
   const depth = requirePositiveInteger(input.depth, "foundation depth");
-  assertSafeWorldEnd(minX, width, "foundation X range");
-  assertSafeWorldEnd(minZ, depth, "foundation Z range");
+  const maxX = checkedSafeWorldEnd(minX, width, "foundation X range");
+  const maxZ = checkedSafeWorldEnd(minZ, depth, "foundation Z range");
   return Object.freeze({
     ...input,
     id: String(input.id || `${input.owner || "foundation"}:${input.foundationId ?? 0}`),
@@ -188,8 +197,8 @@ function normalizeFoundation(input = {}) {
     surfaceY,
     width,
     depth,
-    maxX: minX + width - 1,
-    maxZ: minZ + depth - 1,
+    maxX,
+    maxZ,
   });
 }
 
@@ -244,9 +253,16 @@ function stableCodeId(code) {
   return hash.toString(16).padStart(8, "0");
 }
 
-function assertSafeWorldEnd(start, length, label) {
-  const end = start + length - 1;
-  if (!Number.isSafeInteger(end)) throw placementError("unsafe-coordinate", `${label} exceeds safe integer coordinates.`);
+function checkedSafeWorldEnd(start, length, label) {
+  return checkedSafeCoordinateSum([start, length, -1], label);
+}
+
+function checkedSafeCoordinateSum(values, label) {
+  const sum = values.reduce((total, value) => total + BigInt(value), 0n);
+  if (sum < BigInt(Number.MIN_SAFE_INTEGER) || sum > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw placementError("unsafe-coordinate", `${label} exceeds safe integer coordinates.`);
+  }
+  return Number(sum);
 }
 
 function requirePositiveInteger(value, label) {

@@ -31,18 +31,28 @@ export function createBuildingChunkMeshes(placement, { chunkSize = 16, revision 
   const chunks = new Map();
   const voxelLookup = createPlacementVoxelLookup(placement);
   visitPlacementVoxels(placement, (x, y, z, material) => {
-    voxelLookup.set(x, y, z, material);
-    const chunkX = Math.floor(x / size);
-    const chunkZ = Math.floor(z / size);
+    const coordinateX = decomposeBuildingCoordinate(x, size, "building voxel X");
+    const coordinateZ = decomposeBuildingCoordinate(z, size, "building voxel Z");
+    const worldY = safeIntegerCoordinate(y, "building voxel Y");
+    voxelLookup.set(coordinateX.world, worldY, coordinateZ.world, material);
+    const chunkX = coordinateX.chunk;
+    const chunkZ = coordinateZ.chunk;
     const id = `${chunkX},${chunkZ}`;
     let chunk = chunks.get(id);
     if (!chunk) {
-      chunk = { chunkX, chunkZ, minY: y, maxY: y, voxels: [] };
+      chunk = { chunkX, chunkZ, minY: worldY, maxY: worldY, voxels: [] };
       chunks.set(id, chunk);
     }
-    chunk.minY = Math.min(chunk.minY, y);
-    chunk.maxY = Math.max(chunk.maxY, y);
-    chunk.voxels.push(x, y, z, material);
+    chunk.minY = Math.min(chunk.minY, worldY);
+    chunk.maxY = Math.max(chunk.maxY, worldY);
+    chunk.voxels.push(
+      coordinateX.world,
+      worldY,
+      coordinateZ.world,
+      material,
+      coordinateX.local,
+      coordinateZ.local,
+    );
   });
   const lightSampler = createBuildingLightSampler(placement, voxelLookup);
 
@@ -55,14 +65,12 @@ export function createBuildingChunkMeshes(placement, { chunkSize = 16, revision 
 function createBuildingChunkState(placement, chunk, chunkSize, version, voxelLookup, lightSampler) {
   const opaqueGroups = new Map();
   const visualGroups = new Map();
-  const chunkWorldX = chunk.chunkX * chunkSize;
-  const chunkWorldZ = chunk.chunkZ * chunkSize;
   const collisionHeight = chunk.maxY - chunk.minY + 1;
   const collisionMask = new Uint32Array(Math.ceil((chunkSize * chunkSize * collisionHeight) / 32));
   let opaqueBlockCount = 0;
   let visualBlockCount = 0;
   let collisionBlockCount = 0;
-  for (let offset = 0; offset < chunk.voxels.length; offset += 4) {
+  for (let offset = 0; offset < chunk.voxels.length; offset += 6) {
     const x = chunk.voxels[offset];
     const y = chunk.voxels[offset + 1];
     const z = chunk.voxels[offset + 2];
@@ -70,8 +78,8 @@ function createBuildingChunkState(placement, chunk, chunkSize, version, voxelLoo
     const groups = renderMaterial.visual ? visualGroups : opaqueGroups;
     if (renderMaterial.visual) visualBlockCount += 1;
     else opaqueBlockCount += 1;
-    const localX = x - chunkWorldX;
-    const localZ = z - chunkWorldZ;
+    const localX = chunk.voxels[offset + 4];
+    const localZ = chunk.voxels[offset + 5];
     if (renderMaterial.colliding) {
       const bitIndex = collisionBitIndex(localX, y - chunk.minY, localZ, chunkSize);
       const bit = 1 << (bitIndex & 31);
@@ -106,6 +114,8 @@ function createBuildingChunkState(placement, chunk, chunkSize, version, voxelLoo
     chunkSize,
     minY: chunk.minY,
     height: collisionHeight,
+    voxelCount: chunk.voxels.length / 6,
+    visualBlockCount,
     collisionMask,
     collisionBlockCount,
     mesh,
@@ -447,13 +457,16 @@ export function buildingChunkHasCollisionAt(chunk, worldX, worldY, worldZ) {
   const x = Math.floor(Number(worldX));
   const y = Math.floor(Number(worldY));
   const z = Math.floor(Number(worldZ));
-  if (!(mask instanceof Uint32Array) || !Number.isInteger(size) || size <= 0
-    || !Number.isInteger(minY) || !Number.isInteger(height) || height <= 0
-    || !Number.isInteger(chunkX) || !Number.isInteger(chunkZ)
+  if (!(mask instanceof Uint32Array) || !Number.isSafeInteger(size) || size <= 0 || size > 16
+    || !Number.isSafeInteger(minY) || !Number.isSafeInteger(height) || height <= 0
+    || !Number.isSafeInteger(chunkX) || !Number.isSafeInteger(chunkZ)
     || !Number.isSafeInteger(x) || !Number.isSafeInteger(y) || !Number.isSafeInteger(z)) return false;
-  const localX = x - chunkX * size;
+  const coordinateX = decomposeBuildingCoordinate(x, size, "collision world X");
+  const coordinateZ = decomposeBuildingCoordinate(z, size, "collision world Z");
+  if (coordinateX.chunk !== chunkX || coordinateZ.chunk !== chunkZ) return false;
+  const localX = coordinateX.local;
   const localY = y - minY;
-  const localZ = z - chunkZ * size;
+  const localZ = coordinateZ.local;
   if (localX < 0 || localX >= size || localY < 0 || localY >= height || localZ < 0 || localZ >= size) return false;
   const bitIndex = collisionBitIndex(localX, localY, localZ, size);
   return Boolean(mask[bitIndex >>> 5] & (1 << (bitIndex & 31)));
@@ -468,12 +481,15 @@ export function buildingChunkCollisionTopAt(chunk, worldX, worldZ, maxBlockY = I
   const chunkZ = Math.trunc(Number(chunk?.chunkZ));
   const x = Math.floor(Number(worldX));
   const z = Math.floor(Number(worldZ));
-  if (!(mask instanceof Uint32Array) || !Number.isInteger(size) || size <= 0
-    || !Number.isInteger(minY) || !Number.isInteger(height) || height <= 0
-    || !Number.isInteger(chunkX) || !Number.isInteger(chunkZ)
+  if (!(mask instanceof Uint32Array) || !Number.isSafeInteger(size) || size <= 0 || size > 16
+    || !Number.isSafeInteger(minY) || !Number.isSafeInteger(height) || height <= 0
+    || !Number.isSafeInteger(chunkX) || !Number.isSafeInteger(chunkZ)
     || !Number.isSafeInteger(x) || !Number.isSafeInteger(z)) return -Infinity;
-  const localX = x - chunkX * size;
-  const localZ = z - chunkZ * size;
+  const coordinateX = decomposeBuildingCoordinate(x, size, "collision world X");
+  const coordinateZ = decomposeBuildingCoordinate(z, size, "collision world Z");
+  if (coordinateX.chunk !== chunkX || coordinateZ.chunk !== chunkZ) return -Infinity;
+  const localX = coordinateX.local;
+  const localZ = coordinateZ.local;
   if (localX < 0 || localX >= size || localZ < 0 || localZ >= size) return -Infinity;
   const cap = Number.isFinite(maxBlockY) ? Math.floor(maxBlockY) : minY + height - 1;
   const maxLocalY = Math.min(height - 1, cap - minY);
@@ -486,6 +502,28 @@ export function buildingChunkCollisionTopAt(chunk, worldX, worldZ, maxBlockY = I
 
 function collisionBitIndex(localX, localY, localZ, chunkSize) {
   return ((localY * chunkSize) + localZ) * chunkSize + localX;
+}
+
+function decomposeBuildingCoordinate(value, chunkSize, label) {
+  const world = safeIntegerCoordinate(value, label);
+  const divisor = BigInt(chunkSize);
+  let chunk = BigInt(world) / divisor;
+  let local = BigInt(world) % divisor;
+  if (local < 0n) {
+    chunk -= 1n;
+    local += divisor;
+  }
+  const numericChunk = Number(chunk);
+  if (!Number.isSafeInteger(numericChunk)) {
+    throw new Error(`${label} produces a chunk coordinate outside the safe integer range.`);
+  }
+  return { world, chunk: numericChunk, local: Number(local) };
+}
+
+function safeIntegerCoordinate(value, label) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number)) throw new Error(`${label} must be a safe integer.`);
+  return number;
 }
 
 function buildingFaceOccluded(currentVisual, neighborMaterialId) {

@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
-import { smeltingRules } from "../../src/data/smeltingRules.js";
+import { smeltingRules } from "../../../src/data/smeltingRules.js";
 import {
   createForgeComponent,
   createForgeDesign,
   encodeNcf1Bytes,
-} from "../forge/forge-core.js";
+} from "../../forge/forge-core.js";
 import {
   FORGE_MESH_MATERIAL_LAYER_NONE,
   FORGE_MESH_MATERIAL_LAYER_OFFSET,
   FORGE_MESH_VERTEX_STRIDE_BYTES,
   buildForgeCuboidMesh,
   buildForgeDesignMesh,
-} from "../forge/forge-mesher.js";
-import { ForgeWorkbenchRenderer } from "../renderer/forge-workbench-renderer.js";
+} from "../../forge/forge-mesher.js";
+import { ForgeWorkbenchRenderer } from "../../renderer/forge-workbench-renderer.js";
 
 const paintedComponent = createForgeComponent({
   resourceId: "iron",

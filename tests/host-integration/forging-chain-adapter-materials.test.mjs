@@ -4,10 +4,10 @@ import {
   forgeOnChain,
   isRetiredForgeMaterialItemCode,
   resolveSmeltingMaterialIdFromRules,
-} from "../../forging/chain-adapter.js";
+} from "../../../forging/chain-adapter.js";
 
 const publicRules = JSON.parse(await readFile(
-  new URL("../../public/rules/smelting-rules.json", import.meta.url),
+  new URL("../../../public/rules/smelting-rules.json", import.meta.url),
   "utf8",
 ));
 

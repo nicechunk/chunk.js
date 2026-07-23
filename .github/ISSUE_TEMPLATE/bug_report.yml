@@ -1,0 +1,121 @@
+name: Bug report
+description: Report a reproducible defect in the standalone Chunk.js repository.
+title: "[Bug]: "
+labels:
+  - bug
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a defect. Do not include credentials, private data, or vulnerability details. Report suspected security issues through the private route in SECURITY.md.
+
+  - type: input
+    id: revision
+    attributes:
+      label: Affected revision
+      description: Provide the commit SHA, branch, or repository version you tested.
+      placeholder: "Commit SHA or branch"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - World or chunk generation
+        - Chunk state or chain snapshots
+        - Meshing or rendering
+        - WebGL resource lifecycle
+        - Worker protocol or fallback
+        - NCM or NCF codec
+        - Forge or construction
+        - Physics, collision, or input
+        - Package exports or documentation
+        - Tests or tooling
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: context
+    attributes:
+      label: Execution context
+      options:
+        - Standalone Node.js test
+        - Standalone browser page served over HTTP or HTTPS
+        - NiceChunk host integration with authorized fixtures
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List exact commands, page URLs, input data, and steps. Use synthetic or otherwise authorized data only.
+      placeholder: |
+        1. Run ...
+        2. Open ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe the result you expected and the contract or documentation supporting it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Describe the result and include complete sanitized errors or logs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Node.js, npm, browser, OS, GPU/driver, and WebGL2 details that affect the result.
+      placeholder: |
+        Node.js:
+        npm:
+        Browser:
+        OS:
+        GPU/driver:
+    validations:
+      required: true
+
+  - type: textarea
+    id: fixtures
+    attributes:
+      label: Host fixtures or external inputs
+      description: If this is an integration issue, identify the host repository/fixture revision and confirm you are authorized to use it. Do not attach private data.
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Add sanitized screenshots, performance measurements, or related issues if useful.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched existing issues for this defect.
+          required: true
+        - label: I reproduced this from the stated revision and ran `npm test`, or explained why that was impossible above.
+          required: true
+        - label: For a browser issue, I used HTTP or HTTPS rather than `file://`.
+          required: false
+        - label: I removed secrets, personal data, private chain/account data, and unauthorized fixtures.
+          required: true
+        - label: I agree to follow the Code of Conduct.
+          required: true

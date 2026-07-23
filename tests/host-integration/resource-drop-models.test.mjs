@@ -5,10 +5,10 @@ import {
   buildDebugVisualModelAssets,
   createResourceDropPreviewMesh,
   hasResourceDropPreviewModel,
-} from "../chunk/chunk-mesher.js";
-import { blockDef } from "../world/block-registry.js";
-import { materialDef } from "../world/material-registry.js";
-import { resourceDropRules } from "../../src/data/resourceDropRules.js";
+} from "../../chunk/chunk-mesher.js";
+import { blockDef } from "../../world/block-registry.js";
+import { materialDef } from "../../world/material-registry.js";
+import { resourceDropRules } from "../../../src/data/resourceDropRules.js";
 
 const configuredDropIds = [...new Set(resourceDropRules.map((rule) => rule.dropBlockId))]
   .sort((left, right) => left - right);

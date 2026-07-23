@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { smeltingRules } from "../../src/data/smeltingRules.js";
-import { parseForgeMaterialProfile } from "../forge/forge-workbench.js";
+import { smeltingRules } from "../../../src/data/smeltingRules.js";
+import { parseForgeMaterialProfile } from "../../forge/forge-workbench.js";
 import {
   SMELTING_MATERIAL_VISUAL_REVISION,
   smeltingMaterialSurfaceProfile,
-} from "../renderer/smelting-material-models.js";
+} from "../../renderer/smelting-material-models.js";
 import {
   FORGE_MATERIAL_SURFACE_LAYER_NONE,
   FORGE_MATERIAL_SURFACE_TILE_SIZE,
@@ -22,7 +22,7 @@ import {
   forgeMaterialTextureMaterials,
   renderForgeMaterialSurfaceCanvas,
   resolveForgeMaterialRecipe,
-} from "../renderer/forge-material-surfaces.js";
+} from "../../renderer/forge-material-surfaces.js";
 
 const catalog = createForgeMaterialCatalog(smeltingRules);
 assert.equal(catalog.ruleSet, "nicechunk-smelting-v1");
@@ -183,7 +183,7 @@ assert.deepEqual(
 );
 assert.equal(renderForgeMaterialSurfaceCanvas(fakeCanvas(), "unknown", options), false);
 
-const moduleSource = await readFile(new URL("../renderer/forge-material-surfaces.js", import.meta.url), "utf8");
+const moduleSource = await readFile(new URL("../../renderer/forge-material-surfaces.js", import.meta.url), "utf8");
 assert.match(moduleSource, /from\s+["'][^"']*smelting-material-models/);
 assert.doesNotMatch(moduleSource, /from\s+["']three["']/);
 assert.doesNotMatch(moduleSource, /\bdocument\b/);

@@ -1,8 +1,9 @@
 import { BLOCK_FLAGS } from "../core/constants.js";
+import { saturatingAddI32 } from "../core/hash.js";
 import { blockDef, blockFlags, blockMaterialIdForFace, BLOCK_ID, MATERIAL_ID, isFluidBlock, isLowVegetationBlock, isOpaqueSolidBlock, isVisualBlock } from "../world/block-registry.js";
 import { CACTUS_MODEL_HEIGHT_SCALE, CACTUS_MODEL_MAX_Y, cactusModelPartsForQuarterTurn } from "../world/cactus-model.js";
 import { materialDef } from "../world/material-registry.js";
-import { treeInstanceLeafProfile } from "../world/world-generator.js";
+import { chunkLocalToWorldI32, treeInstanceLeafProfile } from "../world/world-generator.js";
 import { deltaKey } from "./chunk-delta.js";
 import {
   EMPTY_COMPILED_SURFACE_DECORATION_RULES,
@@ -673,9 +674,9 @@ function neighborBlock(chunkState, localX, localY, localZ, getBlockAtWorld) {
   }
   if (!getBlockAtWorld) return BLOCK_ID.air;
   return getBlockAtWorld(
-    chunkState.chunkX * chunkState.chunkSize + localX,
+    chunkLocalToWorldI32(chunkState.chunkX, localX, chunkState.chunkSize),
     localY,
-    chunkState.chunkZ * chunkState.chunkSize + localZ,
+    chunkLocalToWorldI32(chunkState.chunkZ, localZ, chunkState.chunkSize),
   );
 }
 
@@ -777,8 +778,8 @@ class WaterDepthFieldSampler {
   }
 
   generatedWaterDepth(localX, y, localZ) {
-    const worldX = this.chunkState.chunkX * this.chunkState.chunkSize + Math.trunc(localX);
-    const worldZ = this.chunkState.chunkZ * this.chunkState.chunkSize + Math.trunc(localZ);
+    const worldX = chunkLocalToWorldI32(this.chunkState.chunkX, Math.trunc(localX), this.chunkState.chunkSize);
+    const worldZ = chunkLocalToWorldI32(this.chunkState.chunkZ, Math.trunc(localZ), this.chunkState.chunkSize);
     const surface = this.getColumnTopAtWorld(worldX, worldZ);
     const waterLevel = this.getWaterLevelAtWorld(worldX, worldZ, surface);
     if (waterLevel === null || Math.trunc(waterLevel) < Math.trunc(y) || surface >= y) return WATER_DEPTH_MAX_DEPTH;
@@ -974,8 +975,8 @@ function columnTopAt(chunkState, topY, localX, localZ, getBlockAtWorld, getColum
   if (localX >= 0 && localZ >= 0 && localX < chunkState.chunkSize && localZ < chunkState.chunkSize) {
     return topY[localX + localZ * chunkState.chunkSize];
   }
-  const worldX = chunkState.chunkX * chunkState.chunkSize + localX;
-  const worldZ = chunkState.chunkZ * chunkState.chunkSize + localZ;
+  const worldX = chunkLocalToWorldI32(chunkState.chunkX, localX, chunkState.chunkSize);
+  const worldZ = chunkLocalToWorldI32(chunkState.chunkZ, localZ, chunkState.chunkSize);
   if (getColumnTopAtWorld) return getColumnTopAtWorld(worldX, worldZ);
   if (!getBlockAtWorld) return chunkState.minY - 1;
   for (let y = chunkState.minY + chunkState.height - 1; y >= chunkState.minY; y -= 1) {
@@ -1015,8 +1016,8 @@ function terrainSunShadowShade(chunkState, localX, y, localZ, getBlockAtWorld, g
 
 function terrainShadowColumnTop(chunkState, localX, localZ, referenceY, getBlockAtWorld, getColumnTopAtWorld) {
   if (getColumnTopAtWorld) {
-    const worldX = chunkState.chunkX * chunkState.chunkSize + localX;
-    const worldZ = chunkState.chunkZ * chunkState.chunkSize + localZ;
+    const worldX = chunkLocalToWorldI32(chunkState.chunkX, localX, chunkState.chunkSize);
+    const worldZ = chunkLocalToWorldI32(chunkState.chunkZ, localZ, chunkState.chunkSize);
     return getColumnTopAtWorld(worldX, worldZ);
   }
   for (let y = Math.min(chunkState.minY + chunkState.height - 1, referenceY + TERRAIN_SHADOW_VERTICAL_SEARCH); y >= referenceY; y -= 1) {
@@ -1163,8 +1164,6 @@ function appendTerrainProjectionShadowsProfile(chunkState, vertices, indices, ge
   let emitted = 0;
   const profile = chunkState.baseProfile;
   const size = chunkState.chunkSize;
-  const chunkWorldX = chunkState.chunkX * size;
-  const chunkWorldZ = chunkState.chunkZ * size;
   for (let z = 0; z < size; z += 1) {
     for (let x = 0; x < size; x += 1) {
       const column = x + z * size;
@@ -1174,7 +1173,9 @@ function appendTerrainProjectionShadowsProfile(chunkState, vertices, indices, ge
       const blockId = unchangedProfileSurfaceBlock(chunkState, profile, column, x, y, z);
       if (!isOpaqueSolidBlock(blockId) || !isGroundDetailSurface(blockId)) continue;
       const strength = terrainProjectionShadowStrength(chunkState, x, y, z, null, getColumnTopAtWorld);
-      if (!shouldEmitTerrainProjectionShadow(chunkWorldX + x, y, chunkWorldZ + z, blockId, strength)) continue;
+      const worldX = chunkLocalToWorldI32(chunkState.chunkX, x, size);
+      const worldZ = chunkLocalToWorldI32(chunkState.chunkZ, z, size);
+      if (!shouldEmitTerrainProjectionShadow(worldX, y, worldZ, blockId, strength)) continue;
       quads += appendTerrainProjectionShadowQuad(vertices, indices, x, y + 1 + SHADOW_SURFACE_BIAS, z, strength, blockId);
       emitted += 1;
       if (emitted >= TERRAIN_PROJECTION_SHADOW_MAX_PER_CHUNK) return quads;
@@ -1189,8 +1190,6 @@ function appendTerrainProjectionShadows(chunkState, vertices, indices, getBlockA
   const size = chunkState.chunkSize;
   const minY = chunkState.minY;
   const maxY = minY + chunkState.height - 1;
-  const chunkWorldX = chunkState.chunkX * size;
-  const chunkWorldZ = chunkState.chunkZ * size;
   for (let z = 0; z < size; z += 1) {
     for (let x = 0; x < size; x += 1) {
       for (let y = maxY; y >= minY; y -= 1) {
@@ -1199,7 +1198,9 @@ function appendTerrainProjectionShadows(chunkState, vertices, indices, getBlockA
         const above = neighborBlock(chunkState, x, y + 1, z, getBlockAtWorld);
         if (isFluidBlock(above) || isOpaqueSolidBlock(above)) break;
         const strength = terrainProjectionShadowStrength(chunkState, x, y, z, getBlockAtWorld, getColumnTopAtWorld);
-        if (!shouldEmitTerrainProjectionShadow(chunkWorldX + x, y, chunkWorldZ + z, blockId, strength)) break;
+        const worldX = chunkLocalToWorldI32(chunkState.chunkX, x, size);
+        const worldZ = chunkLocalToWorldI32(chunkState.chunkZ, z, size);
+        if (!shouldEmitTerrainProjectionShadow(worldX, y, worldZ, blockId, strength)) break;
         quads += appendTerrainProjectionShadowQuad(vertices, indices, x, y + 1 + SHADOW_SURFACE_BIAS, z, strength, blockId);
         emitted += 1;
         break;
@@ -1252,12 +1253,10 @@ function appendTerrainProjectionShadowQuad(vertices, indices, x, y, z, strength,
 function appendTreeInstanceShadowQuads(chunkState, vertices, indices) {
   if (!chunkState.treeInstances?.length) return 0;
   let quads = 0;
-  const chunkWorldX = chunkState.chunkX * chunkState.chunkSize;
-  const chunkWorldZ = chunkState.chunkZ * chunkState.chunkSize;
   for (const tree of chunkState.treeInstances) {
     if (treeInstanceModifiedByDelta(chunkState, tree)) continue;
-    const x = tree.x - chunkWorldX + 0.5;
-    const z = tree.z - chunkWorldZ + 0.5;
+    const x = worldI32ToChunkAffineLocal(chunkState.chunkX, tree.x, chunkState.chunkSize) + 0.5;
+    const z = worldI32ToChunkAffineLocal(chunkState.chunkZ, tree.z, chunkState.chunkSize) + 0.5;
     const trunkHeight = Math.max(2, Number(tree.trunkHeight) || 3.6);
     const canopy = tree.pine ? 1.6 : 2.1;
     const shadowY = tree.baseY + SHADOW_SURFACE_BIAS;
@@ -1364,9 +1363,9 @@ function lowVegetationRadius(blockId, hash) {
 
 function lowVegetationHash(blockId, chunkState, x, y, z) {
   let h = 0x811c9dc5;
-  h = hashI32(h, chunkState.chunkX * chunkState.chunkSize + x);
+  h = hashI32(h, chunkLocalToWorldI32(chunkState.chunkX, x, chunkState.chunkSize));
   h = hashI32(h, y);
-  h = hashI32(h, chunkState.chunkZ * chunkState.chunkSize + z);
+  h = hashI32(h, chunkLocalToWorldI32(chunkState.chunkZ, z, chunkState.chunkSize));
   h = hashI32(h, blockId * 2654435761);
   h ^= h >>> 16;
   h = Math.imul(h >>> 0, 0x7feb352d) >>> 0;
@@ -1432,8 +1431,8 @@ function unchangedProfileSurfaceBlock(chunkState, profile, column, x, y, z) {
 }
 
 function appendGroundDetailAt(chunkState, x, y, z, surfaceBlockId, vertices, indices) {
-  const worldX = chunkState.chunkX * chunkState.chunkSize + x;
-  const worldZ = chunkState.chunkZ * chunkState.chunkSize + z;
+  const worldX = chunkLocalToWorldI32(chunkState.chunkX, x, chunkState.chunkSize);
+  const worldZ = chunkLocalToWorldI32(chunkState.chunkZ, z, chunkState.chunkSize);
   const decoration = resolveSurfaceDecoration({
     worldSeed: chunkState.worldSeed,
     worldX,
@@ -2456,12 +2455,10 @@ function appendTreeInstanceProxyQuads(
   if (!chunkState.treeInstances?.length) return 0;
   let quads = 0;
   const leafFaceGroups = new Map();
-  const chunkWorldX = chunkState.chunkX * chunkState.chunkSize;
-  const chunkWorldZ = chunkState.chunkZ * chunkState.chunkSize;
   for (const tree of chunkState.treeInstances) {
     if (treeInstanceModifiedByDelta(chunkState, tree)) continue;
-    const x = tree.x - chunkWorldX + 0.5;
-    const z = tree.z - chunkWorldZ + 0.5;
+    const x = worldI32ToChunkAffineLocal(chunkState.chunkX, tree.x, chunkState.chunkSize) + 0.5;
+    const z = worldI32ToChunkAffineLocal(chunkState.chunkZ, tree.z, chunkState.chunkSize) + 0.5;
     const trunkLayer = materialDef(blockDef(tree.pine ? BLOCK_ID.pineTrunk : BLOCK_ID.trunk).materialId).textureLayer;
     const leafLayer = materialDef(blockDef(tree.pine ? BLOCK_ID.pineLeaves : BLOCK_ID.leaves).materialId).textureLayer;
     const snowLayer = materialDef(MATERIAL_ID.snow).textureLayer;
@@ -2492,26 +2489,44 @@ function appendCanonicalTreeLeafFaces(
 ) {
   const profile = treeLeafProfileForMesh(chunkState, tree);
   const masks = visibleTreeLeafMasks(chunkState, tree, profile, getDeltaAtWorld, treeDeltaCandidateCount);
-  const originX = chunkState.chunkX * chunkState.chunkSize;
-  const originZ = chunkState.chunkZ * chunkState.chunkSize;
+  const cells = uniqueTreeLeafWorldCells(tree, profile, masks);
+  const occupied = new Set(cells.map(({ worldX, y, worldZ }) => treeWorldCellKey(worldX, y, worldZ)));
+  for (const { worldX, y, worldZ } of cells) {
+    const localX = worldI32ToChunkAffineLocal(chunkState.chunkX, worldX, chunkState.chunkSize);
+    const localZ = worldI32ToChunkAffineLocal(chunkState.chunkZ, worldZ, chunkState.chunkSize);
+    for (let faceIndex = 0; faceIndex < FACE_DEFS.length; faceIndex += 1) {
+      const face = FACE_DEFS[faceIndex];
+      const neighborX = saturatingAddI32(worldX, face.delta[0]);
+      const neighborZ = saturatingAddI32(worldZ, face.delta[2]);
+      if (occupied.has(treeWorldCellKey(neighborX, y + face.delta[1], neighborZ))) continue;
+      const snowTop = Boolean(tree.snowy && faceIndex === 2);
+      addTreeFaceCell(faceGroups, faceIndex, localX, y, localZ, snowTop ? snowLayer : leafLayer, snowTop ? 250 : face.shade);
+    }
+  }
+}
+
+function uniqueTreeLeafWorldCells(tree, profile, masks) {
+  const cells = [];
+  const visited = new Set();
   for (let layerIndex = 0; layerIndex < masks.length; layerIndex += 1) {
     const y = profile.minY + layerIndex;
     const mask = masks[layerIndex] >>> 0;
     if (!mask) continue;
     for (let bit = 0; bit < 25; bit += 1) {
       if (!(mask & (1 << bit))) continue;
-      const dx = bit % 5 - 2;
-      const dz = Math.floor(bit / 5) - 2;
-      const localX = tree.x + dx - originX;
-      const localZ = tree.z + dz - originZ;
-      for (let faceIndex = 0; faceIndex < FACE_DEFS.length; faceIndex += 1) {
-        const face = FACE_DEFS[faceIndex];
-        if (treeLeafMaskContains(masks, profile.minY, dx + face.delta[0], y + face.delta[1], dz + face.delta[2])) continue;
-        const snowTop = Boolean(tree.snowy && faceIndex === 2);
-        addTreeFaceCell(faceGroups, faceIndex, localX, y, localZ, snowTop ? snowLayer : leafLayer, snowTop ? 250 : face.shade);
-      }
+      const worldX = saturatingAddI32(tree.x, bit % 5 - 2);
+      const worldZ = saturatingAddI32(tree.z, Math.floor(bit / 5) - 2);
+      const key = treeWorldCellKey(worldX, y, worldZ);
+      if (visited.has(key)) continue;
+      visited.add(key);
+      cells.push({ worldX, y, worldZ });
     }
   }
+  return cells;
+}
+
+function treeWorldCellKey(worldX, worldY, worldZ) {
+  return `${worldX}:${worldY}:${worldZ}`;
 }
 
 function treeLeafProfileForMesh(chunkState, tree) {
@@ -2535,8 +2550,8 @@ function visibleTreeLeafMasks(chunkState, tree, profile, getDeltaAtWorld, treeDe
     const y = profile.minY + layerIndex;
     for (let bit = 0; bit < 25; bit += 1) {
       if (!(mask & (1 << bit))) continue;
-      const worldX = tree.x + bit % 5 - 2;
-      const worldZ = tree.z + Math.floor(bit / 5) - 2;
+      const worldX = saturatingAddI32(tree.x, bit % 5 - 2);
+      const worldZ = saturatingAddI32(tree.z, Math.floor(bit / 5) - 2);
       const deltaBlock = explicitTreeDeltaBlockAt(chunkState, worldX, y, worldZ, getDeltaAtWorld);
       if (deltaBlock === null || deltaBlock === leafBlockId) continue;
       mask = (mask & ~(1 << bit)) >>> 0;
@@ -2544,14 +2559,6 @@ function visibleTreeLeafMasks(chunkState, tree, profile, getDeltaAtWorld, treeDe
     masks[layerIndex] = mask;
   }
   return masks;
-}
-
-function treeLeafMaskContains(masks, minY, dx, y, dz) {
-  if (dx < -2 || dx > 2 || dz < -2 || dz > 2) return false;
-  const layerIndex = y - minY;
-  if (layerIndex < 0 || layerIndex >= masks.length) return false;
-  const bit = (dz + 2) * 5 + dx + 2;
-  return Boolean((masks[layerIndex] >>> 0) & (1 << bit));
 }
 
 function addTreeFaceCell(groups, faceIndex, x, y, z, layer, shade) {
@@ -2621,8 +2628,8 @@ function treeFaceCellVisited(visited, u, v) {
 }
 
 function explicitTreeDeltaBlockAt(chunkState, worldX, worldY, worldZ, getDeltaAtWorld) {
-  const localX = worldX - chunkState.chunkX * chunkState.chunkSize;
-  const localZ = worldZ - chunkState.chunkZ * chunkState.chunkSize;
+  const localX = worldI32ToChunkAffineLocal(chunkState.chunkX, worldX, chunkState.chunkSize);
+  const localZ = worldI32ToChunkAffineLocal(chunkState.chunkZ, worldZ, chunkState.chunkSize);
   if (
     localX >= 0 && localX < chunkState.chunkSize &&
     localZ >= 0 && localZ < chunkState.chunkSize &&
@@ -2637,8 +2644,8 @@ function explicitTreeDeltaBlockAt(chunkState, worldX, worldY, worldZ, getDeltaAt
 function treeInstanceModifiedByDelta(chunkState, tree) {
   if (!chunkState || !tree) return false;
   if (typeof chunkState.hasDeltaAt !== "function") return false;
-  const localX = Math.trunc(tree.x) - Math.trunc(chunkState.chunkX) * Math.trunc(chunkState.chunkSize);
-  const localZ = Math.trunc(tree.z) - Math.trunc(chunkState.chunkZ) * Math.trunc(chunkState.chunkSize);
+  const localX = worldI32ToChunkAffineLocal(chunkState.chunkX, tree.x, chunkState.chunkSize);
+  const localZ = worldI32ToChunkAffineLocal(chunkState.chunkZ, tree.z, chunkState.chunkSize);
   if (localX < 0 || localZ < 0 || localX >= chunkState.chunkSize || localZ >= chunkState.chunkSize) return false;
   const baseY = Math.trunc(tree.baseY);
   const trunkHeight = Math.max(1, Math.trunc(Number(tree.trunkHeight) || 1));
@@ -2646,6 +2653,15 @@ function treeInstanceModifiedByDelta(chunkState, tree) {
     if (chunkState.hasDeltaAt(localX, y, localZ)) return true;
   }
   return false;
+}
+
+function worldI32ToChunkAffineLocal(chunkCoordinate, worldCoordinate, chunkSize) {
+  // Geometry is rendered relative to the exact affine chunk origin used by
+  // WebGL and frustum bounds. At a non-divisor i32 endpoint several generated
+  // local columns may saturate to the same world coordinate; this inverse
+  // selects the sole in-domain affine cell and prevents tree/leaf aliases from
+  // being emitted in the out-of-domain fringe.
+  return Math.trunc(worldCoordinate) - Math.trunc(chunkCoordinate) * Math.trunc(chunkSize);
 }
 
 function appendProjectedShadowQuad(vertices, indices, cx, y, cz, radius, length, casterHeight = 0.3, alpha = 0.24) {

@@ -1,4 +1,5 @@
 import {
+  chunkLocalToWorldI32,
   createWorldGeneratorConfig,
   generateBaseChunkProfileFromConfig,
   generateTreeInstancesForChunkFromConfig,
@@ -45,6 +46,7 @@ self.onmessage = (event) => {
       chunkSize: options.chunkSize,
       height: options.height,
       minY: options.minY,
+      maxBuildY: options.maxBuildY,
       generationVersion: task.generationVersion,
       resourceRuleVersion: task.resourceRuleVersion,
       materialVersion: task.materialVersion,
@@ -178,7 +180,7 @@ function deltaAwareGeneratedColumnTop(config, worldX, worldZ, deltaOverrides, de
     if (isTerrainMeshBlock(delta.blockId)) candidateY = Math.max(candidateY, delta.y);
   }
   const minY = Math.trunc(options.minY);
-  const maxY = minY + Math.trunc(options.height) - 1;
+  const maxY = Math.trunc(options.maxBuildY ?? (minY + Math.trunc(options.height) - 1));
   for (let y = Math.min(maxY, candidateY); y >= minY; y -= 1) {
     const blockId = deltaOverrides.get(`${x}:${y}:${z}`) ?? generatedBlockAt(config, x, y, z);
     if (isTerrainMeshBlock(blockId)) return y;
@@ -210,6 +212,7 @@ function configForTask(task, options) {
     options.chunkSize,
     options.height,
     options.minY,
+    options.maxBuildY,
     options.seaLevel,
     options.maxTerrainHeight,
   ].join(":");
@@ -248,15 +251,15 @@ function generatedBlockAt(config, worldX, worldY, worldZ) {
 }
 
 function localProfileBlockResolver(config, task, options, profile) {
-  const originX = task.chunkX * options.chunkSize;
-  const originZ = task.chunkZ * options.chunkSize;
   return (localX, localY, localZ) => {
     const x = Math.trunc(localX);
     const z = Math.trunc(localZ);
+    const worldX = chunkLocalToWorldI32(task.chunkX, x, options.chunkSize);
+    const worldZ = chunkLocalToWorldI32(task.chunkZ, z, options.chunkSize);
     const columnIndex = x + z * options.chunkSize;
     const surface = profile.surfaceY[columnIndex];
     const storedWater = profile.waterY[columnIndex];
     const water = storedWater === profile.noWater ? null : storedWater;
-    return getBaseBlockAtColumnConfig(config, originX + x, localY, originZ + z, surface, water, profile.surfaceBlock?.[columnIndex]);
+    return getBaseBlockAtColumnConfig(config, worldX, localY, worldZ, surface, water, profile.surfaceBlock?.[columnIndex]);
   };
 }

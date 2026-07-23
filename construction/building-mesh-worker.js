@@ -3,6 +3,7 @@ import {
   parseNcm3Building,
 } from "./building-parser.js";
 import { createBuildingChunkMeshes } from "./building-mesher.js";
+import { createBuildingMeshResult } from "./building-mesh-result.js";
 
 self.onmessage = (event) => {
   const request = event.data ?? {};
@@ -36,46 +37,7 @@ function buildResult(request) {
     chunkSize: request.chunkSize,
     revision: request.revision,
   });
-  return {
-    building: summarizeBuilding(building),
-    placement: summarizePlacement(placement),
-    chunks,
-  };
-}
-
-function summarizeBuilding(building) {
-  return {
-    id: building.id,
-    name: building.name,
-    format: building.format,
-    formatVersion: building.formatVersion,
-    canonicalCode: building.canonicalCode,
-    canonical: building.canonical,
-    payloadBytes: building.payloadBytes,
-    codeId: building.codeId,
-    size: building.size,
-    contentBounds: building.contentBounds,
-    voxelCount: building.voxelCount,
-    commandCount: building.commandCount,
-    materials: building.materials,
-    scale: building.scale,
-  };
-}
-
-function summarizePlacement(placement) {
-  return {
-    id: placement.id,
-    foundation: placement.foundation,
-    fitsFoundation: placement.fitsFoundation,
-    offsetX: placement.offsetX,
-    offsetZ: placement.offsetZ,
-    quarterTurns: placement.quarterTurns,
-    footprint: placement.footprint,
-    origin: placement.origin,
-    bounds: placement.bounds,
-    voxelCount: placement.voxelCount,
-    scale: placement.scale,
-  };
+  return createBuildingMeshResult(building, placement, chunks);
 }
 
 function transferList(chunks) {

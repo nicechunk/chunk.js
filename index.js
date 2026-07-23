@@ -21,6 +21,8 @@ export * from "./ncm/blueprint-codec.js";
 export * from "./ncm/character-codec.js";
 export * from "./construction/building-parser.js";
 export * from "./construction/building-mesher.js";
+export * from "./construction/building-mesh-client.js";
+export * from "./construction/building-mesh-result.js";
 export * from "./renderer/buffer-manager.js";
 export * from "./renderer/camera.js";
 export * from "./renderer/cloud-layer.js";

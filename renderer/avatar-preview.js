@@ -6,6 +6,7 @@ import {
   updateAvatarMeshVertices,
 } from "./avatar-mesh.js";
 import { NCM4_BONES } from "../ncm/character-codec.js";
+import { createProgram as createShaderProgram } from "./shader-manager.js";
 
 const DEFAULT_MAX_PIXEL_RATIO = 1.35;
 const DEFAULT_PREVIEW_EQUIPMENT = Object.freeze({ rightHand: "pickaxe" });
@@ -74,13 +75,15 @@ void main() {
 export function createAvatarPreviewRenderer(containerOrCanvas, options = {}) {
   if (!containerOrCanvas || typeof document === "undefined") return null;
   const target = containerOrCanvas;
-  const canvas = target instanceof HTMLCanvasElement
+  const canvasTarget = target instanceof HTMLCanvasElement;
+  const existingCanvas = canvasTarget
     ? target
-    : target.querySelector?.("canvas[data-nicechunk-avatar-preview]") || document.createElement("canvas");
-  if (!(target instanceof HTMLCanvasElement)) {
+    : target.querySelector?.("canvas[data-nicechunk-avatar-preview]");
+  const ownsCanvas = !canvasTarget && !existingCanvas;
+  const canvas = existingCanvas || document.createElement("canvas");
+  if (!canvasTarget) {
     canvas.className = options.className || "avatar-preview-canvas";
     canvas.dataset.nicechunkAvatarPreview = "true";
-    if (canvas.parentNode !== target) target.prepend(canvas);
   }
 
   const gl = canvas.getContext("webgl2", {
@@ -113,20 +116,23 @@ export function createAvatarPreviewRenderer(containerOrCanvas, options = {}) {
     attachForgedPickaxe: null,
   };
 
-  const uniforms = {
-    viewProjection: gl.getUniformLocation(program, "uViewProjection"),
-    modelYaw: gl.getUniformLocation(program, "uModelYaw"),
-  };
-
+  let uniforms = null;
   try {
+    uniforms = {
+      viewProjection: gl.getUniformLocation(program, "uViewProjection"),
+      modelYaw: gl.getUniformLocation(program, "uModelYaw"),
+    };
     if (Object.prototype.hasOwnProperty.call(options, "character")) {
       setCharacter(options.character, options);
     } else {
       setModelCode(options.modelCode || DEFAULT_PEASANT_GUY_NCM, options);
     }
+    if (ownsCanvas) target.prepend(canvas);
   } catch (error) {
-    gl.deleteProgram(program);
-    if (!(target instanceof HTMLCanvasElement) && canvas.parentNode === target) canvas.remove();
+    disposeHandle(gl, state.handle);
+    state.handle = null;
+    try { gl.deleteProgram(program); } catch { /* Preserve the initialization error. */ }
+    removeOwnedCanvas(target, canvas, ownsCanvas);
     throw error;
   }
 
@@ -214,8 +220,8 @@ export function createAvatarPreviewRenderer(containerOrCanvas, options = {}) {
       state.disposed = true;
       disposeHandle(gl, state.handle);
       state.handle = null;
-      gl.deleteProgram(program);
-      if (!(target instanceof HTMLCanvasElement) && canvas.parentNode === target) canvas.remove();
+      try { gl.deleteProgram(program); } catch { /* Best-effort disposal. */ }
+      removeOwnedCanvas(target, canvas, ownsCanvas);
     },
   };
 
@@ -239,6 +245,7 @@ export function createAvatarPreviewRenderer(containerOrCanvas, options = {}) {
       && state.attachForgedPickaxe === attachForgedPickaxe) return true;
     let mesh = null;
     let label = "peasant_guy";
+    let resolvedModelCode = code;
     try {
       mesh = createAvatarMeshFromNcm(code, {
         name: params.name || "profile_avatar",
@@ -247,7 +254,6 @@ export function createAvatarPreviewRenderer(containerOrCanvas, options = {}) {
         forgeRuntime,
       });
       label = mesh.name || label;
-      state.modelCode = code;
     } catch (error) {
       console.warn("NiceChunk avatar preview model failed, using built-in avatar:", error);
       mesh = createAvatarMeshFromNcm(DEFAULT_PEASANT_GUY_NCM, {
@@ -256,10 +262,12 @@ export function createAvatarPreviewRenderer(containerOrCanvas, options = {}) {
         attachForgedPickaxe,
         forgeRuntime,
       });
-      state.modelCode = DEFAULT_PEASANT_GUY_NCM;
+      resolvedModelCode = DEFAULT_PEASANT_GUY_NCM;
       label = "peasant_guy";
     }
-    disposeHandle(gl, state.handle);
+    const handle = createAvatarHandle(gl, mesh);
+    const previousHandle = state.handle;
+    state.modelCode = resolvedModelCode;
     state.mesh = mesh;
     state.label = label;
     state.character = null;
@@ -268,7 +276,8 @@ export function createAvatarPreviewRenderer(containerOrCanvas, options = {}) {
     state.forgeRuntime = forgeRuntime;
     state.attachIronPickaxe = attachIronPickaxe;
     state.attachForgedPickaxe = attachForgedPickaxe;
-    state.handle = createAvatarHandle(gl, mesh);
+    state.handle = handle;
+    disposeHandle(gl, previousHandle);
     return true;
   }
 
@@ -286,14 +295,16 @@ export function createAvatarPreviewRenderer(containerOrCanvas, options = {}) {
     // fallback. Invalid source geometry must be fixed at its source instead of
     // being hidden behind the built-in peasant avatar.
     const mesh = createAvatarMeshFromNcm4Character(source, { scale, name });
-    disposeHandle(gl, state.handle);
+    const handle = createAvatarHandle(gl, mesh);
+    const previousHandle = state.handle;
     state.modelCode = "";
     state.character = character;
     state.characterName = name;
     state.characterScale = scale;
     state.mesh = mesh;
     state.label = mesh.name || name;
-    state.handle = createAvatarHandle(gl, mesh);
+    state.handle = handle;
+    disposeHandle(gl, previousHandle);
     return true;
   }
 }
@@ -326,30 +337,41 @@ function resolveAvatarPreviewCharacter(character) {
 }
 
 function createAvatarHandle(gl, mesh) {
-  const vao = gl.createVertexArray();
-  const vbo = gl.createBuffer();
-  const ibo = gl.createBuffer();
-  gl.bindVertexArray(vao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-  gl.bufferData(gl.ARRAY_BUFFER, mesh.vertices.byteLength, gl.DYNAMIC_DRAW);
-  gl.bufferSubData(gl.ARRAY_BUFFER, 0, mesh.vertices);
-  const stride = mesh.vertexStrideBytes || 40;
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
-  gl.enableVertexAttribArray(1);
-  gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
-  gl.enableVertexAttribArray(2);
-  gl.vertexAttribPointer(2, 4, gl.FLOAT, false, stride, 24);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
-  gl.bindVertexArray(null);
-  return {
-    vao,
-    vbo,
-    ibo,
-    indexCount: mesh.indexCount,
-    indexType: mesh.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT,
-  };
+  let vao = null;
+  let vbo = null;
+  let ibo = null;
+  try {
+    vao = gl.createVertexArray();
+    if (!vao) throw new Error("Avatar preview vertex array allocation failed.");
+    vbo = gl.createBuffer();
+    if (!vbo) throw new Error("Avatar preview vertex buffer allocation failed.");
+    ibo = gl.createBuffer();
+    if (!ibo) throw new Error("Avatar preview index buffer allocation failed.");
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.vertices.byteLength, gl.DYNAMIC_DRAW);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, mesh.vertices);
+    const stride = mesh.vertexStrideBytes || 40;
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 4, gl.FLOAT, false, stride, 24);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
+    gl.bindVertexArray(null);
+    return {
+      vao,
+      vbo,
+      ibo,
+      indexCount: mesh.indexCount,
+      indexType: mesh.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT,
+    };
+  } catch (error) {
+    disposeHandle(gl, { vao, vbo, ibo });
+    throw error;
+  }
 }
 
 export function createAvatarPreviewViewProjection(mesh, aspect, params = {}) {
@@ -451,42 +473,30 @@ function resizeCanvas(canvas, gl, state) {
 
 function disposeHandle(gl, handle) {
   if (!gl || !handle) return;
-  gl.bindVertexArray(null);
-  gl.bindBuffer(gl.ARRAY_BUFFER, null);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
-  if (handle.vbo) gl.deleteBuffer(handle.vbo);
-  if (handle.ibo) gl.deleteBuffer(handle.ibo);
-  if (handle.vao) gl.deleteVertexArray(handle.vao);
+  try { gl.bindVertexArray(null); } catch { /* Continue releasing the handle. */ }
+  try { gl.bindBuffer(gl.ARRAY_BUFFER, null); } catch { /* Continue releasing the handle. */ }
+  try { gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null); } catch { /* Continue releasing the handle. */ }
+  try { if (handle.vbo) gl.deleteBuffer(handle.vbo); } catch { /* Continue releasing the handle. */ }
+  try { if (handle.ibo) gl.deleteBuffer(handle.ibo); } catch { /* Continue releasing the handle. */ }
+  try { if (handle.vao) gl.deleteVertexArray(handle.vao); } catch { /* Best-effort cleanup. */ }
+}
+
+function removeOwnedCanvas(target, canvas, ownsCanvas) {
+  if (!ownsCanvas || canvas.parentNode !== target) return;
+  try {
+    canvas.remove?.();
+  } catch {
+    // DOM cleanup is best effort during rollback and disposal.
+  }
 }
 
 function createProgram(gl, vertexSource, fragmentSource) {
-  const vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
-  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
-  if (!vertex || !fragment) return null;
-  const program = gl.createProgram();
-  gl.attachShader(program, vertex);
-  gl.attachShader(program, fragment);
-  gl.linkProgram(program);
-  gl.deleteShader(vertex);
-  gl.deleteShader(fragment);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    console.warn("NiceChunk avatar preview shader link failed:", gl.getProgramInfoLog(program));
-    gl.deleteProgram(program);
+  try {
+    return createShaderProgram(gl, vertexSource, fragmentSource);
+  } catch (error) {
+    console.warn("NiceChunk avatar preview shader setup failed:", error?.message || error);
     return null;
   }
-  return program;
-}
-
-function compileShader(gl, type, source) {
-  const shader = gl.createShader(type);
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    console.warn("NiceChunk avatar preview shader compile failed:", gl.getShaderInfoLog(shader));
-    gl.deleteShader(shader);
-    return null;
-  }
-  return shader;
 }
 
 function finiteNumber(value, fallback) {

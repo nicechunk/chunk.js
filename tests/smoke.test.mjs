@@ -520,10 +520,10 @@ for (let x = -192; x <= 192; x += 8) {
     const water = waterLevelAt(generatorConfig, x, z, surface);
     if (surface >= generatorConfig.seaLevel) {
       assert.equal(water, null, "natural water must not generate above the global sea level");
-      assert.notEqual(getBlockAt("nicechunk-mainnet-001", x, surface + 1, z), BLOCK_ID.water, "above-sea columns must not contain suspended water above terrain");
+      assert.notEqual(getBlockAt("nicechunk-mainnet-001", x, surface + 1, z, generatorConfig.generationVersion), BLOCK_ID.water, "above-sea columns must not contain suspended water above terrain");
     } else if (water === generatorConfig.seaLevel) {
       foundBelowSeaWater = true;
-      assert.equal(getBlockAt("nicechunk-mainnet-001", x, generatorConfig.seaLevel, z), BLOCK_ID.water, "below-sea terrain should fill to the global water plane");
+      assert.equal(getBlockAt("nicechunk-mainnet-001", x, generatorConfig.seaLevel, z, generatorConfig.generationVersion), BLOCK_ID.water, "below-sea terrain should fill to the global water plane");
     }
   }
 }
@@ -553,7 +553,7 @@ for (let x = -160; x <= 160; x += 16) {
   for (let z = -160; z <= 160; z += 16) {
     const surface = terrainSurfaceHeight(generatorConfig, x, z);
     for (let y = generatorConfig.minY + 5; y < surface; y += 9) {
-      const block = getBlockAt("nicechunk-mainnet-001", x, y, z);
+      const block = getBlockAt("nicechunk-mainnet-001", x, y, z, generatorConfig.generationVersion);
       assert.notEqual(block, BLOCK_ID.air, "default underground generation must stay solid; only deltas may create cavities");
       if (block === BLOCK_ID.coal) foundCoalVein = true;
     }
@@ -564,7 +564,7 @@ for (let x = -96; x <= 96; x += 8) {
   for (let z = -96; z <= 96; z += 8) {
     const surface = terrainSurfaceHeight(generatorConfig, x, z);
     if (surfaceBlockAt(generatorConfig, x, z, surface) !== BLOCK_ID.sand) continue;
-    const plant = getBlockAt("nicechunk-mainnet-001", x, surface + 1, z);
+    const plant = getBlockAt("nicechunk-mainnet-001", x, surface + 1, z, generatorConfig.generationVersion);
     assert.ok(plant === BLOCK_ID.air || plant === BLOCK_ID.water, "non-tree surface objects must not be core-generated blocks");
   }
 }
@@ -594,7 +594,7 @@ const cactusDecoration = resolveSurfaceDecoration({
 assert.equal(BLOCK_ID.cactus, 32, "cactus drop block ID must remain stable for PDA inventory data");
 assert.equal(RESOURCE_ID.cactus, 16, "canonical cactus resource ID must remain stable for chain inventory data");
 assert.equal(blockDef(BLOCK_ID.cactus).resourceId, RESOURCE_ID.cactus, "cactus block truth must still resolve to its canonical resource");
-assert.equal(getBlockAt("nicechunk-mainnet-001", cactusWorldX, cactusBlockY, cactusWorldZ), BLOCK_ID.air, "PDA decorations must not create independent generated voxels");
+assert.equal(getBlockAt("nicechunk-mainnet-001", cactusWorldX, cactusBlockY, cactusWorldZ, generatorConfig.generationVersion), BLOCK_ID.air, "PDA decorations must not create independent generated voxels");
 assert.equal(cactusDecoration?.decorationId, SURFACE_DECORATION_ID.microCactus, "the PDA rule should identify the visible cactus model");
 assert.equal(cactusDecoration?.dropBlockId, BLOCK_ID.cactus, "the PDA rule should define the cactus backpack reward");
 const flowerPreview = createSurfaceDecorationPreviewMesh({
@@ -612,6 +612,7 @@ assert.equal(isLowVegetationBlock(BLOCK_ID.cactus), true, "cactus must use dedic
 const cactusRayWorld = {
   chunkSize: 16,
   worldSeed: "nicechunk-mainnet-001",
+  generationVersion: 5,
   resourceRuleVersion: 1,
   getBlockAtWorld: (x, y, z) => x === 1 && y === 0 && z === 0 ? BLOCK_ID.cactus : BLOCK_ID.air,
 };
@@ -1007,6 +1008,7 @@ assert.equal(
 
 const smeltedSteelProfile = parseForgeMaterialProfile({
   materialId: "carbon_steel",
+  densityKgM3: 7_850,
   material: {
     class: "alloy",
     attributes: { hardness: 86, durability: 88, density: 76 },
@@ -1020,7 +1022,8 @@ assert.equal(smeltedSteelProfile.archetypeId, "iron", "smelted alloy IDs should 
 assert.equal(smeltedSteelProfile.attributes.hardness, 91, "per-item smelting attributes should override the recipe/base profile");
 assert.equal(smeltedSteelProfile.attributes.durability, 84, "all supplied smelting material attributes should reach equipment derivation");
 assert.equal(smeltedSteelProfile.attributes.workability, 62, "missing smelting attributes should use deterministic archetype fallbacks");
-assert.equal(smeltedSteelProfile.densityScore, 79, "smelting density scores should drive deterministic integer mass");
+assert.equal(smeltedSteelProfile.densityScore, 79, "smelting density scores should remain independent gameplay attributes");
+assert.equal(smeltedSteelProfile.densityKgM3, 7_850, "smelting physical density should remain available for mass derivation");
 const heatDerivedCeramicProfile = parseForgeMaterialProfile({
   materialId: "alumina_plate",
   material: {
@@ -1098,6 +1101,7 @@ const steelWorkbenchEntry = createForgeWorkbenchComponent({
   slotIndex: 3,
   materialId: "carbon_steel",
   volumeMm3: 123_456,
+  densityKgM3: 7_850,
   materialProperties: {
     attributes: {
       hardness: 91,
@@ -1122,14 +1126,15 @@ assert.equal(fullSteelStats.usedVolumeMm3, 123_456, "a full solid mask should us
 assert.equal(fullSteelStats.requiredVolumeMm3, 123_000, "equipment headers should floor millimetres cubed to an encodable cubic-centimetre requirement");
 assert.equal(fullSteelStats.volumeHeadroomMm3, 456, "header quantization must leave input headroom instead of exceeding the slot");
 assert.equal(fullSteelStats.requirementsWithinInputs, true, "derived equipment volume must never exceed selected input volume");
-assert.equal(fullSteelStats.equipment.mass5g, 195, "equipment mass should use exact integer slot volume and density-score arithmetic");
+assert.equal(fullSteelStats.equipment.mass5g, 194, "equipment mass should encode physical mass in 5-gram units");
 assert.equal(fullSteelStats.equipment.attributes6[0], 57, "smelting attributes should be compacted into the NCF1 equipment header");
-assert.equal(fullSteelStats.massWeight, 123_456 * 79, "workbench mass weight should remain exact before 5-gram header quantization");
+assert.equal(fullSteelStats.massWeight, 123_456 * 7_850, "workbench mass weight should preserve exact physical micrograms before 5-gram header quantization");
 assert.equal(fullSteelStats.componentBreakdown.length, 1, "workbench stats should expose one contribution per forge component");
 assert.equal(fullSteelStats.componentBreakdown[0].materialId, "carbon_steel", "component contributions should preserve the source material ID");
 assert.equal(fullSteelStats.componentBreakdown[0].usedVolumeMm3, 123_456, "component contributions should expose exact used material volume");
 assert.equal(fullSteelStats.componentBreakdown[0].densityScore, 79, "component contributions should expose their raw density score");
-assert.equal(fullSteelStats.componentBreakdown[0].massWeight, 123_456 * 79, "component contributions should expose their exact inheritance weight");
+assert.equal(fullSteelStats.componentBreakdown[0].densityKgM3, 7_850, "component contributions should expose physical density separately from the score");
+assert.equal(fullSteelStats.componentBreakdown[0].massWeight, 123_456 * 7_850, "component contributions should expose their exact physical-mass inheritance weight");
 assert.equal(fullSteelStats.componentBreakdown[0].weightBps, 10_000, "a single component should own the complete inherited mass share");
 assert.deepEqual(
   Object.keys(fullSteelStats.componentBreakdown[0].attributes),
@@ -1252,7 +1257,7 @@ assert.deepEqual(normalizeForgeWorkbench([translatedSteel])[0].offsetQ, [0, 0, 0
 const copperWorkbenchEntry = createForgeWorkbenchComponent({
   materialId: "copper_bloom",
   volumeMm3: 76_543,
-  material: { attributes: { hardness: 42, durability: 58, toughness: 48, density: 82 } },
+  material: { densityKgM3: 8_200, attributes: { hardness: 42, durability: 58, toughness: 48, density: 82 } },
 }, { positionIndex: 1 });
 const mixedWorkbenchStats = forgeWorkbenchStats(
   [sawedSteelA, drillForgeComponent(copperWorkbenchEntry.component)],
@@ -1292,7 +1297,7 @@ const secondCopperWorkbenchEntry = createForgeWorkbenchComponent({
   slotIndex: 8,
   materialId: "copper_bloom",
   volumeMm3: 25_000,
-  material: { attributes: { hardness: 50, durability: 62, toughness: 53, density: 80 } },
+  material: { densityKgM3: 8_200, attributes: { hardness: 50, durability: 62, toughness: 53, density: 80 } },
 }, { positionIndex: 2 });
 const groupedCopperStats = forgeWorkbenchStats(
   [copperWorkbenchEntry.component, secondCopperWorkbenchEntry.component],
@@ -1306,12 +1311,14 @@ const hotDenseEntry = createForgeWorkbenchComponent({
   materialId: "thermal_mix",
   volumeMm3: 100_000,
   heat: 100,
+  densityKgM3: 8_000,
   attributes: { density: 80 },
 }, { positionIndex: 0 });
 const coldLightEntry = createForgeWorkbenchComponent({
   materialId: "thermal_mix",
   volumeMm3: 100_000,
   heat: 0,
+  densityKgM3: 2_000,
   attributes: { density: 20 },
 }, { positionIndex: 1 });
 const thermalMixStats = forgeWorkbenchStats(

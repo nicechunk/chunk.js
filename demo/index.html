@@ -5,26 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#071526" />
     <meta name="color-scheme" content="dark" />
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
-    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
-    <link rel="shortcut icon" href="/favicon.ico" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="icon" href="data:," />
     <title>Chunk.js WebGL2 Voxel Engine Lab</title>
-    <meta name="description" content="An isolated WebGL2 voxel foundation for the future NiceChunk renderer." />
+    <meta name="description" content="A focused WebGL2 rendering lab for the standalone Chunk.js runtime." />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <main class="chunk-shell">
       <header class="hero-card">
         <nav class="topbar" aria-label="Engine page controls">
-          <a class="brand" href="/">NiceChunk</a>
-          <span class="route-pill">WebGL2-first /chunk.js/ route</span>
+          <a class="brand" href="../">Chunk.js</a>
+          <span class="route-pill">WebGL2-first native ESM route</span>
         </nav>
         <section class="hero-grid">
           <div class="hero-copy">
             <p class="eyebrow">WebGL2 voxel foundation</p>
             <h1>Chunk.js starts with a WebGL2 voxel renderer built for NiceChunk.</h1>
-            <p>This lab is isolated from the current game. It initializes WebGL2 directly, uploads an integer-packed voxel mesh, and keeps the renderer boundary ready for NiceChunk terrain.</p>
+            <p>This focused lab initializes WebGL2 directly and uploads one integer-packed voxel mesh. Use the playable route for world streaming, terrain, water, decorations, and avatar rendering.</p>
             <div class="hero-actions">
               <a class="action-link" href="./playable/">Open playable demo</a>
               <button id="pauseButton" type="button">Pause</button>
@@ -66,12 +63,12 @@
           <p>The folder separates WebGL2 backend detection, render loop, integer voxel data, greedy meshing, and packed vertex upload.</p>
         </article>
         <article>
-          <h2>Next migration target</h2>
-          <p>The next step is TextureArray/atlas terrain materials, chunk streaming, and dirty chunk updates without touching gameplay logic first.</p>
+          <h2>Focused scope</h2>
+          <p>This page isolates backend detection, camera control, one static mesh, and renderer lifecycle from the larger playable runtime.</p>
         </article>
         <article>
           <h2>Performance rule</h2>
-          <p>This prototype keeps runtime work small: one integer-packed static mesh, one shader program, one draw call, and no external texture assets.</p>
+          <p>This lab keeps runtime work small: one integer-packed static mesh, one shader program, one draw call, and no external texture assets.</p>
         </article>
       </section>
 

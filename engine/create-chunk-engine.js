@@ -3,8 +3,19 @@ import { createCameraState } from "../renderer/camera.js";
 import { detectWebGl2Support, WebGL2VoxelRenderer } from "../renderer/webgl2-renderer.js";
 import { FrameStatsCounter } from "../debug/stats.js";
 
-export async function createChunkEngine({ canvas, viewDistance = 3, meshBudgetMs = 6, onStats, onStatus } = {}) {
+export async function createChunkEngine(options = {}) {
+  if (!options || typeof options !== "object") throw new TypeError("createChunkEngine options must be an object.");
+  const { canvas, viewDistance = 3, meshBudgetMs = 6, onStats, onStatus } = options;
   if (!canvas) throw new Error("createChunkEngine requires a canvas.");
+  if (typeof meshBudgetMs !== "number" || !Number.isFinite(meshBudgetMs) || meshBudgetMs < 0) {
+    throw new RangeError("createChunkEngine meshBudgetMs must be a finite non-negative number.");
+  }
+  if (onStats != null && typeof onStats !== "function") {
+    throw new TypeError("createChunkEngine onStats must be a function when provided.");
+  }
+  if (onStatus != null && typeof onStatus !== "function") {
+    throw new TypeError("createChunkEngine onStatus must be a function when provided.");
+  }
   const support = detectWebGl2Support();
   if (!support.supported) {
     onStatus?.({ stage: "unsupported", backend: "webgl2", support });
@@ -12,13 +23,21 @@ export async function createChunkEngine({ canvas, viewDistance = 3, meshBudgetMs
   }
 
   const chunks = new ChunkManager({ viewDistance });
-  chunks.updatePlayerPosition(0, 24, 0);
-  const camera = createCameraState({ worldX: 0, worldY: chunks.surfaceYAt(0, 0) + 18, worldZ: -28, localOffsetX: 0.5, localOffsetY: 0.5, localOffsetZ: 0.5, yaw: 0, pitch: 0.55, far: 360 });
-  const renderer = new WebGL2VoxelRenderer(canvas, { viewDistance });
-  renderer.init();
+  let renderer = null;
+  let camera;
+  try {
+    chunks.updatePlayerPosition(0, 24, 0);
+    camera = createCameraState({ worldX: 0, worldY: chunks.surfaceYAt(0, 0) + 18, worldZ: -28, localOffsetX: 0.5, localOffsetY: 0.5, localOffsetZ: 0.5, yaw: 0, pitch: 0.55, far: 360 });
+    renderer = new WebGL2VoxelRenderer(canvas, { viewDistance });
+    renderer.init();
+  } catch (error) {
+    disposeChunkEngineResources(chunks, renderer);
+    throw error;
+  }
   const stats = new FrameStatsCounter();
   let running = false;
   let paused = false;
+  let destroyed = false;
   let raf = 0;
   let startTime = performance.now();
 
@@ -52,23 +71,37 @@ export async function createChunkEngine({ canvas, viewDistance = 3, meshBudgetMs
     camera,
     renderer,
     start() {
+      if (destroyed) throw new Error("Cannot start a destroyed Chunk.js engine.");
       if (running) return;
       running = true;
       startTime = performance.now();
       stats.reset(startTime);
-      onStatus?.({ stage: "running", backend: "webgl2", support });
-      raf = requestAnimationFrame(frame);
+      try {
+        onStatus?.({ stage: paused ? "paused" : "running", backend: "webgl2", support });
+        raf = requestAnimationFrame(frame);
+      } catch (error) {
+        running = false;
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+        throw error;
+      }
     },
     stop() {
+      if (destroyed || !running) return;
       running = false;
       cancelAnimationFrame(raf);
+      raf = 0;
       onStatus?.({ stage: "paused", backend: "webgl2", support });
     },
     setPaused(value) {
-      paused = Boolean(value);
-      onStatus?.({ stage: paused ? "paused" : "running", backend: "webgl2", support });
+      if (destroyed) return;
+      const nextPaused = Boolean(value);
+      if (paused === nextPaused) return;
+      paused = nextPaused;
+      if (running) onStatus?.({ stage: paused ? "paused" : "running", backend: "webgl2", support });
     },
     resetCamera() {
+      if (destroyed) return;
       camera.worldX = 0;
       camera.worldY = chunks.surfaceYAt(0, 0) + 18;
       camera.worldZ = -28;
@@ -80,11 +113,23 @@ export async function createChunkEngine({ canvas, viewDistance = 3, meshBudgetMs
       startTime = performance.now();
     },
     destroy() {
+      if (destroyed) return;
+      destroyed = true;
       running = false;
       cancelAnimationFrame(raf);
-      renderer.dispose();
+      raf = 0;
+      disposeChunkEngineResources(chunks, renderer);
+      onStatus?.({ stage: "destroyed", backend: "webgl2", support });
     },
   };
+}
+
+function disposeChunkEngineResources(chunks, renderer) {
+  try {
+    chunks?.dispose?.();
+  } finally {
+    renderer?.dispose?.();
+  }
 }
 
 function unsupported(support) {

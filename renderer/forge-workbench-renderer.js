@@ -28,6 +28,7 @@ import {
   createForgeMaterialCatalog,
   createForgeMaterialTextureArray,
 } from "./forge-material-surfaces.js";
+import { createProgram } from "./shader-manager.js";
 
 export {
   FORGE_TOOL_VISUAL_IDS,
@@ -338,6 +339,7 @@ export class ForgeWorkbenchRenderer {
     this.hoveredGizmoAxis = null;
     this.constructionPreview = null;
     this.controlsAttached = false;
+    this.controlTouchAction = null;
     this.pointers = new Map();
     this.drag = null;
     this.dragPreview = null;
@@ -364,6 +366,8 @@ export class ForgeWorkbenchRenderer {
     this.toolAction = null;
     this.nextToolActionId = 1;
     this.resizeObserver = null;
+    this.lifecycleDocument = globalThis.document ?? null;
+    this.lifecycleListenersAttached = false;
     this.onPick = typeof options.onPick === "function" ? options.onPick : null;
     this.onHover = typeof options.onHover === "function" ? options.onHover : null;
     this.onWorkpieceDrag = typeof options.onWorkpieceDrag === "function" ? options.onWorkpieceDrag : null;
@@ -410,87 +414,92 @@ export class ForgeWorkbenchRenderer {
     this._onVisibilityChange = () => {
       if (!globalThis.document?.hidden && (this.clothComponentMask || this.avatar.clothAnimated)) this.invalidate();
     };
-    this.canvas.addEventListener("webglcontextlost", this._onContextLost, false);
-    this.canvas.addEventListener("webglcontextrestored", this._onContextRestored, false);
-    globalThis.document?.addEventListener?.("visibilitychange", this._onVisibilityChange);
+    this.attachLifecycleListeners();
   }
 
   init() {
     if (this.disposed) throw new Error("ForgeWorkbenchRenderer has been disposed.");
     if (this.contextLost) return this;
     if (this.initialized && this.gl && !this.contextLost) return this;
-    const gl = this.canvas.getContext("webgl2", {
-      alpha: false,
-      antialias: false,
-      depth: true,
-      stencil: false,
-      premultipliedAlpha: false,
-      preserveDrawingBuffer: false,
-      powerPreference: this.options.powerPreference,
-    });
-    if (!gl) throw new Error("WebGL2 is required for the forge workbench renderer.");
-    this.gl = gl;
-    this.program = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
-    this.uniforms = {
-      viewProjection: gl.getUniformLocation(this.program, "uViewProjection"),
-      offset: gl.getUniformLocation(this.program, "uOffset"),
-      objectBasis: gl.getUniformLocation(this.program, "uObjectBasis"),
-      componentVisualOffsetsEnabled: gl.getUniformLocation(this.program, "uComponentVisualOffsetsEnabled"),
-      componentVisualOffsets: gl.getUniformLocation(this.program, "uComponentVisualOffsets[0]"),
-      dragComponentIndex: gl.getUniformLocation(this.program, "uDragComponentIndex"),
-      dragOffset: gl.getUniformLocation(this.program, "uDragOffset"),
-      spinComponentIndex: gl.getUniformLocation(this.program, "uSpinComponentIndex"),
-      spinRadians: gl.getUniformLocation(this.program, "uSpinRadians"),
-      exposure: gl.getUniformLocation(this.program, "uExposure"),
-      opacity: gl.getUniformLocation(this.program, "uOpacity"),
-      colorTint: gl.getUniformLocation(this.program, "uColorTint"),
-      colorTintMix: gl.getUniformLocation(this.program, "uColorTintMix"),
-      materialTileScale: gl.getUniformLocation(this.program, "uMaterialTileScale"),
-      timeSeconds: gl.getUniformLocation(this.program, "uTimeSeconds"),
-      clothComponentMask: gl.getUniformLocation(this.program, "uClothComponentMask"),
-      clothComponentMin: gl.getUniformLocation(this.program, "uClothComponentMin[0]"),
-      clothComponentMax: gl.getUniformLocation(this.program, "uClothComponentMax[0]"),
-      clothMotionScale: gl.getUniformLocation(this.program, "uClothMotionScale"),
-      materialTextureArray: gl.getUniformLocation(this.program, "uMaterialTextureArray"),
-      materialTextureEnabled: gl.getUniformLocation(this.program, "uMaterialTextureEnabled"),
-      materialLayerCount: gl.getUniformLocation(this.program, "uMaterialLayerCount"),
-      fogColor: gl.getUniformLocation(this.program, "uFogColor"),
-      fogNearFar: gl.getUniformLocation(this.program, "uFogNearFar"),
-      lightDirection: gl.getUniformLocation(this.program, "uLightDirection"),
-      ambientColor: gl.getUniformLocation(this.program, "uAmbientColor"),
-      keyLightColor: gl.getUniformLocation(this.program, "uKeyLightColor"),
-      unlit: gl.getUniformLocation(this.program, "uUnlit"),
-      selectedComponentIndex: gl.getUniformLocation(this.program, "uSelectedComponentIndex"),
-      selectedFaceAxis: gl.getUniformLocation(this.program, "uSelectedFaceAxis"),
-      selectedFaceSide: gl.getUniformLocation(this.program, "uSelectedFaceSide"),
-      hoveredComponentIndex: gl.getUniformLocation(this.program, "uHoveredComponentIndex"),
-      hoveredFaceAxis: gl.getUniformLocation(this.program, "uHoveredFaceAxis"),
-      hoveredFaceSide: gl.getUniformLocation(this.program, "uHoveredFaceSide"),
-    };
-    this.staticHandle = uploadMesh(gl, this.staticMesh, gl.STATIC_DRAW);
-    this.dynamicHandle = uploadMesh(gl, this.dynamicMesh, gl.DYNAMIC_DRAW);
-    this.avatarHandle = uploadMesh(
-      gl,
-      this.avatar.packedMesh,
-      this.avatar.clothAnimated ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW,
-    );
-    this.toolHandles = new Map(Array.from(this.toolMeshes, ([toolId, mesh]) => [toolId, uploadMesh(gl, mesh, gl.STATIC_DRAW)]));
-    this.guideHandles = {
-      transform: uploadMesh(gl, this.guideMeshes.transform, gl.STATIC_DRAW),
-      reticle: uploadMesh(gl, this.guideMeshes.reticle, gl.STATIC_DRAW),
-    };
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    this.rebuildMaterialTextureArray(true);
-    gl.enable(gl.DEPTH_TEST);
-    gl.depthFunc(gl.LEQUAL);
-    gl.enable(gl.CULL_FACE);
-    gl.cullFace(gl.BACK);
-    gl.disable(gl.BLEND);
-    this.initialized = true;
-    if (this.options.controls) this.attachControls();
-    this.observeResize();
-    this.invalidate();
-    return this;
+    try {
+      const gl = this.canvas.getContext("webgl2", {
+        alpha: false,
+        antialias: false,
+        depth: true,
+        stencil: false,
+        premultipliedAlpha: false,
+        preserveDrawingBuffer: false,
+        powerPreference: this.options.powerPreference,
+      });
+      if (!gl) throw new Error("WebGL2 is required for the forge workbench renderer.");
+      this.gl = gl;
+      this.program = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
+      this.uniforms = {
+        viewProjection: gl.getUniformLocation(this.program, "uViewProjection"),
+        offset: gl.getUniformLocation(this.program, "uOffset"),
+        objectBasis: gl.getUniformLocation(this.program, "uObjectBasis"),
+        componentVisualOffsetsEnabled: gl.getUniformLocation(this.program, "uComponentVisualOffsetsEnabled"),
+        componentVisualOffsets: gl.getUniformLocation(this.program, "uComponentVisualOffsets[0]"),
+        dragComponentIndex: gl.getUniformLocation(this.program, "uDragComponentIndex"),
+        dragOffset: gl.getUniformLocation(this.program, "uDragOffset"),
+        spinComponentIndex: gl.getUniformLocation(this.program, "uSpinComponentIndex"),
+        spinRadians: gl.getUniformLocation(this.program, "uSpinRadians"),
+        exposure: gl.getUniformLocation(this.program, "uExposure"),
+        opacity: gl.getUniformLocation(this.program, "uOpacity"),
+        colorTint: gl.getUniformLocation(this.program, "uColorTint"),
+        colorTintMix: gl.getUniformLocation(this.program, "uColorTintMix"),
+        materialTileScale: gl.getUniformLocation(this.program, "uMaterialTileScale"),
+        timeSeconds: gl.getUniformLocation(this.program, "uTimeSeconds"),
+        clothComponentMask: gl.getUniformLocation(this.program, "uClothComponentMask"),
+        clothComponentMin: gl.getUniformLocation(this.program, "uClothComponentMin[0]"),
+        clothComponentMax: gl.getUniformLocation(this.program, "uClothComponentMax[0]"),
+        clothMotionScale: gl.getUniformLocation(this.program, "uClothMotionScale"),
+        materialTextureArray: gl.getUniformLocation(this.program, "uMaterialTextureArray"),
+        materialTextureEnabled: gl.getUniformLocation(this.program, "uMaterialTextureEnabled"),
+        materialLayerCount: gl.getUniformLocation(this.program, "uMaterialLayerCount"),
+        fogColor: gl.getUniformLocation(this.program, "uFogColor"),
+        fogNearFar: gl.getUniformLocation(this.program, "uFogNearFar"),
+        lightDirection: gl.getUniformLocation(this.program, "uLightDirection"),
+        ambientColor: gl.getUniformLocation(this.program, "uAmbientColor"),
+        keyLightColor: gl.getUniformLocation(this.program, "uKeyLightColor"),
+        unlit: gl.getUniformLocation(this.program, "uUnlit"),
+        selectedComponentIndex: gl.getUniformLocation(this.program, "uSelectedComponentIndex"),
+        selectedFaceAxis: gl.getUniformLocation(this.program, "uSelectedFaceAxis"),
+        selectedFaceSide: gl.getUniformLocation(this.program, "uSelectedFaceSide"),
+        hoveredComponentIndex: gl.getUniformLocation(this.program, "uHoveredComponentIndex"),
+        hoveredFaceAxis: gl.getUniformLocation(this.program, "uHoveredFaceAxis"),
+        hoveredFaceSide: gl.getUniformLocation(this.program, "uHoveredFaceSide"),
+      };
+      this.staticHandle = uploadMesh(gl, this.staticMesh, gl.STATIC_DRAW);
+      this.dynamicHandle = uploadMesh(gl, this.dynamicMesh, gl.DYNAMIC_DRAW);
+      this.avatarHandle = uploadMesh(
+        gl,
+        this.avatar.packedMesh,
+        this.avatar.clothAnimated ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW,
+      );
+      this.toolHandles = new Map();
+      for (const [toolId, mesh] of this.toolMeshes) {
+        this.toolHandles.set(toolId, uploadMesh(gl, mesh, gl.STATIC_DRAW));
+      }
+      this.guideHandles = { transform: null, reticle: null };
+      this.guideHandles.transform = uploadMesh(gl, this.guideMeshes.transform, gl.STATIC_DRAW);
+      this.guideHandles.reticle = uploadMesh(gl, this.guideMeshes.reticle, gl.STATIC_DRAW);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      this.rebuildMaterialTextureArray(true);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+      gl.disable(gl.BLEND);
+      if (this.options.controls) this.attachControls();
+      this.observeResize();
+      this.initialized = true;
+      this.invalidate();
+      return this;
+    } catch (error) {
+      this.releaseInitResources();
+      throw error;
+    }
   }
 
   setSceneAvatar(forgeRuntime = null, params = {}) {
@@ -676,14 +685,16 @@ export class ForgeWorkbenchRenderer {
     if (!this.gl || this.contextLost) return false;
     const signature = this.materialSurfaceSet?.signature ?? "";
     if (!force && this.materialTextureSignature === signature && this.materialTextureArray) return false;
-    this.materialTextureArray?.dispose?.();
-    this.materialTextureArray = createForgeMaterialTextureArray(this.gl, {
+    const nextTextureArray = createForgeMaterialTextureArray(this.gl, {
       materialIds: this.materialSurfaceSet?.materialIds ?? [],
       catalog: this.forgeMaterialCatalog,
       seed: this.options.materialTextureSeed,
       tileSize: this.options.materialTextureTileSize,
     });
+    const previousTextureArray = this.materialTextureArray;
+    this.materialTextureArray = nextTextureArray;
     this.materialTextureSignature = signature;
+    previousTextureArray?.dispose?.();
     return true;
   }
 
@@ -1362,26 +1373,58 @@ export class ForgeWorkbenchRenderer {
 
   attachControls() {
     if (this.controlsAttached) return this;
-    this.controlsAttached = true;
-    this.canvas.style.touchAction = "none";
-    this.canvas.addEventListener("pointerdown", this._onPointerDown);
-    this.canvas.addEventListener("pointermove", this._onPointerMove);
-    this.canvas.addEventListener("pointerup", this._onPointerUp);
-    this.canvas.addEventListener("pointercancel", this._onPointerCancel);
-    this.canvas.addEventListener("pointerleave", this._onPointerLeave);
-    this.canvas.addEventListener("wheel", this._onWheel, { passive: false });
+    const listeners = [
+      ["pointerdown", this._onPointerDown],
+      ["pointermove", this._onPointerMove],
+      ["pointerup", this._onPointerUp],
+      ["pointercancel", this._onPointerCancel],
+      ["pointerleave", this._onPointerLeave],
+      ["wheel", this._onWheel, { passive: false }],
+    ];
+    const attached = [];
+    this.controlTouchAction = this.canvas.style?.touchAction ?? "";
+    if (this.canvas.style) this.canvas.style.touchAction = "none";
+    try {
+      for (const [name, listener, listenerOptions] of listeners) {
+        this.canvas.addEventListener(name, listener, listenerOptions);
+        attached.push([name, listener]);
+      }
+      this.controlsAttached = true;
+    } catch (error) {
+      for (const [name, listener] of attached.reverse()) {
+        try {
+          this.canvas.removeEventListener(name, listener);
+        } catch {
+          // Preserve the listener installation error while releasing prior listeners.
+        }
+      }
+      if (this.canvas.style) this.canvas.style.touchAction = this.controlTouchAction;
+      this.controlTouchAction = null;
+      throw error;
+    }
     return this;
   }
 
   detachControls() {
     if (!this.controlsAttached) return this;
     this.controlsAttached = false;
-    this.canvas.removeEventListener("pointerdown", this._onPointerDown);
-    this.canvas.removeEventListener("pointermove", this._onPointerMove);
-    this.canvas.removeEventListener("pointerup", this._onPointerUp);
-    this.canvas.removeEventListener("pointercancel", this._onPointerCancel);
-    this.canvas.removeEventListener("pointerleave", this._onPointerLeave);
-    this.canvas.removeEventListener("wheel", this._onWheel);
+    const listeners = [
+      ["pointerdown", this._onPointerDown],
+      ["pointermove", this._onPointerMove],
+      ["pointerup", this._onPointerUp],
+      ["pointercancel", this._onPointerCancel],
+      ["pointerleave", this._onPointerLeave],
+      ["wheel", this._onWheel],
+    ];
+    for (const [name, listener] of listeners) {
+      try {
+        this.canvas.removeEventListener(name, listener);
+      } catch {
+        // Listener cleanup is best effort during rollback and disposal.
+      }
+    }
+    if (this.canvas.style) this.canvas.style.touchAction = this.controlTouchAction ?? "";
+    this.controlTouchAction = null;
     this.resetPointerInteraction(null, { notifyCancel: true });
     return this;
   }
@@ -1650,6 +1693,120 @@ export class ForgeWorkbenchRenderer {
     this.zoom(clamp(event.deltaY * 0.0015, -0.35, 0.35));
   }
 
+  attachLifecycleListeners() {
+    if (this.lifecycleListenersAttached) return this;
+    let contextLostAttached = false;
+    let contextRestoredAttached = false;
+    let visibilityAttached = false;
+    try {
+      this.canvas.addEventListener("webglcontextlost", this._onContextLost, false);
+      contextLostAttached = true;
+      this.canvas.addEventListener("webglcontextrestored", this._onContextRestored, false);
+      contextRestoredAttached = true;
+      if (typeof this.lifecycleDocument?.addEventListener === "function") {
+        this.lifecycleDocument.addEventListener("visibilitychange", this._onVisibilityChange);
+        visibilityAttached = true;
+      }
+      this.lifecycleListenersAttached = true;
+      return this;
+    } catch (error) {
+      if (visibilityAttached) {
+        try {
+          this.lifecycleDocument.removeEventListener("visibilitychange", this._onVisibilityChange);
+        } catch {
+          // Preserve the installation error while rolling back prior listeners.
+        }
+      }
+      if (contextRestoredAttached) {
+        try {
+          this.canvas.removeEventListener("webglcontextrestored", this._onContextRestored, false);
+        } catch {
+          // Preserve the installation error while rolling back prior listeners.
+        }
+      }
+      if (contextLostAttached) {
+        try {
+          this.canvas.removeEventListener("webglcontextlost", this._onContextLost, false);
+        } catch {
+          // Preserve the installation error while rolling back prior listeners.
+        }
+      }
+      throw error;
+    }
+  }
+
+  detachLifecycleListeners() {
+    if (!this.lifecycleListenersAttached) return this;
+    this.lifecycleListenersAttached = false;
+    try {
+      this.canvas.removeEventListener("webglcontextlost", this._onContextLost, false);
+    } catch {
+      // Continue releasing the other listeners.
+    }
+    try {
+      this.canvas.removeEventListener("webglcontextrestored", this._onContextRestored, false);
+    } catch {
+      // Continue releasing the other listeners.
+    }
+    try {
+      this.lifecycleDocument?.removeEventListener?.("visibilitychange", this._onVisibilityChange);
+    } catch {
+      // Listener cleanup is best effort during disposal.
+    }
+    return this;
+  }
+
+  releaseInitResources() {
+    const safely = (callback) => {
+      try {
+        callback();
+      } catch {
+        // A failed cleanup must not strand the remaining renderer resources.
+      }
+    };
+    safely(() => this.detachControls());
+    safely(() => this.cancelScheduledHover());
+    const resizeObserver = this.resizeObserver;
+    this.resizeObserver = null;
+    safely(() => resizeObserver?.disconnect());
+    if (this.raf) safely(() => cancelFrame(this.raf));
+    this.raf = 0;
+    if (this.clothFrameTimer) safely(() => globalThis.clearTimeout?.(this.clothFrameTimer));
+    this.clothFrameTimer = 0;
+    this.framePending = false;
+
+    const gl = this.gl;
+    const materialTextureArray = this.materialTextureArray;
+    const staticHandle = this.staticHandle;
+    const dynamicHandle = this.dynamicHandle;
+    const avatarHandle = this.avatarHandle;
+    const toolHandles = [...this.toolHandles.values()];
+    const guideHandles = Object.values(this.guideHandles);
+    const program = this.program;
+    this.materialTextureArray = null;
+    this.materialTextureSignature = null;
+    this.staticHandle = null;
+    this.dynamicHandle = null;
+    this.avatarHandle = null;
+    this.toolHandles = new Map();
+    this.guideHandles = { transform: null, reticle: null };
+    this.program = null;
+    this.uniforms = null;
+    if (gl) {
+      safely(() => materialTextureArray?.dispose?.());
+      safely(() => disposeHandle(gl, staticHandle));
+      safely(() => disposeHandle(gl, dynamicHandle));
+      safely(() => disposeHandle(gl, avatarHandle));
+      for (const handle of toolHandles) safely(() => disposeHandle(gl, handle));
+      for (const handle of guideHandles) safely(() => disposeHandle(gl, handle));
+      if (program) safely(() => gl.deleteProgram(program));
+    }
+    this.gl = null;
+    this.initialized = false;
+    this.lastStats = emptyStats();
+    return this;
+  }
+
   observeResize() {
     if (this.resizeObserver || typeof ResizeObserver === "undefined") return;
     this.resizeObserver = new ResizeObserver(this._onResize);
@@ -1707,40 +1864,12 @@ export class ForgeWorkbenchRenderer {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
-    this.detachControls();
-    this.cancelScheduledHover();
-    this.resizeObserver?.disconnect();
-    this.resizeObserver = null;
-    if (this.raf) cancelFrame(this.raf);
-    this.raf = 0;
-    if (this.clothFrameTimer) globalThis.clearTimeout?.(this.clothFrameTimer);
-    this.clothFrameTimer = 0;
-    this.framePending = false;
-    if (this.gl) {
-      this.materialTextureArray?.dispose?.();
-      disposeHandle(this.gl, this.staticHandle);
-      disposeHandle(this.gl, this.dynamicHandle);
-      disposeHandle(this.gl, this.avatarHandle);
-      for (const handle of this.toolHandles.values()) disposeHandle(this.gl, handle);
-      for (const handle of Object.values(this.guideHandles)) disposeHandle(this.gl, handle);
-      if (this.program) this.gl.deleteProgram(this.program);
-    }
-    this.canvas.removeEventListener("webglcontextlost", this._onContextLost, false);
-    this.canvas.removeEventListener("webglcontextrestored", this._onContextRestored, false);
-    globalThis.document?.removeEventListener?.("visibilitychange", this._onVisibilityChange);
-    this.staticHandle = null;
-    this.dynamicHandle = null;
-    this.avatarHandle = null;
-    this.toolHandles = new Map();
-    this.guideHandles = { transform: null, reticle: null };
-    this.materialTextureArray = null;
-    this.materialTextureSignature = null;
+    this.releaseInitResources();
+    this.detachLifecycleListeners();
     this.materialSurfaceSet = activeForgeMaterialSurfaceSet([], {
       catalog: this.forgeMaterialCatalog,
     });
     this.componentMaterialIds = [];
-    this.program = null;
-    this.gl = null;
     this.selected = null;
     this.hovered = null;
     this.toolPreview = null;
@@ -1831,7 +1960,18 @@ export function intersectRayPlane(ray, point, normal) {
 }
 
 export function createForgeWorkbenchRenderer(canvas, options = {}) {
-  return new ForgeWorkbenchRenderer(canvas, options).init();
+  let renderer = null;
+  try {
+    renderer = new ForgeWorkbenchRenderer(canvas, options);
+    return renderer.init();
+  } catch (error) {
+    try {
+      renderer?.dispose();
+    } catch {
+      // Preserve the initialization error after best-effort factory cleanup.
+    }
+    throw error;
+  }
 }
 
 export function pickForgeMeshRay(mesh, ray, {
@@ -1939,34 +2079,60 @@ function groupedForgeHit(hit, groupedBound) {
 
 function uploadMesh(gl, mesh, usage) {
   if (!mesh?.indexCount) return null;
-  const vao = gl.createVertexArray();
-  const vbo = gl.createBuffer();
-  const ibo = gl.createBuffer();
-  gl.bindVertexArray(vao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-  gl.bufferData(gl.ARRAY_BUFFER, mesh.vertices, usage);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribIPointer(0, 3, gl.SHORT, FORGE_MESH_VERTEX_STRIDE_BYTES, 0);
-  gl.enableVertexAttribArray(1);
-  gl.vertexAttribPointer(1, 3, gl.BYTE, true, FORGE_MESH_VERTEX_STRIDE_BYTES, 6);
-  gl.enableVertexAttribArray(2);
-  gl.vertexAttribPointer(2, 4, gl.UNSIGNED_BYTE, true, FORGE_MESH_VERTEX_STRIDE_BYTES, 10);
-  gl.enableVertexAttribArray(3);
-  gl.vertexAttribIPointer(3, 1, gl.UNSIGNED_SHORT, FORGE_MESH_VERTEX_STRIDE_BYTES, 14);
-  gl.enableVertexAttribArray(4);
-  gl.vertexAttribIPointer(4, 1, gl.UNSIGNED_BYTE, FORGE_MESH_VERTEX_STRIDE_BYTES, FORGE_MESH_MATERIAL_LAYER_OFFSET);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, usage);
-  gl.bindVertexArray(null);
-  return {
-    vao,
-    vbo,
-    ibo,
-    indexCount: mesh.indexCount,
-    indexType: mesh.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT,
-    triangleCount: mesh.triangleCount,
-    byteLength: mesh.byteLength,
-  };
+  let vao = null;
+  let vbo = null;
+  let ibo = null;
+  try {
+    vao = gl.createVertexArray();
+    if (!vao) throw new Error("Forge vertex array allocation failed.");
+    vbo = gl.createBuffer();
+    if (!vbo) throw new Error("Forge vertex buffer allocation failed.");
+    ibo = gl.createBuffer();
+    if (!ibo) throw new Error("Forge index buffer allocation failed.");
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.vertices, usage);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribIPointer(0, 3, gl.SHORT, FORGE_MESH_VERTEX_STRIDE_BYTES, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.BYTE, true, FORGE_MESH_VERTEX_STRIDE_BYTES, 6);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 4, gl.UNSIGNED_BYTE, true, FORGE_MESH_VERTEX_STRIDE_BYTES, 10);
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribIPointer(3, 1, gl.UNSIGNED_SHORT, FORGE_MESH_VERTEX_STRIDE_BYTES, 14);
+    gl.enableVertexAttribArray(4);
+    gl.vertexAttribIPointer(4, 1, gl.UNSIGNED_BYTE, FORGE_MESH_VERTEX_STRIDE_BYTES, FORGE_MESH_MATERIAL_LAYER_OFFSET);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, usage);
+    gl.bindVertexArray(null);
+    return {
+      vao,
+      vbo,
+      ibo,
+      indexCount: mesh.indexCount,
+      indexType: mesh.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT,
+      triangleCount: mesh.triangleCount,
+      byteLength: mesh.byteLength,
+    };
+  } catch (error) {
+    try {
+      gl.bindVertexArray(null);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+    } catch {
+      // Continue releasing allocations after a failed upload.
+    }
+    if (ibo) {
+      try { gl.deleteBuffer(ibo); } catch { /* Best-effort rollback. */ }
+    }
+    if (vbo) {
+      try { gl.deleteBuffer(vbo); } catch { /* Best-effort rollback. */ }
+    }
+    if (vao) {
+      try { gl.deleteVertexArray(vao); } catch { /* Best-effort rollback. */ }
+    }
+    throw error;
+  }
 }
 
 function packAvatarMesh(mesh, sourceVertices) {
@@ -2066,38 +2232,9 @@ function drawHandle(gl, offsetUniform, handle, offset) {
 
 function disposeHandle(gl, handle) {
   if (!gl || !handle) return;
-  gl.deleteBuffer(handle.vbo);
-  gl.deleteBuffer(handle.ibo);
-  gl.deleteVertexArray(handle.vao);
-}
-
-function createProgram(gl, vertexSource, fragmentSource) {
-  const vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
-  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
-  const program = gl.createProgram();
-  gl.attachShader(program, vertex);
-  gl.attachShader(program, fragment);
-  gl.linkProgram(program);
-  gl.deleteShader(vertex);
-  gl.deleteShader(fragment);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const message = gl.getProgramInfoLog(program) || "Forge shader program failed to link.";
-    gl.deleteProgram(program);
-    throw new Error(message);
-  }
-  return program;
-}
-
-function compileShader(gl, type, source) {
-  const shader = gl.createShader(type);
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    const message = gl.getShaderInfoLog(shader) || "Forge shader failed to compile.";
-    gl.deleteShader(shader);
-    throw new Error(message);
-  }
-  return shader;
+  try { if (handle.vbo) gl.deleteBuffer(handle.vbo); } catch { /* Continue releasing the handle. */ }
+  try { if (handle.ibo) gl.deleteBuffer(handle.ibo); } catch { /* Continue releasing the handle. */ }
+  try { if (handle.vao) gl.deleteVertexArray(handle.vao); } catch { /* Best-effort cleanup. */ }
 }
 
 function cameraEye(camera) {

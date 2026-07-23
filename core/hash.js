@@ -1,31 +1,89 @@
-const defaultSeedBytes = new Uint8Array(32).fill(7);
+export const SEED_BYTE_LENGTH = 32;
+export const MAX_DEVELOPMENT_SEED_TEXT_LENGTH = 4096;
+export const I32_MIN = -2_147_483_648;
+export const I32_MAX = 2_147_483_647;
+export const I16_MIN = -32_768;
+export const I16_MAX = 32_767;
+
+const defaultSeedBytes = new Uint8Array(SEED_BYTE_LENGTH).fill(7);
 const seedSaltHashCache = new WeakMap();
 const noiseCellCache = new WeakMap();
 
 export function normalizeSeedBytes(input) {
-  if (input instanceof Uint8Array || Array.isArray(input)) {
-    const bytes = Uint8Array.from(input).slice(0, 32);
-    if (bytes.length === 32) return bytes;
-    const padded = new Uint8Array(32);
-    padded.set(bytes);
-    return padded;
+  if (input == null) return new Uint8Array(defaultSeedBytes);
+  if (input instanceof ArrayBuffer || ArrayBuffer.isView(input)) {
+    const bytes = input instanceof ArrayBuffer
+      ? new Uint8Array(input)
+      : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+    return normalizeSeedByteView(bytes);
+  }
+  if (Array.isArray(input)) {
+    if (!input.length || input.length > SEED_BYTE_LENGTH) {
+      throw new RangeError(`Seed byte arrays must contain 1 to ${SEED_BYTE_LENGTH} bytes.`);
+    }
+    const bytes = new Uint8Array(input.length);
+    for (let index = 0; index < input.length; index += 1) {
+      const value = input[index];
+      if (!Number.isInteger(value) || value < 0 || value > 255) {
+        throw new RangeError(`Seed byte at index ${index} must be an integer from 0 to 255.`);
+      }
+      bytes[index] = value;
+    }
+    return padSeedBytes(bytes);
   }
   if (typeof input === "string" && /^[0-9a-fA-F]{64}$/.test(input)) {
-    const bytes = new Uint8Array(32);
-    for (let i = 0; i < 32; i += 1) bytes[i] = Number.parseInt(input.slice(i * 2, i * 2 + 2), 16);
+    const bytes = new Uint8Array(SEED_BYTE_LENGTH);
+    for (let i = 0; i < SEED_BYTE_LENGTH; i += 1) bytes[i] = Number.parseInt(input.slice(i * 2, i * 2 + 2), 16);
     return bytes;
   }
-  if (typeof input === "string" && input.length) {
+  if (typeof input === "string") {
+    if (!input.length) throw new RangeError("Seed text must not be empty.");
+    if (input.length > MAX_DEVELOPMENT_SEED_TEXT_LENGTH) {
+      throw new RangeError(`Seed text exceeds ${MAX_DEVELOPMENT_SEED_TEXT_LENGTH} UTF-16 code units.`);
+    }
     const encoded = new TextEncoder().encode(input);
-    const out = new Uint8Array(32);
-    for (let i = 0; i < encoded.length; i += 1) out[i % 32] ^= encoded[i];
+    const out = new Uint8Array(SEED_BYTE_LENGTH);
+    for (let i = 0; i < encoded.length; i += 1) out[i % SEED_BYTE_LENGTH] ^= encoded[i];
     return out;
   }
-  return defaultSeedBytes;
+  throw new TypeError("Seed input must be non-empty text, a byte array, or a BufferSource.");
+}
+
+function normalizeSeedByteView(bytes) {
+  if (!bytes.byteLength || bytes.byteLength > SEED_BYTE_LENGTH) {
+    throw new RangeError(`Seed BufferSource input must contain 1 to ${SEED_BYTE_LENGTH} bytes.`);
+  }
+  return padSeedBytes(bytes);
+}
+
+function padSeedBytes(bytes) {
+  const normalized = new Uint8Array(SEED_BYTE_LENGTH);
+  normalized.set(bytes);
+  return normalized;
 }
 
 export function hashCoord3(seed, x, y, z, salt = 0) {
   return hashCoord3FromSeedHash(seedSaltHash(seed, salt), x, y, z);
+}
+
+export function saturatingAddI32(left, right) {
+  return clampInteger(Math.trunc(left) + Math.trunc(right), I32_MIN, I32_MAX);
+}
+
+export function saturatingSubI32(left, right) {
+  return clampInteger(Math.trunc(left) - Math.trunc(right), I32_MIN, I32_MAX);
+}
+
+export function saturatingMulI32(left, right) {
+  return clampInteger(Math.trunc(left) * Math.trunc(right), I32_MIN, I32_MAX);
+}
+
+export function saturatingAddI16(left, right) {
+  return clampInteger(Math.trunc(left) + Math.trunc(right), I16_MIN, I16_MAX);
+}
+
+export function saturatingSubI16(left, right) {
+  return clampInteger(Math.trunc(left) - Math.trunc(right), I16_MIN, I16_MAX);
 }
 
 function hashCoord3FromSeedHash(seedHash, x, y, z) {
@@ -61,11 +119,13 @@ function noiseCellCorners(seed, cellX, cellZ, scale, salt) {
   const cached = byLayer.get(layerKey);
   if (cached?.cellX === cellX && cached.cellZ === cellZ) return cached.corners;
   const seedHash = seedSaltHash(seed, salt);
+  const nextCellX = saturatingAddI32(cellX, 1);
+  const nextCellZ = saturatingAddI32(cellZ, 1);
   const corners = [
     hashCoord3FromSeedHash(seedHash, cellX, 0, cellZ) & 255,
-    hashCoord3FromSeedHash(seedHash, cellX + 1, 0, cellZ) & 255,
-    hashCoord3FromSeedHash(seedHash, cellX, 0, cellZ + 1) & 255,
-    hashCoord3FromSeedHash(seedHash, cellX + 1, 0, cellZ + 1) & 255,
+    hashCoord3FromSeedHash(seedHash, nextCellX, 0, cellZ) & 255,
+    hashCoord3FromSeedHash(seedHash, cellX, 0, nextCellZ) & 255,
+    hashCoord3FromSeedHash(seedHash, nextCellX, 0, nextCellZ) & 255,
   ];
   byLayer.set(layerKey, { cellX, cellZ, corners });
   return corners;
@@ -124,4 +184,8 @@ function smoothFixed(distance, scale) {
 
 function lerpFixed(a, b, t) {
   return Math.trunc((a * (1024 - t) + b * t + 512) / 1024);
+}
+
+function clampInteger(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
 }

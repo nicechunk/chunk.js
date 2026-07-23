@@ -1,4 +1,5 @@
-import { createChunkEngine, detectWebGl2Support } from "../src/index.js";
+import { createChunkEngine } from "../engine/create-chunk-engine.js";
+import { detectWebGl2Support } from "../renderer/webgl2-renderer.js";
 
 const text = {
   status: {
@@ -44,6 +45,8 @@ const state = {
   paused: false,
 };
 
+addEventListener("pagehide", () => state.engine?.destroy(), { once: true });
+
 setStatus("adapterStatus", text.status.checking);
 setStatus("deviceStatus", text.status.pending);
 setStatus("frameStatus", "0 FPS");
@@ -69,7 +72,6 @@ async function boot() {
   setStatus("adapterStatus", adapterLabel(support));
   setStatus("deviceStatus", text.status.requestingDevice);
   state.engine = await createChunkEngine({
-    backend: "webgl2",
     canvas: elements.canvas,
     onStats: updateStats,
     onStatus: updateEngineStatus,

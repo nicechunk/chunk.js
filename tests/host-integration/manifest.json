@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "tests": [
+    {
+      "path": "tests/host-integration/forge-material-rule-surfaces.test.mjs",
+      "requiredHostFiles": [
+        "../src/data/smeltingRules.js"
+      ]
+    },
+    {
+      "path": "tests/host-integration/forge-material-surfaces.test.mjs",
+      "requiredHostFiles": [
+        "../src/data/smeltingRules.js"
+      ]
+    },
+    {
+      "path": "tests/host-integration/forging-chain-adapter-materials.test.mjs",
+      "requiredHostFiles": [
+        "../forging/chain-adapter.js",
+        "../public/rules/smelting-rules.json"
+      ]
+    },
+    {
+      "path": "tests/host-integration/resource-drop-models.test.mjs",
+      "requiredHostFiles": [
+        "../src/data/resourceDropRules.js"
+      ]
+    },
+    {
+      "path": "tests/host-integration/smelting-material-models.test.mjs",
+      "requiredHostFiles": [
+        "../src/data/smeltingRules.js"
+      ]
+    }
+  ]
+}

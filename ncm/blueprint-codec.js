@@ -11,6 +11,19 @@ import { materialDefs } from "../world/material-registry.js";
 
 export const NCM3_PREFIX = "NCM3:";
 export const NCM2_PREFIX = "NCM2:";
+export const NCM3_MAX_PAYLOAD_BYTES = 65535;
+export const NCM3_MAX_COMMANDS = 4_096;
+export const NCM3_MAX_EXPANDED_OPERATIONS = 262_144;
+export const NCM3_MAX_VOXELS = 131_072;
+export const NCM3_MAX_DIMENSION = 256;
+
+const NCM3_MAX_U32 = 0xffffffff;
+const NCM_MAX_ENCODED_LENGTH = Math.ceil(NCM3_MAX_PAYLOAD_BYTES * 4 / 3);
+const NCBP_HEADER_BYTES = 76;
+const MAX_BLUEPRINT_ACCOUNT_BYTES = Math.max(
+  NCBP_HEADER_BYTES + NCM3_MAX_PAYLOAD_BYTES,
+  NCM3_PREFIX.length + NCM_MAX_ENCODED_LENGTH,
+);
 
 const NCM_INTERNAL_MATERIAL_KEYS = new Set(["air", "grassSide", "shadow"]);
 const NCM_MATERIAL_KEYS = Object.freeze(Object.fromEntries(
@@ -24,6 +37,7 @@ export const NCM_MATERIALS = Object.freeze(Object.fromEntries(
     const id = Number(idText);
     const definition = materialDefs[id];
     const alpha = definition.baseColor[3] / 255;
+    const transparent = definition.shaderType === "fluid" || definition.shaderType === "transparent";
     const emissive = definition.emissive.some((value) => value > 0)
       ? rgbBytesToHex(definition.emissive.map((value) => Math.round(value * 255)))
       : null;
@@ -33,8 +47,8 @@ export const NCM_MATERIALS = Object.freeze(Object.fromEntries(
       name: key.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (value) => value.toUpperCase()),
       color: rgbBytesToHex(definition.baseColor),
       style: definition.style,
-      transparent: definition.shaderType === "fluid",
-      opacity: definition.shaderType === "fluid" ? alpha : 1,
+      transparent,
+      opacity: transparent ? alpha : 1,
       emissive,
     })];
   }),
@@ -140,18 +154,50 @@ export function encodeNcm3(blueprint) {
       throw new Error(`Unsupported command opcode ${command.op}.`);
     }
   }
-  return `${NCM3_PREFIX}${base64UrlEncode(Uint8Array.from(bytes))}`;
+  const raw = Uint8Array.from(bytes);
+  if (raw.length > NCM3_MAX_PAYLOAD_BYTES) throw new Error("NCM3 payload exceeds the safety limit.");
+  return `${NCM3_PREFIX}${base64UrlEncode(raw)}`;
 }
 
 export function decodeNcm3(code) {
-  const text = String(code ?? "").trim();
+  return decodeNcm3Record(code).blueprint;
+}
+
+/**
+ * Decode and validate the bounded NCM3 command envelope without voxelizing it.
+ * This is suitable for request/result preflight; overlapping writes still
+ * require voxelization to establish the exact final voxel count/material set.
+ */
+export function analyzeNcm3Envelope(code) {
+  const record = decodeNcm3Record(code);
+  const { blueprint, analysis } = record;
+  return Object.freeze({
+    canonicalCode: record.text,
+    payloadBytes: record.payloadBytes,
+    name: blueprint.name,
+    size: Object.freeze({ ...analysis.size }),
+    commandCount: blueprint.commands.length,
+    referencedMaterials: Object.freeze([...analysis.referencedMaterials]),
+    operationUpperBound: analysis.operationUpperBound,
+    maxVoxelCount: Math.min(
+      NCM3_MAX_VOXELS,
+      analysis.size.x * analysis.size.y * analysis.size.z,
+      analysis.operationUpperBound,
+    ),
+    contentBounds: Object.freeze({ ...analysis.contentBounds }),
+  });
+}
+
+function decodeNcm3Record(code) {
+  const text = String(code ?? "");
   if (!text.startsWith(NCM3_PREFIX)) throw new Error("Expected an NCM3 payload.");
-  const reader = createByteReader(base64UrlDecode(text.slice(NCM3_PREFIX.length)));
+  const raw = decodeCanonicalPayload(text.slice(NCM3_PREFIX.length), "NCM3");
+  const reader = createByteReader(raw);
   const version = reader.read();
   if (version !== 1) throw new Error(`Unsupported NCM3 version ${version}.`);
   const blueprint = new Blueprint({ x: readVar(reader), y: readVar(reader), z: readVar(reader) }, "PDA Blueprint");
   const commandCount = readVar(reader);
-  if (commandCount > 4096) throw new Error("NCM3 command limit exceeded.");
+  if (commandCount > NCM3_MAX_COMMANDS) throw new Error("NCM3 command limit exceeded.");
 
   for (let index = 0; index < commandCount; index++) {
     const op = reader.read();
@@ -186,8 +232,8 @@ export function decodeNcm3(code) {
     }
   }
   if (!reader.done()) throw new Error("Unexpected trailing NCM3 bytes.");
-  validateBlueprint(blueprint);
-  return blueprint;
+  const analysis = validateBlueprint(blueprint);
+  return { text, payloadBytes: raw.byteLength, blueprint, analysis };
 }
 
 export function expandBlueprint(blueprint) {
@@ -285,7 +331,7 @@ export function voxelize(blueprintOrCuboids, sizeOverride) {
   for (const cuboid of cuboids) {
     validateCuboid(cuboid, size);
     operationBudget += cuboid.w * cuboid.h * cuboid.d;
-    if (operationBudget > 262144) throw new Error("Expanded voxel operation budget exceeded.");
+    if (operationBudget > NCM3_MAX_EXPANDED_OPERATIONS) throw new Error("Expanded voxel operation budget exceeded.");
     for (let y = cuboid.y; y < cuboid.y + cuboid.h; y++) {
       for (let z = cuboid.z; z < cuboid.z + cuboid.d; z++) {
         for (let x = cuboid.x; x < cuboid.x + cuboid.w; x++) {
@@ -294,7 +340,7 @@ export function voxelize(blueprintOrCuboids, sizeOverride) {
       }
     }
   }
-  if (voxels.size > 131072) throw new Error("Expanded voxel safety limit exceeded.");
+  if (voxels.size > NCM3_MAX_VOXELS) throw new Error("Expanded voxel safety limit exceeded.");
   return voxels;
 }
 
@@ -362,8 +408,9 @@ export function describeBlueprint(blueprint) {
 }
 
 export function payloadByteLength(code) {
-  const colon = String(code).indexOf(":");
-  return colon >= 0 ? base64UrlDecode(String(code).slice(colon + 1)).length : 0;
+  const text = String(code ?? "");
+  const colon = text.indexOf(":");
+  return colon >= 0 ? decodeCanonicalPayload(text.slice(colon + 1), "NCM").length : 0;
 }
 
 /**
@@ -381,15 +428,22 @@ export function payloadByteLength(code) {
  * accepted. Production clients should use NCBP and verify its hash.
  */
 export async function decodeBlueprintAccount(rawInput) {
-  const raw = rawInput instanceof Uint8Array ? rawInput : new Uint8Array(rawInput);
+  let byteLength;
+  if (rawInput instanceof ArrayBuffer) byteLength = rawInput.byteLength;
+  else if (ArrayBuffer.isView(rawInput)) byteLength = rawInput.byteLength;
+  else throw new TypeError("Blueprint account input must be an ArrayBuffer or ArrayBufferView.");
+  if (byteLength > MAX_BLUEPRINT_ACCOUNT_BYTES) throw new Error("Blueprint account exceeds the safety limit.");
+  const raw = rawInput instanceof ArrayBuffer
+    ? new Uint8Array(rawInput)
+    : new Uint8Array(rawInput.buffer, rawInput.byteOffset, rawInput.byteLength);
   const text = new TextDecoder().decode(raw).replace(/\0+$/g, "").trim();
   if (text.startsWith(NCM3_PREFIX) || text.startsWith(NCM2_PREFIX)) return { code: text, version: 0, verified: false, raw: true };
-  if (raw.length < 76 || new TextDecoder().decode(raw.slice(0, 4)) !== "NCBP") throw new Error("Account is not an NCBP blueprint account.");
+  if (raw.length < NCBP_HEADER_BYTES || new TextDecoder().decode(raw.slice(0, 4)) !== "NCBP") throw new Error("Account is not an NCBP blueprint account.");
   const version = raw[4];
   if (version !== 1) throw new Error(`Unsupported NCBP account version ${version}.`);
   const length = new DataView(raw.buffer, raw.byteOffset, raw.byteLength).getUint32(72, true);
-  if (length > 65535 || 76 + length > raw.length) throw new Error("Invalid NCBP code length.");
-  const stored = raw.slice(76, 76 + length);
+  if (length > NCM3_MAX_PAYLOAD_BYTES || NCBP_HEADER_BYTES + length > raw.length) throw new Error("Invalid NCBP code length.");
+  const stored = raw.slice(NCBP_HEADER_BYTES, NCBP_HEADER_BYTES + length);
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", stored));
   const expected = raw.slice(40, 72);
   const verified = digest.every((value, index) => value === expected[index]);
@@ -410,19 +464,31 @@ export async function fetchBlueprintFromPda({ rpcUrl, address }) {
   if (json.error) throw new Error(json.error.message || "RPC request failed.");
   const encoded = json.result?.value?.data?.[0];
   if (!encoded) throw new Error("PDA account was not found.");
-  return decodeBlueprintAccount(Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)));
+  if (typeof encoded !== "string" || encoded.length > Math.ceil(MAX_BLUEPRINT_ACCOUNT_BYTES * 4 / 3) + 2) {
+    throw new Error("Blueprint account exceeds the safety limit.");
+  }
+  let raw;
+  try {
+    raw = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
+  } catch {
+    throw new Error("RPC returned invalid Base64 account data.");
+  }
+  return decodeBlueprintAccount(raw);
 }
 
 function validateBlueprint(blueprint) {
   const size = normalizeSize(blueprint?.size);
   if (!Array.isArray(blueprint?.commands)) throw new Error("Blueprint commands are required.");
-  if (blueprint.commands.length > 4096) throw new Error("Blueprint command limit exceeded.");
-  let encodedOperationBudget = 0;
+  if (blueprint.commands.length > NCM3_MAX_COMMANDS) throw new Error("Blueprint command limit exceeded.");
+  let operationUpperBound = 0;
+  let contentBounds = null;
+  const referencedMaterials = new Set();
   for (const command of blueprint.commands) {
     if (!Object.values(OPCODE).includes(command.op)) throw new Error("Unknown blueprint command.");
     const ids = command.op === OPCODE.TREE ? [command.trunkMaterial, command.leafMaterial] : [command.material];
     ids.forEach((id) => {
       if (!MATERIALS[id]) throw new Error(`Unknown canonical material ID ${id}.`);
+      referencedMaterials.add(id);
     });
     const integer = (value, label, min, max) => {
       if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${label} is outside the NCM3 safety bounds.`);
@@ -432,7 +498,6 @@ function validateBlueprint(blueprint) {
       integer(command.w, "width", 1, size.x); integer(command.h, "height", 1, size.y); integer(command.d, "depth", 1, size.z);
       if (command.op === OPCODE.BOX) {
         validateCuboid(command, size);
-        encodedOperationBudget += command.w * command.h * command.d;
       }
     }
     if (command.op === OPCODE.REPEAT_BOX) {
@@ -441,7 +506,6 @@ function validateBlueprint(blueprint) {
       validateRepeatedAxis(command.x, command.w, command.dx, command.count, size.x, "x");
       validateRepeatedAxis(command.y, command.h, command.dy, command.count, size.y, "y");
       validateRepeatedAxis(command.z, command.d, command.dz, command.count, size.z, "z");
-      encodedOperationBudget += command.w * command.h * command.d * command.count;
     }
     if (GABLE_OPS.has(command.op)) {
       integer(command.x, "x", 0, size.x - 1); integer(command.y, "y", 0, size.y - 1); integer(command.z, "z", 0, size.z - 1);
@@ -457,12 +521,6 @@ function validateBlueprint(blueprint) {
         h: layers,
         d: command.depth,
       }, size);
-      if (command.op === OPCODE.GABLE) encodedOperationBudget += layers * 2 * command.depth;
-      else if (command.op === OPCODE.GABLE_TRIM) encodedOperationBudget += layers * 4;
-      else if (command.op === OPCODE.GABLE_FILL) encodedOperationBudget += layers * command.width * command.depth;
-      else if (command.op === OPCODE.GABLE_Z) encodedOperationBudget += layers * 2 * command.width;
-      else if (command.op === OPCODE.GABLE_TRIM_Z) encodedOperationBudget += layers * 4;
-      else encodedOperationBudget += layers * command.width * command.depth;
     }
     if (command.op === OPCODE.TREE) {
       integer(command.x, "x", 0, size.x - 1); integer(command.y, "y", 0, size.y - 1); integer(command.z, "z", 0, size.z - 1);
@@ -477,11 +535,10 @@ function validateBlueprint(blueprint) {
         h: Math.max(command.height, command.crownRadius + 1),
         d: crownDiameter,
       }, size);
-      encodedOperationBudget += trunkHeight * 4 + command.crownRadius * 8 * (command.crownRadius * 2 + 2) + 4;
     }
     if (command.op === OPCODE.FENCE) {
       integer(command.x, "x", 0, size.x - 1); integer(command.y, "y", 0, size.y - 1); integer(command.z, "z", 0, size.z - 1);
-      integer(command.length, "fence length", 1, 256); integer(command.axis, "fence axis", 0, 1); integer(command.spacing, "fence spacing", 1, 64);
+      integer(command.length, "fence length", 1, NCM3_MAX_DIMENSION); integer(command.axis, "fence axis", 0, 1); integer(command.spacing, "fence spacing", 1, 64);
       const axisX = command.axis === 0;
       validateCuboid({
         x: command.x,
@@ -491,11 +548,131 @@ function validateBlueprint(blueprint) {
         h: 5,
         d: axisX ? 1 : command.length,
       }, size);
-      encodedOperationBudget += command.length * 2 + (Math.ceil(command.length / command.spacing) + 1) * 5;
     }
-    if (encodedOperationBudget > 262144) throw new Error("Expanded voxel operation budget exceeded.");
+    const envelope = commandEnvelope(command);
+    operationUpperBound += envelope.operationUpperBound;
+    contentBounds = unionBounds(contentBounds, envelope.bounds);
+    if (operationUpperBound > NCM3_MAX_EXPANDED_OPERATIONS) {
+      throw new Error("Expanded voxel operation budget exceeded.");
+    }
   }
-  return size;
+  return {
+    size,
+    operationUpperBound,
+    referencedMaterials: [...referencedMaterials].sort((left, right) => left - right),
+    contentBounds: contentBounds ?? emptyContentBounds(),
+  };
+}
+
+function commandEnvelope(command) {
+  if (command.op === OPCODE.BOX) {
+    return cuboidEnvelope(command, command.w * command.h * command.d);
+  }
+  if (command.op === OPCODE.REPEAT_BOX) {
+    const lastX = command.x + command.dx * (command.count - 1);
+    const lastY = command.y + command.dy * (command.count - 1);
+    const lastZ = command.z + command.dz * (command.count - 1);
+    return {
+      operationUpperBound: command.w * command.h * command.d * command.count,
+      bounds: boundsFromExtents(
+        Math.min(command.x, lastX),
+        Math.min(command.y, lastY),
+        Math.min(command.z, lastZ),
+        Math.max(command.x, lastX) + command.w - 1,
+        Math.max(command.y, lastY) + command.h - 1,
+        Math.max(command.z, lastZ) + command.d - 1,
+      ),
+    };
+  }
+  if (GABLE_OPS.has(command.op)) {
+    const zOriented = command.op === OPCODE.GABLE_Z
+      || command.op === OPCODE.GABLE_TRIM_Z
+      || command.op === OPCODE.GABLE_FILL_Z;
+    const layers = Math.ceil((zOriented ? command.depth : command.width) / 2);
+    let operationUpperBound;
+    if (command.op === OPCODE.GABLE) operationUpperBound = layers * 2 * command.depth;
+    else if (command.op === OPCODE.GABLE_TRIM) operationUpperBound = layers * 4;
+    else if (command.op === OPCODE.GABLE_FILL) operationUpperBound = layers * command.width * command.depth;
+    else if (command.op === OPCODE.GABLE_Z) operationUpperBound = layers * 2 * command.width;
+    else if (command.op === OPCODE.GABLE_TRIM_Z) operationUpperBound = layers * 4;
+    else operationUpperBound = layers * command.width * command.depth;
+    return cuboidEnvelope({
+      x: command.x,
+      y: command.y,
+      z: command.z,
+      w: command.width,
+      h: layers,
+      d: command.depth,
+    }, operationUpperBound);
+  }
+  if (command.op === OPCODE.TREE) {
+    const trunkHeight = Math.max(2, command.height - command.crownRadius);
+    const crownDiameter = command.crownRadius * 2 + 2;
+    return cuboidEnvelope({
+      x: command.x - command.crownRadius,
+      y: command.y,
+      z: command.z - command.crownRadius,
+      w: crownDiameter,
+      h: Math.max(command.height, command.crownRadius + 1),
+      d: crownDiameter,
+    }, trunkHeight * 4 + command.crownRadius * 8 * crownDiameter + 4);
+  }
+  if (command.op === OPCODE.FENCE) {
+    const axisX = command.axis === 0;
+    return cuboidEnvelope({
+      x: command.x,
+      y: command.y,
+      z: command.z,
+      w: axisX ? command.length : 1,
+      h: 5,
+      d: axisX ? 1 : command.length,
+    }, command.length * 2 + (Math.ceil(command.length / command.spacing) + 1) * 5);
+  }
+  throw new Error("Unknown blueprint command.");
+}
+
+function cuboidEnvelope(cuboid, operationUpperBound) {
+  return {
+    operationUpperBound,
+    bounds: boundsFromExtents(
+      cuboid.x,
+      cuboid.y,
+      cuboid.z,
+      cuboid.x + cuboid.w - 1,
+      cuboid.y + cuboid.h - 1,
+      cuboid.z + cuboid.d - 1,
+    ),
+  };
+}
+
+function unionBounds(current, next) {
+  if (!current) return next;
+  return boundsFromExtents(
+    Math.min(current.minX, next.minX),
+    Math.min(current.minY, next.minY),
+    Math.min(current.minZ, next.minZ),
+    Math.max(current.maxX, next.maxX),
+    Math.max(current.maxY, next.maxY),
+    Math.max(current.maxZ, next.maxZ),
+  );
+}
+
+function boundsFromExtents(minX, minY, minZ, maxX, maxY, maxZ) {
+  return {
+    minX,
+    minY,
+    minZ,
+    maxX,
+    maxY,
+    maxZ,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+    depth: maxZ - minZ + 1,
+  };
+}
+
+function emptyContentBounds() {
+  return { minX: 0, minY: 0, minZ: 0, maxX: -1, maxY: -1, maxZ: -1, width: 0, height: 0, depth: 0 };
 }
 
 function validateCuboid(cuboid, size) {
@@ -523,7 +700,9 @@ function validateRepeatedAxis(start, length, step, count, limit, label) {
 function normalizeSize(size) {
   const normalized = { x: Number(size?.x), y: Number(size?.y), z: Number(size?.z) };
   for (const value of Object.values(normalized)) {
-    if (!Number.isInteger(value) || value < 1 || value > 256) throw new Error("Blueprint dimensions must be integers from 1 to 256.");
+    if (!Number.isInteger(value) || value < 1 || value > NCM3_MAX_DIMENSION) {
+      throw new Error(`Blueprint dimensions must be integers from 1 to ${NCM3_MAX_DIMENSION}.`);
+    }
   }
   return normalized;
 }
@@ -561,26 +740,36 @@ function rgbBytesToHex(values) {
 }
 
 function writeVar(bytes, value) {
-  let next = Math.max(0, Math.round(value));
-  while (next > 127) { bytes.push((next & 127) | 128); next = Math.floor(next / 128); }
+  if (!Number.isInteger(value) || value < 0 || value > NCM3_MAX_U32) {
+    throw new Error("NCM3 varint values must be unsigned 32-bit integers.");
+  }
+  let next = value;
+  while (next > 127) { bytes.push((next % 128) + 128); next = Math.floor(next / 128); }
   bytes.push(next);
 }
 
 function readVar(reader) {
   let value = 0;
-  let shift = 0;
-  while (true) {
+  let multiplier = 1;
+  for (let index = 0; index < 5; index += 1) {
     const byte = reader.read();
-    value |= (byte & 127) << shift;
-    if ((byte & 128) === 0) return value;
-    shift += 7;
-    if (shift > 28) throw new Error("Varint is too large.");
+    const payload = byte & 127;
+    value += payload * multiplier;
+    if (value > NCM3_MAX_U32) throw new Error("NCM3 varint is too large.");
+    if ((byte & 128) === 0) {
+      if (index > 0 && payload === 0) throw new Error("NCM3 varint is not canonical.");
+      return value;
+    }
+    multiplier *= 128;
   }
+  throw new Error("NCM3 varint is too large.");
 }
 
 function writeSignedVar(bytes, value) {
-  const next = Math.round(value);
-  writeVar(bytes, next < 0 ? Math.abs(next) * 2 - 1 : next * 2);
+  if (!Number.isInteger(value) || value < -0x80000000 || value > 0x7fffffff) {
+    throw new Error("NCM3 signed varint values must be signed 32-bit integers.");
+  }
+  writeVar(bytes, value < 0 ? Math.abs(value) * 2 - 1 : value * 2);
 }
 
 function readSignedVar(reader) {
@@ -624,4 +813,22 @@ function base64UrlEncode(raw) {
 function base64UrlDecode(text) {
   const padded = text.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(text.length / 4) * 4, "=");
   return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+}
+
+function decodeCanonicalPayload(encoded, format) {
+  if (encoded.length > NCM_MAX_ENCODED_LENGTH) {
+    throw new Error(`${format} payload exceeds the safety limit.`);
+  }
+  if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded) || encoded.length % 4 === 1) {
+    throw new Error(`Invalid canonical ${format} Base64URL payload.`);
+  }
+  let raw;
+  try {
+    raw = base64UrlDecode(encoded);
+  } catch {
+    throw new Error(`Invalid canonical ${format} Base64URL payload.`);
+  }
+  if (raw.length > NCM3_MAX_PAYLOAD_BYTES) throw new Error(`${format} payload exceeds the safety limit.`);
+  if (base64UrlEncode(raw) !== encoded) throw new Error(`Invalid canonical ${format} Base64URL payload.`);
+  return raw;
 }

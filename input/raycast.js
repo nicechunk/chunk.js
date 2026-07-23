@@ -27,7 +27,10 @@ export function raycastBlock(cameraState, direction = null, maxDistance = 6, wor
     if (blockId !== BLOCK_ID.air && (!isLowVegetationBlock(blockId) || isBlockingBlock(blockId))) {
       const coord = worldToChunk(x, y, z, worldState.chunkSize);
       const block = blockDef(blockId);
-      const resource = getResourceAt(worldState.worldSeed, x, y, z, worldState.resourceRuleVersion, { blockId });
+      const resource = getResourceAt(worldState.worldSeed, x, y, z, worldState.resourceRuleVersion, {
+        blockId,
+        generationVersion: worldState.generationVersion,
+      });
       return {
         hit: true,
         worldX: x,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { smeltingRules } from "../../src/data/smeltingRules.js";
+import { smeltingRules } from "../../../src/data/smeltingRules.js";
 import {
   SMELTING_MATERIAL_MODEL_IDS,
   SMELTING_MATERIAL_VISUAL_REVISION,
@@ -7,7 +7,7 @@ import {
   hasSmeltingMaterialPreviewModel,
   smeltingMaterialModelDefinition,
   smeltingMaterialSurfaceProfile,
-} from "../renderer/smelting-material-models.js";
+} from "../../renderer/smelting-material-models.js";
 
 const recipeIds = smeltingRules.materials.map((material) => material.id).sort();
 const modelIds = [...SMELTING_MATERIAL_MODEL_IDS].sort();

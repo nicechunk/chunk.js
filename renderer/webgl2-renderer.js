@@ -98,6 +98,7 @@ export class WebGL2VoxelRenderer {
       cloudCellSize: options.cloudCellSize ?? 128,
       cloudFarPadding: options.cloudFarPadding ?? 540,
       maxVoxelParticles: options.maxVoxelParticles ?? 320,
+      maxDynamicShadowCasters: options.maxDynamicShadowCasters ?? 8,
     };
     this.onInitStage = typeof options.onInitStage === "function" ? options.onInitStage : null;
     this.gl = null;
@@ -125,6 +126,7 @@ export class WebGL2VoxelRenderer {
     this.renderFrameId = 0;
     this.regionGroupCache = new Map();
     this.frustumFilterCache = null;
+    this._contextListenersAttached = false;
     this._onContextLost = (event) => {
       event.preventDefault();
       this.contextLost = true;
@@ -136,74 +138,93 @@ export class WebGL2VoxelRenderer {
       this.visualChunkBuffers.clear();
       this.regionBuffers.clear();
       this.visualRegionBuffers.clear();
+      this.avatarBuffers.clear();
       this.regionGroupCache.clear();
+      this.frustumFilterCache = null;
       this.init();
     };
-    this.canvas.addEventListener("webglcontextlost", this._onContextLost, false);
-    this.canvas.addEventListener("webglcontextrestored", this._onContextRestored, false);
+    this.attachContextListeners();
   }
 
   init() {
     if (this.initialized && this.gl && !this.contextLost) return this;
+    const canvasDimensions = {
+      width: this.canvas.width,
+      height: this.canvas.height,
+    };
     const runStage = (label, callback, details = null) => {
       const startedAt = performance.now();
       const result = callback();
       this.onInitStage?.(label, performance.now() - startedAt, typeof details === "function" ? details(result) : details);
       return result;
     };
-    const gl = runStage("context", () => this.canvas.getContext("webgl2", {
-      alpha: false,
-      antialias: false,
-      depth: true,
-      stencil: false,
-      premultipliedAlpha: false,
-      preserveDrawingBuffer: false,
-      powerPreference: "high-performance",
-    }), (context) => webGlContextDetails(context));
-    if (!gl) throw new Error("WebGL2 is not available in this browser.");
-    this.gl = gl;
-    runStage("shader programs", () => {
-      this.program = createProgram(gl, OPAQUE_VERTEX_SHADER, OPAQUE_FRAGMENT_SHADER);
-      this.avatarProgram = createProgram(gl, AVATAR_VERTEX_SHADER, AVATAR_FRAGMENT_SHADER);
-      this.uniforms = collectUniforms(gl, this.program);
-      this.avatarUniforms = collectAvatarUniforms(gl, this.avatarProgram);
-    });
-    this.bufferManager = new BufferManager(gl);
-    this.textureArray = new TextureArrayManager(gl, {
-      tileSize: this.options.textureTileSize,
-      seed: this.options.textureSeed,
-    });
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    runStage("baked texture array", () => this.textureArray.createTextureArray(), () => ({
-      layers: this.textureArray.layerCount,
-      tileSize: this.textureArray.tileSize,
-    }));
-    this.cloudLayer = runStage("cloud geometry", () => new CloudLayer(gl, {
-      seed: this.options.textureSeed,
-      baseHeight: this.options.cloudHeight,
-      radius: this.options.cloudRadius,
-      cellSize: this.options.cloudCellSize,
-    }).init());
-    this.skyGradient = runStage("sky gradient", () => new SkyGradient(gl).init());
-    this.sunDisc = runStage("sun disc", () => new SunDisc(gl).init());
-    this.projectedShadowLayer = runStage("projected shadows", () => new ProjectedShadowLayer(gl, {
-      maxCasters: this.options.maxDynamicShadowCasters ?? 8,
-    }).init());
-    this.voxelOverlay = runStage("voxel overlays", () => new VoxelOverlay(gl).init());
-    this.voxelParticles = runStage("voxel particles", () => new VoxelParticleLayer(gl, {
-      maxParticles: this.options.maxVoxelParticles,
-    }).init());
-    gl.enable(gl.DEPTH_TEST);
-    gl.depthFunc(gl.LEQUAL);
-    gl.enable(gl.CULL_FACE);
-    gl.cullFace(gl.BACK);
-    gl.disable(gl.BLEND);
-    gl.useProgram(this.program);
-    gl.uniform1i(this.uniforms.uTextureArray, 0);
-    gl.uniform1f(this.uniforms.uOpacity, 1.0);
-    runStage("canvas resize", () => this.resize());
-    this.initialized = true;
-    return this;
+    try {
+      this.attachContextListeners();
+      const gl = runStage("context", () => this.canvas.getContext("webgl2", {
+        alpha: false,
+        antialias: false,
+        depth: true,
+        stencil: false,
+        premultipliedAlpha: false,
+        preserveDrawingBuffer: false,
+        powerPreference: "high-performance",
+      }), (context) => webGlContextDetails(context));
+      if (!gl) throw new Error("WebGL2 is not available in this browser.");
+      this.gl = gl;
+      runStage("shader programs", () => {
+        this.program = createProgram(gl, OPAQUE_VERTEX_SHADER, OPAQUE_FRAGMENT_SHADER);
+        this.avatarProgram = createProgram(gl, AVATAR_VERTEX_SHADER, AVATAR_FRAGMENT_SHADER);
+        this.uniforms = collectUniforms(gl, this.program);
+        this.avatarUniforms = collectAvatarUniforms(gl, this.avatarProgram);
+      });
+      this.bufferManager = new BufferManager(gl);
+      this.textureArray = new TextureArrayManager(gl, {
+        tileSize: this.options.textureTileSize,
+        seed: this.options.textureSeed,
+      });
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      runStage("baked texture array", () => this.textureArray.createTextureArray(), () => ({
+        layers: this.textureArray.layerCount,
+        tileSize: this.textureArray.tileSize,
+      }));
+      this.cloudLayer = new CloudLayer(gl, {
+        seed: this.options.textureSeed,
+        baseHeight: this.options.cloudHeight,
+        radius: this.options.cloudRadius,
+        cellSize: this.options.cloudCellSize,
+      });
+      runStage("cloud geometry", () => this.cloudLayer.init());
+      this.skyGradient = new SkyGradient(gl);
+      runStage("sky gradient", () => this.skyGradient.init());
+      this.sunDisc = new SunDisc(gl);
+      runStage("sun disc", () => this.sunDisc.init());
+      this.projectedShadowLayer = new ProjectedShadowLayer(gl, {
+        maxCasters: this.options.maxDynamicShadowCasters ?? 8,
+      });
+      runStage("projected shadows", () => this.projectedShadowLayer.init());
+      this.voxelOverlay = new VoxelOverlay(gl);
+      runStage("voxel overlays", () => this.voxelOverlay.init());
+      this.voxelParticles = new VoxelParticleLayer(gl, {
+        maxParticles: this.options.maxVoxelParticles,
+      });
+      runStage("voxel particles", () => this.voxelParticles.init());
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+      gl.disable(gl.BLEND);
+      gl.useProgram(this.program);
+      gl.uniform1i(this.uniforms.uTextureArray, 0);
+      gl.uniform1f(this.uniforms.uOpacity, 1.0);
+      runStage("canvas resize", () => this.resize());
+      this.initialized = true;
+      return this;
+    } catch (error) {
+      this.releaseContextResources();
+      restoreCanvasDimensions(this.canvas, canvasDimensions);
+      this.detachContextListeners();
+      throw error;
+    }
   }
 
   resize(width = null, height = null, dpr = null) {
@@ -1199,39 +1220,90 @@ export class WebGL2VoxelRenderer {
     return stats;
   }
 
-  dispose() {
-    for (const entry of this.chunkBuffers.values()) this.bufferManager?.disposeChunkBuffers(entry.handle);
+  attachContextListeners() {
+    if (this._contextListenersAttached) return;
+    let contextLostAttached = false;
+    try {
+      this.canvas.addEventListener("webglcontextlost", this._onContextLost, false);
+      contextLostAttached = true;
+      this.canvas.addEventListener("webglcontextrestored", this._onContextRestored, false);
+      this._contextListenersAttached = true;
+    } catch (error) {
+      if (contextLostAttached) {
+        try {
+          this.canvas.removeEventListener("webglcontextlost", this._onContextLost, false);
+        } catch {
+          // Preserve the listener installation error; cleanup is best effort.
+        }
+      }
+      throw error;
+    }
+  }
+
+  detachContextListeners() {
+    if (!this._contextListenersAttached) return;
+    try {
+      this.canvas.removeEventListener("webglcontextlost", this._onContextLost, false);
+    } catch {
+      // Continue removing the remaining listener and resetting ownership state.
+    }
+    try {
+      this.canvas.removeEventListener("webglcontextrestored", this._onContextRestored, false);
+    } catch {
+      // Listener cleanup is best effort during rollback and disposal.
+    }
+    this._contextListenersAttached = false;
+  }
+
+  releaseContextResources() {
+    const safely = (callback) => {
+      try {
+        callback();
+      } catch {
+        // A failed delete must not prevent the rest of the owned resources from being released.
+      }
+    };
+    for (const entry of this.chunkBuffers.values()) safely(() => this.bufferManager?.disposeChunkBuffers(entry.handle));
     this.chunkBuffers.clear();
-    for (const entry of this.visualChunkBuffers.values()) this.bufferManager?.disposeChunkBuffers(entry.handle);
+    for (const entry of this.visualChunkBuffers.values()) safely(() => this.bufferManager?.disposeChunkBuffers(entry.handle));
     this.visualChunkBuffers.clear();
-    for (const entry of this.regionBuffers.values()) this.bufferManager?.disposeChunkBuffers(entry.handle);
+    for (const entry of this.regionBuffers.values()) safely(() => this.bufferManager?.disposeChunkBuffers(entry.handle));
     this.regionBuffers.clear();
-    for (const entry of this.visualRegionBuffers.values()) this.bufferManager?.disposeChunkBuffers(entry.handle);
+    for (const entry of this.visualRegionBuffers.values()) safely(() => this.bufferManager?.disposeChunkBuffers(entry.handle));
     this.visualRegionBuffers.clear();
-    for (const entry of this.avatarBuffers.values()) this.disposeAvatarBuffers(entry.handle);
+    for (const entry of this.avatarBuffers.values()) safely(() => this.disposeAvatarBuffers(entry.handle));
     this.avatarBuffers.clear();
     this.regionGroupCache.clear();
-    this.cloudLayer?.dispose();
+    this.frustumFilterCache = null;
+    safely(() => this.cloudLayer?.dispose());
     this.cloudLayer = null;
-    this.skyGradient?.dispose();
+    safely(() => this.skyGradient?.dispose());
     this.skyGradient = null;
-    this.sunDisc?.dispose();
+    safely(() => this.sunDisc?.dispose());
     this.sunDisc = null;
-    this.projectedShadowLayer?.dispose();
+    safely(() => this.projectedShadowLayer?.dispose());
     this.projectedShadowLayer = null;
-    this.voxelOverlay?.dispose();
+    safely(() => this.voxelOverlay?.dispose());
     this.voxelOverlay = null;
-    this.voxelParticles?.dispose();
+    safely(() => this.voxelParticles?.dispose());
     this.voxelParticles = null;
-    this.textureArray?.dispose();
-    if (this.program && this.gl) this.gl.deleteProgram(this.program);
-    if (this.avatarProgram && this.gl) this.gl.deleteProgram(this.avatarProgram);
-    this.canvas.removeEventListener("webglcontextlost", this._onContextLost, false);
-    this.canvas.removeEventListener("webglcontextrestored", this._onContextRestored, false);
+    safely(() => this.textureArray?.dispose());
+    if (this.program && this.gl) safely(() => this.gl.deleteProgram(this.program));
+    if (this.avatarProgram && this.gl) safely(() => this.gl.deleteProgram(this.avatarProgram));
     this.gl = null;
     this.program = null;
     this.avatarProgram = null;
+    this.uniforms = null;
+    this.avatarUniforms = null;
+    this.bufferManager = null;
+    this.textureArray = null;
     this.initialized = false;
+    this.stats = emptyStats();
+  }
+
+  dispose() {
+    this.releaseContextResources();
+    this.detachContextListeners();
   }
 
   createAvatarBuffers(mesh) {
@@ -1643,6 +1715,19 @@ function webGlContextDetails(gl) {
     vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
     renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
   };
+}
+
+function restoreCanvasDimensions(canvas, dimensions) {
+  try {
+    if (canvas.width !== dimensions.width) canvas.width = dimensions.width;
+  } catch {
+    // Preserve the initialization error; DOM restoration is best effort.
+  }
+  try {
+    if (canvas.height !== dimensions.height) canvas.height = dimensions.height;
+  } catch {
+    // Preserve the initialization error; DOM restoration is best effort.
+  }
 }
 
 function defaultUploadBudget() {
