@@ -1,5 +1,4 @@
 export const NCF1_PREFIX = "NCF1.";
-export const NCF1_LEGACY_VERSION = 14;
 export const NCF1_VERSION = 15;
 export const FORGE_FIXED_SCALE = 64;
 export const FORGE_COMPONENT_GRID = Object.freeze({ x: 14, y: 10, z: 14 });
@@ -35,23 +34,24 @@ export const FORGE_DESIGN_STATS_VECTOR_SCHEMA = Object.freeze(FORGE_DESIGN_STATS
 export const FORGE_MATERIAL_REQUIREMENT_KEYS = Object.freeze([
   "requiredVolumeMm3",
   "requiredEffectiveDurability",
+  "outputMassGrams",
 ]);
 export const FORGE_MATERIAL_CAPACITY_KEYS = Object.freeze([
   "totalVolumeMm3",
   "totalEffectiveDurability",
+  "totalMassGrams",
 ]);
 export const FORGE_MATERIAL_REQUIREMENT_SCHEMA = Object.freeze(FORGE_MATERIAL_REQUIREMENT_KEYS.map((key, index) => Object.freeze({
   index,
   key,
   capacityKey: FORGE_MATERIAL_CAPACITY_KEYS[index],
-  unit: index === 0 ? "mm3" : "effective-durability",
+  unit: index === 0 ? "mm3" : index === 1 ? "effective-durability" : "g",
   comparison: "capacity-gte-requirement",
   integer: "u64",
 })));
 
-// Compatibility aliases now refer only to the two authoritative requirement
-// fields. The 12 equipment attributes are design/display statistics, never
-// material capacities.
+// The 12 equipment attributes are design/display statistics, never material
+// capacities.
 export const FORGE_MATERIAL_VECTOR_KEYS = FORGE_MATERIAL_REQUIREMENT_KEYS;
 export const FORGE_MATERIAL_VECTOR_SCHEMA = FORGE_MATERIAL_REQUIREMENT_SCHEMA;
 
@@ -77,7 +77,7 @@ const DEFAULT_RESOURCE_COLOR_RGB444 = Object.freeze(FORGE_RESOURCE_IDS.map((id) 
 const COMPONENT_CELL_COUNT = FORGE_COMPONENT_GRID.x * FORGE_COMPONENT_GRID.y * FORGE_COMPONENT_GRID.z;
 const ZERO_Q = Object.freeze([0, 0, 0]);
 // Any non-empty finite voxel volume has at least one surface in each of the six
-// axis directions. With the v14 appearance header and its best coordinate
+// axis directions. With the NCF1 appearance header and its best coordinate
 // palette, those six quads require at least 36 raw bytes.
 const NCF1_MIN_BAKED_APPEARANCE_BYTES = 36;
 
@@ -165,7 +165,7 @@ export function canonicalizeForgeDesign(input = {}) {
   const version = normalizeNcf1Version(input?.version);
   const design = {
     version,
-    equipment: normalizeEquipment(input.equipment ?? input.equipmentStats, version),
+    equipment: normalizeEquipment(input.equipment ?? input.equipmentStats),
   };
   if (input.appearance) {
     design.appearance = normalizeAppearance(input.appearance);
@@ -258,7 +258,7 @@ export function encodeCompactNcf1(input) {
 }
 
 // Deterministically rasterizes editable component surfaces into the existing
-// v14+ 24^3 appearance grid. It is intentionally a surface bake: equipment
+// NCF1 24^3 appearance grid. It is intentionally a surface bake: equipment
 // statistics stay byte-identical while component edit history is omitted.
 export function bakeForgeComponentsToAppearance(input) {
   const design = canonicalizeForgeDesign(input);
@@ -290,7 +290,7 @@ function bakeCanonicalForgeComponentsToAppearance(design) {
 function encodeCanonicalNcf1Bytes(design) {
   const writer = new BitWriter();
   writer.write(design.version, 4);
-  writeEquipment(writer, design.equipment, design.version);
+  writeEquipment(writer, design.equipment);
   writer.write(design.appearance ? 1 : 0, 1);
   if (design.appearance) writeAppearance(writer, design.appearance);
   else writeComponents(writer, design.components);
@@ -340,7 +340,7 @@ export function decodeNcf1(input, { requireCanonical = false } = {}) {
   const reader = new BitReader(bytes);
   const version = reader.read(4, "version");
   normalizeNcf1Version(version);
-  const equipment = readEquipment(reader, version);
+  const equipment = readEquipment(reader);
   const appearanceMode = reader.read(1, "design mode") === 1;
   const design = appearanceMode
     ? { version, equipment, appearance: readAppearance(reader) }
@@ -364,7 +364,7 @@ export function decodeNcf1EquipmentHeader(input, { maxBytes = NCF1_CHAIN_MAX_RAW
   const reader = new BitReader(bytes);
   const version = reader.read(4, "version");
   normalizeNcf1Version(version);
-  const equipment = readEquipment(reader, version);
+  const equipment = readEquipment(reader);
   const attributes = equipment.attributes6.map((value) => forgeCompactAttributeScore(value));
   return {
     version,
@@ -504,7 +504,7 @@ export function forgeDesignStatsVector(input) {
   return [header.mass5g, header.volumeCm3, ...header.attributes6];
 }
 
-// The only authoritative requirements are volume and effective durability.
+// The authoritative requirements are volume, effective durability, and mass.
 // All arithmetic mirrors programs/nicechunk_backpack/src/state.rs and depends
 // solely on the integer NCF1 equipment header. Geometry affects only the raw
 // design hash and presentation.
@@ -516,17 +516,19 @@ export function forgeMaterialRequirements(input) {
   const massRequirement = Math.floor((header.massGrams * 3 + 19) / 20);
   const volumeRequirement = integerSquareRoot(Math.floor(header.volumeMm3 / 1_000)) * 18;
   const baseAttributeRequirement = Math.floor((materialScore * 126 + 24) / 25);
-  const attributeRequirement = header.version === NCF1_LEGACY_VERSION
-    ? baseAttributeRequirement
-    : Math.floor(baseAttributeRequirement * Math.min(header.volumeMm3, 1_000_000) / 1_000_000);
+  const attributeRequirement = Math.floor(
+    baseAttributeRequirement * Math.min(header.volumeMm3, 1_000_000) / 1_000_000,
+  );
   const requiredEffectiveDurability = Math.max(1, massRequirement + volumeRequirement + attributeRequirement);
-  const vector = [requiredVolumeMm3, requiredEffectiveDurability];
+  const outputMassGrams = header.massGrams;
+  const vector = [requiredVolumeMm3, requiredEffectiveDurability, outputMassGrams];
   return {
     version: header.version,
     hashAlgorithm: "fnv1a32-ncf1-raw",
     designHash: fnv1a32(bytes),
     requiredVolumeMm3,
     requiredEffectiveDurability,
+    outputMassGrams,
     materialScore,
     keys: FORGE_MATERIAL_REQUIREMENT_KEYS,
     vector,
@@ -537,7 +539,7 @@ export function normalizeForgeMaterialCapacity(input = {}) {
   if (isForgeMaterialSlot(input)) return forgeMaterialSlotCapacity(input);
   const source = input?.vector ?? input;
   if ((Array.isArray(source) || ArrayBuffer.isView(source)) && source.length !== FORGE_MATERIAL_CAPACITY_KEYS.length) {
-    throw new Ncf1ValidationError("Forge material capacity vectors require exactly two fields.", "invalid-material-capacity");
+    throw new Ncf1ValidationError("Forge material capacity vectors require exactly three fields.", "invalid-material-capacity");
   }
   const totalVolumeMm3 = safeUnsignedInteger(
     Array.isArray(source) || ArrayBuffer.isView(source)
@@ -551,12 +553,22 @@ export function normalizeForgeMaterialCapacity(input = {}) {
       : source?.totalEffectiveDurability ?? source?.requiredEffectiveDurability ?? 0,
     "total effective durability",
   );
-  return materialCapacityResult(totalVolumeMm3, totalEffectiveDurability);
+  const totalMassGrams = safeUnsignedInteger(
+    Array.isArray(source) || ArrayBuffer.isView(source)
+      ? source[2]
+      : source?.totalMassGrams ?? source?.outputMassGrams ?? 0,
+    "total material mass",
+  );
+  return materialCapacityResult(totalVolumeMm3, totalEffectiveDurability, totalMassGrams);
 }
 
 export function forgeMaterialSlotCapacity(input = {}) {
   const slot = normalizeForgeMaterialSlot(input);
-  return materialCapacityResult(slot.volumeMm3, Math.floor(slot.cappedDurability * slot.qualityBps / 10_000));
+  return materialCapacityResult(
+    slot.volumeMm3,
+    Math.floor(slot.cappedDurability * slot.qualityBps / 10_000),
+    slot.massGrams,
+  );
 }
 
 function normalizeForgeMaterialSlot(input = {}) {
@@ -565,12 +577,14 @@ function normalizeForgeMaterialSlot(input = {}) {
   const durabilityMax = Math.max(1, unsigned32(input?.durabilityMax ?? 0, "material slot maximum durability"));
   const qualityBps = Math.max(1, Math.min(10_000, finiteInteger(input?.qualityBps ?? 1, "material slot quality")));
   const cappedDurability = Math.min(durabilityCurrent, durabilityMax);
-  return { volumeMm3, cappedDurability, qualityBps };
+  const massGrams = unsigned32(input?.massGrams ?? 0, "material slot mass");
+  return { volumeMm3, cappedDurability, qualityBps, massGrams };
 }
 
 export function sumForgeMaterialCapacities(inputs = []) {
   let totalVolumeMm3 = 0;
   let totalEffectiveDurability = 0;
+  let totalMassGrams = 0;
   let slotEffectiveDurabilityNumerator = 0;
   for (const input of inputs ?? []) {
     if (isForgeMaterialSlot(input)) {
@@ -581,10 +595,12 @@ export function sumForgeMaterialCapacities(inputs = []) {
         slot.cappedDurability * slot.qualityBps,
         "total effective durability numerator",
       );
+      totalMassGrams = checkedSafeAdd(totalMassGrams, slot.massGrams, "total material mass");
     } else {
       const capacity = normalizeForgeMaterialCapacity(input);
       totalVolumeMm3 = checkedSafeAdd(totalVolumeMm3, capacity.totalVolumeMm3, "total material volume");
       totalEffectiveDurability = checkedSafeAdd(totalEffectiveDurability, capacity.totalEffectiveDurability, "total effective durability");
+      totalMassGrams = checkedSafeAdd(totalMassGrams, capacity.totalMassGrams, "total material mass");
     }
   }
   totalEffectiveDurability = checkedSafeAdd(
@@ -592,7 +608,7 @@ export function sumForgeMaterialCapacities(inputs = []) {
     Math.floor(slotEffectiveDurabilityNumerator / 10_000),
     "total effective durability",
   );
-  return materialCapacityResult(totalVolumeMm3, totalEffectiveDurability);
+  return materialCapacityResult(totalVolumeMm3, totalEffectiveDurability, totalMassGrams);
 }
 
 export function compareForgeMaterialCapacity(requirementsInput, capacityInput) {
@@ -690,24 +706,15 @@ export function forgeDesignMaterialSummary(input) {
   return counts;
 }
 
-function normalizeEquipment(input = {}, version = NCF1_VERSION) {
+function normalizeEquipment(input = {}) {
   const mass5g = input?.mass5g != null
     ? integerInRange(input.mass5g, 0, 0xffff, "equipment mass5g")
     : integerInRange(Math.round((Number(input?.massGrams) || 0) / 5), 0, 0xffff, "equipment mass");
-  let volumeMm3;
-  let volumeCm3;
-  if (version === NCF1_LEGACY_VERSION) {
-    volumeCm3 = input?.volumeCm3 != null
-      ? integerInRange(input.volumeCm3, 0, 0xffff, "equipment volume")
-      : integerInRange(Math.floor(safeUnsignedInteger(input?.volumeMm3 ?? 0, "equipment volumeMm3") / 1_000), 0, 0xffff, "equipment volume");
-    volumeMm3 = volumeCm3 * 1_000;
-  } else {
-    const requestedVolumeMm3 = input?.volumeMm3 != null
-      ? safeUnsignedInteger(input.volumeMm3, "equipment volumeMm3")
-      : safeUnsignedInteger((Number(input?.volumeCm3) || 0) * 1_000, "equipment volumeMm3");
-    volumeMm3 = decodeForgeVolumeMm3(encodeForgeVolumeMm3(requestedVolumeMm3));
-    volumeCm3 = volumeMm3 / 1_000;
-  }
+  const requestedVolumeMm3 = input?.volumeMm3 != null
+    ? safeUnsignedInteger(input.volumeMm3, "equipment volumeMm3")
+    : safeUnsignedInteger((Number(input?.volumeCm3) || 0) * 1_000, "equipment volumeMm3");
+  const volumeMm3 = decodeForgeVolumeMm3(encodeForgeVolumeMm3(requestedVolumeMm3));
+  const volumeCm3 = volumeMm3 / 1_000;
   const source = input?.attributes6 ?? input?.attributes ?? {};
   const attributes6 = new Uint8Array(FORGE_ATTRIBUTE_KEYS.length);
   for (let index = 0; index < attributes6.length; index += 1) {
@@ -848,7 +855,7 @@ function forgeAppearanceBakeFrame(components) {
   }
   // Appearance geometry is centered by format. Shift geometry and grip by the
   // same integer Q6 center so their frame stays aligned while the 24^3 grid
-  // spends resolution on occupied bounds. The v14 even-extent rule can expand
+  // spends resolution on occupied bounds. The even-extent rule can expand
   // an odd packed bound by at most one position unit.
   const centerQ = minP.map((value, axis) => Math.round((value + maxP[axis]) / 4));
   const dimsQ = minP.map((value, axis) => {
@@ -857,7 +864,7 @@ function forgeAppearanceBakeFrame(components) {
     const dimension = Math.max(2, Math.ceil(halfExtentP / 2) * 2);
     if (dimension > 0x1ff * 2) {
       throw new Ncf1ValidationError(
-        "Component bounds exceed the v14 appearance coordinate range.",
+        "Component bounds exceed the NCF1 appearance coordinate range.",
         "appearance-bake-out-of-range",
       );
     }
@@ -1242,7 +1249,7 @@ function forgeAppearanceBakeGrip(components, centerQ) {
   for (const value of offsetQ) {
     if (value < -1024 || value > 1023) {
       throw new Ncf1ValidationError(
-        "Component grip exceeds the v14 appearance coordinate range.",
+        "Component grip exceeds the NCF1 appearance coordinate range.",
         "appearance-grip-out-of-range",
       );
     }
@@ -1338,20 +1345,16 @@ function forgeCellInsideGrid(cell, sizes) {
     && cell[0] < sizes[0] && cell[1] < sizes[1] && cell[2] < sizes[2];
 }
 
-function writeEquipment(writer, equipment, version) {
+function writeEquipment(writer, equipment) {
   writer.write(equipment.mass5g, 16);
-  writer.write(version === NCF1_LEGACY_VERSION
-    ? equipment.volumeCm3
-    : encodeForgeVolumeMm3(equipment.volumeMm3), 16);
+  writer.write(encodeForgeVolumeMm3(equipment.volumeMm3), 16);
   for (const value of equipment.attributes6) writer.write(value, 6);
 }
 
-function readEquipment(reader, version) {
+function readEquipment(reader) {
   const mass5g = reader.read(16, "equipment mass");
   const packedVolume = reader.read(16, "equipment volume");
-  const volumeMm3 = version === NCF1_LEGACY_VERSION
-    ? packedVolume * 1_000
-    : decodeForgeVolumeMm3(packedVolume);
+  const volumeMm3 = decodeForgeVolumeMm3(packedVolume);
   const volumeCm3 = volumeMm3 / 1_000;
   const attributes6 = new Uint8Array(FORGE_ATTRIBUTE_KEYS.length);
   for (let index = 0; index < attributes6.length; index += 1) attributes6[index] = reader.read(6, `equipment attribute ${index}`);
@@ -1944,7 +1947,7 @@ function rectangleArea(quad) {
 
 function normalizeNcf1Version(value = NCF1_VERSION) {
   const version = finiteInteger(value ?? NCF1_VERSION, "version");
-  if (version !== NCF1_LEGACY_VERSION && version !== NCF1_VERSION) {
+  if (version !== NCF1_VERSION) {
     throw new Ncf1ValidationError(`Unsupported forge code version: ${version}`, "unsupported-version");
   }
   return version;
@@ -1997,12 +2000,13 @@ function checkedSafeAdd(left, right, label) {
   return total;
 }
 
-function materialCapacityResult(totalVolumeMm3, totalEffectiveDurability) {
+function materialCapacityResult(totalVolumeMm3, totalEffectiveDurability, totalMassGrams) {
   return {
     totalVolumeMm3,
     totalEffectiveDurability,
+    totalMassGrams,
     keys: FORGE_MATERIAL_CAPACITY_KEYS,
-    vector: [totalVolumeMm3, totalEffectiveDurability],
+    vector: [totalVolumeMm3, totalEffectiveDurability, totalMassGrams],
   };
 }
 
@@ -2012,6 +2016,7 @@ function isForgeMaterialSlot(input) {
     || "durabilityCurrent" in input
     || "durabilityMax" in input
     || "qualityBps" in input
+    || "massGrams" in input
   ));
 }
 
@@ -2023,6 +2028,7 @@ function isForgeRequirementLike(input) {
       || input.materialRequirements != null
       || input.requiredVolumeMm3 != null
       || input.requiredEffectiveDurability != null
+      || input.outputMassGrams != null
     ));
 }
 
@@ -2031,16 +2037,17 @@ function normalizeForgeMaterialRequirementsVector(input) {
   let result;
   if (Array.isArray(source) || ArrayBuffer.isView(source)) {
     if (source.length !== FORGE_MATERIAL_REQUIREMENT_KEYS.length) {
-      throw new Ncf1ValidationError("Forge material requirement vectors require exactly two fields.", "invalid-material-requirements");
+      throw new Ncf1ValidationError("Forge material requirement vectors require exactly three fields.", "invalid-material-requirements");
     }
     result = Array.from(source, (value, index) => safeUnsignedInteger(value, FORGE_MATERIAL_REQUIREMENT_KEYS[index]));
   } else {
-    if (source?.requiredVolumeMm3 == null || source?.requiredEffectiveDurability == null) {
-      throw new Ncf1ValidationError("Both forge material requirements are required.", "invalid-material-requirements");
+    if (source?.requiredVolumeMm3 == null || source?.requiredEffectiveDurability == null || source?.outputMassGrams == null) {
+      throw new Ncf1ValidationError("All forge material requirements are required.", "invalid-material-requirements");
     }
     result = [
       safeUnsignedInteger(source.requiredVolumeMm3, FORGE_MATERIAL_REQUIREMENT_KEYS[0]),
       safeUnsignedInteger(source.requiredEffectiveDurability, FORGE_MATERIAL_REQUIREMENT_KEYS[1]),
+      safeUnsignedInteger(source.outputMassGrams, FORGE_MATERIAL_REQUIREMENT_KEYS[2]),
     ];
   }
   if (result.some((value) => value === 0)) {

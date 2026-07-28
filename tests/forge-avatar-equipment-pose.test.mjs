@@ -8,7 +8,7 @@ import {
   updateAvatarMeshVertices,
 } from "../renderer/avatar-mesh.js";
 
-const REAL_FORGED_EQUIPMENT_NCF1 = "NCF1.4AvwB0ale2J0el73B1BMVH_55QIAbAUEBkZGBB4xUCahAiUxsiMxA04xBF4xAAA";
+const REAL_FORGED_EQUIPMENT_NCF1 = "NCF1.8AvzxSale2J0el73B1BMVH_55QIAbAUEBkZGBB4xUCahAiUxsiMxA04xBF4xAAA";
 const runtime = restoreForgeRuntime(REAL_FORGED_EQUIPMENT_NCF1);
 const equipment = {
   rightHand: "pickaxe",
@@ -24,7 +24,7 @@ const mesh = createAvatarMeshFromNcm(DEFAULT_PEASANT_GUY_NCM, {
 });
 const forgedPose = mesh.equipmentPoses.forged_pickaxe;
 
-assert.equal(runtime.designHash, 100840364, "the regression fixture must remain the user's actual forged design");
+assert.equal(runtime.designHash, 163893351, "the regression fixture must remain the canonical v15 forged design");
 assert.deepEqual(runtime.grip.offsetQ, [-49, 32, 113], "Play must convert the component-local grip into design space");
 assert.equal(forgedPose.adaptive, true);
 assert.ok(forgedPose.carryZ > 0 && forgedPose.carryZ < 0.2, "long forged equipment should use only the minimum safe carry abduction");

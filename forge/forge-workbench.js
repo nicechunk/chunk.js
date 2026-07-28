@@ -284,28 +284,80 @@ export function createForgeWorkbenchMaterial(input = {}, options = {}) {
 export function scaleForgeDimensionsForVolume(
   input,
   volumeMm3,
-  referenceVolumeMm3 = FORGE_WORKBENCH_DEFAULT_INPUT_VOLUME_MM3,
 ) {
-  const dimsQ = normalizeDimensionsQ(input);
+  const aspectQ = normalizeDimensionsQ(input);
   const volume = unsigned32(volumeMm3, "forge material input volume");
-  const reference = positiveSafeInteger(referenceVolumeMm3, "forge reference material volume");
-  // A Q6 cube-root scale keeps all calculations inside Number's exact integer
-  // range for every u32 backpack volume. The visual scale is clamped to the
-  // same useful range as the original workbench.
-  const target = volume * 64 * 64 * 64;
-  let low = 42;
-  let high = 99;
-  let scaleQ6 = low;
-  while (low <= high) {
-    const midpoint = Math.floor((low + high) / 2);
-    if (midpoint * midpoint * midpoint * reference <= target) {
-      scaleQ6 = midpoint;
-      low = midpoint + 1;
-    } else {
-      high = midpoint - 1;
+  if (volume < 1) {
+    throw new Ncf1ValidationError("Forge material input volume must be positive.", "invalid-material-volume");
+  }
+
+  // Component dimensions are full metres in Q6. Use the material profile only
+  // as an aspect ratio, then quantize the authoritative mm3 volume into that
+  // physical coordinate system. This keeps workbench, avatar, and world scales
+  // aligned instead of enlarging every input toward one preview-friendly size.
+  const targetProductQ3 = volume * FORGE_FIXED_SCALE ** 3 / 1_000_000_000;
+  const aspectProductQ3 = aspectQ[0] * aspectQ[1] * aspectQ[2];
+  const physicalScale = Math.cbrt(targetProductQ3 / aspectProductQ3);
+  const idealQ = aspectQ.map((value) => value * physicalScale);
+  const candidates = idealQ.map(physicalDimensionCandidates);
+  let best = null;
+
+  for (const x of candidates[0]) {
+    for (const y of candidates[1]) {
+      for (const z of candidates[2]) {
+        const dimsQ = [x, y, z];
+        if (!preservesEqualAspectAxes(aspectQ, dimsQ)) continue;
+        const score = physicalDimensionScore(aspectQ, dimsQ, targetProductQ3);
+        if (!best || comparePhysicalDimensionScores(score, best.score) < 0) {
+          best = { dimsQ, score };
+        }
+      }
     }
   }
-  return dimsQ.map((value) => clampInteger(Math.floor((value * scaleQ6 + 32) / 64), 4, 255));
+
+  return best?.dimsQ ?? idealQ.map((value) => clampInteger(value, 1, 255));
+}
+
+function physicalDimensionCandidates(idealQ) {
+  const low = Math.max(1, Math.min(255, Math.floor(idealQ) - 3));
+  const high = Math.max(low, Math.min(255, Math.ceil(idealQ) + 3));
+  return Array.from({ length: high - low + 1 }, (_, index) => low + index);
+}
+
+function preservesEqualAspectAxes(aspectQ, dimsQ) {
+  return !(
+    (aspectQ[0] === aspectQ[1] && dimsQ[0] !== dimsQ[1])
+    || (aspectQ[0] === aspectQ[2] && dimsQ[0] !== dimsQ[2])
+    || (aspectQ[1] === aspectQ[2] && dimsQ[1] !== dimsQ[2])
+  );
+}
+
+function physicalDimensionScore(aspectQ, dimsQ, targetProductQ3) {
+  const productQ3 = dimsQ[0] * dimsQ[1] * dimsQ[2];
+  const volumeError = Math.log(productQ3 / targetProductQ3);
+  let aspectError = 0;
+  for (let left = 0; left < 3; left += 1) {
+    for (let right = left + 1; right < 3; right += 1) {
+      const ratioError = Math.log(
+        dimsQ[left] * aspectQ[right] / (dimsQ[right] * aspectQ[left]),
+      );
+      aspectError += ratioError * ratioError;
+    }
+  }
+  return {
+    total: volumeError * volumeError * 16 + aspectError,
+    volume: Math.abs(volumeError),
+    aspect: aspectError,
+    productQ3,
+  };
+}
+
+function comparePhysicalDimensionScores(left, right) {
+  for (const key of ["total", "volume", "aspect"]) {
+    const delta = left[key] - right[key];
+    if (Math.abs(delta) > 1e-12) return delta;
+  }
+  return left.productQ3 - right.productQ3;
 }
 
 export function forgeWorkbenchComponentOffsetQ(index) {

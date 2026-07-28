@@ -122,6 +122,8 @@ export class ThirdPersonPlayerControls {
     pitchMax = 0.42,
     firstPersonPitchMin = pitchMin,
     firstPersonPitchMax = pitchMax,
+    joystickDeadzone = 0.12,
+    joystickCameraFollowSpeed = 2.4,
   } = {}) {
     this.canvas = canvas;
     this.cameraState = cameraState;
@@ -134,13 +136,17 @@ export class ThirdPersonPlayerControls {
     this.pitchMax = pitchMax;
     this.firstPersonPitchMin = firstPersonPitchMin;
     this.firstPersonPitchMax = firstPersonPitchMax;
+    this.joystickDeadzone = clamp(Number(joystickDeadzone) || 0, 0, 0.9);
+    this.joystickCameraFollowSpeed = Math.max(0, Number(joystickCameraFollowSpeed) || 0);
     this.firstPersonEnabled = false;
     this.keys = new Set();
     this.pointerId = null;
     this.lastX = 0;
     this.lastY = 0;
     this.joystick = { active: false, x: 0, y: 0 };
-    this.move = { x: 0, z: 0, dx: 0, dz: 0, yaw: playerState.avatarYaw ?? playerState.yaw ?? 0, moving: false, actualMoving: false };
+    this.joystickHeadingYaw = null;
+    this.joystickInputAngle = null;
+    this.move = { x: 0, z: 0, dx: 0, dz: 0, yaw: playerState.avatarYaw ?? playerState.yaw ?? 0, strength: 0, moving: false, actualMoving: false };
     this._onKeyDown = (event) => {
       if (event.code === "Space") {
         this.jumpQueued = true;
@@ -164,9 +170,22 @@ export class ThirdPersonPlayerControls {
   }
 
   setJoystick(x, y, active = true) {
-    this.joystick.active = active;
-    this.joystick.x = Number(x) || 0;
-    this.joystick.y = Number(y) || 0;
+    const wasActive = this.joystick.active;
+    const nextActive = Boolean(active);
+    let nextX = Number(x) || 0;
+    let nextY = Number(y) || 0;
+    const magnitude = Math.hypot(nextX, nextY);
+    if (magnitude > 1) {
+      nextX /= magnitude;
+      nextY /= magnitude;
+    }
+    this.joystick.active = nextActive;
+    this.joystick.x = nextActive ? nextX : 0;
+    this.joystick.y = nextActive ? nextY : 0;
+    if (!nextActive || !wasActive) {
+      this.joystickHeadingYaw = null;
+      this.joystickInputAngle = null;
+    }
   }
 
   setFirstPersonEnabled(enabled, { requestPointerLock = enabled } = {}) {
@@ -209,9 +228,28 @@ export class ThirdPersonPlayerControls {
     if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) inputZ += 1;
     if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) inputX -= 1;
     if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) inputX += 1;
-    if (this.joystick.active) {
-      inputX += this.joystick.x;
-      inputZ += this.joystick.y;
+    const keyboardMoving = Math.hypot(inputX, inputZ) > 0.001;
+    const joystickInput = this.resolveJoystickInput();
+    if (joystickInput.moving && !this.firstPersonEnabled && !keyboardMoving) {
+      const controlYaw = Number.isFinite(this.playerState.controlYaw) ? this.playerState.controlYaw : this.playerState.yaw;
+      const headingYaw = this.updateJoystickHeading(joystickInput.angle, controlYaw);
+      const moveX = -Math.sin(headingYaw);
+      const moveZ = -Math.cos(headingYaw);
+      const speed = this.speed * joystickInput.strength;
+      this.move.moving = true;
+      this.move.actualMoving = false;
+      this.move.x = moveX;
+      this.move.z = moveZ;
+      this.move.dx = moveX * speed * dt;
+      this.move.dz = moveZ * speed * dt;
+      this.move.yaw = headingYaw;
+      this.move.strength = joystickInput.strength;
+      this.followJoystickHeading(headingYaw, dt);
+      return;
+    }
+    if (joystickInput.moving) {
+      inputX += joystickInput.x * joystickInput.strength;
+      inputZ += joystickInput.z * joystickInput.strength;
     }
     const len = Math.hypot(inputX, inputZ);
     this.move.moving = len > 0.001;
@@ -221,6 +259,7 @@ export class ThirdPersonPlayerControls {
       this.move.z = 0;
       this.move.dx = 0;
       this.move.dz = 0;
+      this.move.strength = 0;
       return;
     }
     inputX /= len;
@@ -232,12 +271,52 @@ export class ThirdPersonPlayerControls {
     const rightZ = -forwardX;
     const moveX = forwardX * inputZ + rightX * inputX;
     const moveZ = forwardZ * inputZ + rightZ * inputX;
-    const speed = this.speed * (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight") ? this.sprintMultiplier : 1);
+    const inputStrength = keyboardMoving ? 1 : joystickInput.strength;
+    const speed = this.speed * inputStrength * (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight") ? this.sprintMultiplier : 1);
     this.move.x = moveX;
     this.move.z = moveZ;
     this.move.dx = moveX * speed * dt;
     this.move.dz = moveZ * speed * dt;
     this.move.yaw = Math.atan2(-moveX, -moveZ);
+    this.move.strength = inputStrength;
+  }
+
+  resolveJoystickInput() {
+    const magnitude = Math.min(1, Math.hypot(this.joystick.x, this.joystick.y));
+    if (!this.joystick.active || magnitude <= this.joystickDeadzone) {
+      this.joystickHeadingYaw = null;
+      this.joystickInputAngle = null;
+      return { moving: false, x: 0, z: 0, angle: 0, strength: 0 };
+    }
+    const strength = (magnitude - this.joystickDeadzone) / (1 - this.joystickDeadzone);
+    const x = this.joystick.x / magnitude;
+    const z = this.joystick.y / magnitude;
+    return {
+      moving: true,
+      x,
+      z,
+      angle: Math.atan2(-x, -z),
+      strength,
+    };
+  }
+
+  updateJoystickHeading(inputAngle, controlYaw) {
+    if (!Number.isFinite(this.joystickHeadingYaw) || !Number.isFinite(this.joystickInputAngle)) {
+      this.joystickHeadingYaw = normalizeAngle(controlYaw + inputAngle);
+    } else {
+      this.joystickHeadingYaw = normalizeAngle(
+        this.joystickHeadingYaw + shortestAngle(inputAngle - this.joystickInputAngle),
+      );
+    }
+    this.joystickInputAngle = inputAngle;
+    return this.joystickHeadingYaw;
+  }
+
+  followJoystickHeading(targetYaw, dt) {
+    if (this.firstPersonEnabled || this.joystickCameraFollowSpeed <= 0) return;
+    const currentYaw = Number.isFinite(this.playerState.controlYaw) ? this.playerState.controlYaw : this.playerState.yaw;
+    const maxStep = this.joystickCameraFollowSpeed * Math.max(0, Number(dt) || 0);
+    this.playerState.controlYaw = moveAngleToward(currentYaw, targetYaw, maxStep);
   }
 
   consumeJump() {
@@ -296,4 +375,21 @@ export class ThirdPersonPlayerControls {
     this.canvas.removeEventListener("pointercancel", this._onPointerUp);
     globalThis.document?.removeEventListener?.("mousemove", this._onMouseMove);
   }
+}
+
+function moveAngleToward(current, target, maxStep) {
+  const delta = shortestAngle(target - current);
+  if (Math.abs(delta) <= maxStep) return normalizeAngle(target);
+  return normalizeAngle(current + Math.sign(delta) * maxStep);
+}
+
+function shortestAngle(value) {
+  let angle = Number(value) || 0;
+  while (angle > Math.PI) angle -= Math.PI * 2;
+  while (angle < -Math.PI) angle += Math.PI * 2;
+  return angle;
+}
+
+function normalizeAngle(value) {
+  return shortestAngle(value);
 }

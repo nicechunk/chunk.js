@@ -634,10 +634,10 @@ assert.equal(preparedCollisionBoxIntersectsBlock(preparedBody, 0, 1, 0), true, "
 assert.equal(preparedCollisionBoxIntersectsBlock(preparedBody, 1, 1, 0), false, "touching a block face should not count as penetration");
 assert.equal(preparedCollisionBoxIntersectsBlock(preparedBody, 0, 3, 0), false, "touching a block ceiling should not count as penetration");
 
-const compactForgeFixture = "NCF1.4ACQAFale2J0el73B1BKFIEBT7AAAwSYgAA";
+const compactForgeFixture = "NCF1.8ACROIale2J0el73B1BKFIEBT7AAAwSYgAA";
 assert.equal(NCF1_MAX_RAW_BYTES, 640, "canonical NCF1 payloads must fit the tag-8 transaction budget");
 const compactForgeDesign = decodeNcf1(compactForgeFixture, { requireCanonical: true });
-assert.equal(compactForgeDesign.version, 14, "forge core should decode the deployed NCF1 v14 format");
+assert.equal(compactForgeDesign.version, NCF1_VERSION, "forge core should decode the current NCF1 format");
 assert.equal(compactForgeDesign.components.length, 1, "forge fixture should retain its component count");
 assert.equal(encodeNcf1(compactForgeDesign), compactForgeFixture, "canonical NCF1 decode/encode should be byte deterministic");
 assert.equal(
@@ -645,8 +645,8 @@ assert.equal(
   "invalid-base64url",
   "forge text decoding must reject non-zero unused base64url tail bits",
 );
-assert.equal(forgeChainDesignHash(compactForgeFixture), 1985161465, "forge chain hash must match FNV-1a over decoded NCF1 bytes");
-assert.equal(forgeRawDesignHash(compactForgeFixture), 1985161465, "raw forge hash must remain available for the local cache");
+assert.equal(forgeChainDesignHash(compactForgeFixture), 687468680, "forge chain hash must match FNV-1a over decoded NCF1 bytes");
+assert.equal(forgeRawDesignHash(compactForgeFixture), 687468680, "raw forge hash must remain available for the local cache");
 assert.throws(
   () => forgeChainDesignHash(createForgeDesign()),
   (error) => error?.code === "invalid-material-requirements",
@@ -909,16 +909,16 @@ assert.equal(alreadyCompactSelection.savedBytes, 0, "an existing appearance payl
 const materialRequirements = forgeMaterialRequirements(compactForgeFixture);
 assert.deepEqual(
   materialRequirements.vector,
-  [5_000, 341],
-  "chain material requirements must contain only volume and effective durability",
+  [5_000, 44, 45],
+  "chain material requirements must contain volume, effective durability, and output mass",
 );
 assert.equal(materialRequirements.requiredVolumeMm3, 5_000, "volume requirements should convert cm3 to mm3 exactly");
-assert.equal(materialRequirements.requiredEffectiveDurability, 341, "effective durability should match the Rust integer formula");
+assert.equal(materialRequirements.requiredEffectiveDurability, 44, "effective durability should match the Rust integer formula");
 assert.equal(materialRequirements.materialScore, 59, "material score should use decoded compact6 attributes");
 assert.equal(materialRequirements.hashAlgorithm, "fnv1a32-ncf1-raw", "material proof metadata should declare the raw-byte hash");
-const mediumForgeFixture = "NCF1.4A1QCCale2J0el73B1BKFIVKSnAAFAGYgAA";
-assert.deepEqual(forgeMaterialRequirements(mediumForgeFixture).vector, [130_000, 656], "a second NCF1 fixture should match Rust requirement arithmetic");
-assert.equal(forgeChainDesignHash(mediumForgeFixture), 232607990, "a second fixture should match Rust raw-byte FNV-1a");
+const mediumForgeFixture = "NCF1.8A1T-9ale2J0el73B1BKFIVKSnAAFAGYgAA";
+assert.deepEqual(forgeMaterialRequirements(mediumForgeFixture).vector, [130_000, 396, 1_065], "a second NCF1 fixture should match Rust requirement arithmetic");
+assert.equal(forgeChainDesignHash(mediumForgeFixture), 3361671044, "a second fixture should match Rust raw-byte FNV-1a");
 assert.equal(forgeCompactAttributeScore(0), 0, "compact6 zero should decode to score zero");
 assert.equal(forgeCompactAttributeScore(31), 49, "compact6 midpoint rounding should match Rust below half");
 assert.equal(forgeCompactAttributeScore(32), 51, "compact6 midpoint rounding should match Rust above half");
@@ -926,13 +926,13 @@ assert.equal(forgeCompactAttributeScore(63), 100, "compact6 maximum should decod
 const minimumRequirementDesign = createForgeDesign({
   equipment: { mass5g: 1, volumeCm3: 1, attributes6: new Uint8Array(12) },
 });
-assert.deepEqual(forgeMaterialRequirements(minimumRequirementDesign).vector, [1_000, 19], "minimum non-zero header requirements should match Rust");
+assert.deepEqual(forgeMaterialRequirements(minimumRequirementDesign).vector, [1_000, 19, 5], "minimum non-zero header requirements should match Rust");
 const maximumScoreAttributes = new Uint8Array(12).fill(63);
 maximumScoreAttributes[4] = 0;
 const maximumRequirementDesign = createForgeDesign({
   equipment: { mass5g: 0xffff, volumeCm3: 0xffff, attributes6: maximumScoreAttributes },
 });
-assert.deepEqual(forgeMaterialRequirements(maximumRequirementDesign).vector, [65_470_464, 54_246], "maximum v15 header requirements should use the largest non-exceeding packed volume");
+assert.deepEqual(forgeMaterialRequirements(maximumRequirementDesign).vector, [65_470_464, 54_246, 327_675], "maximum v15 header requirements should use the largest non-exceeding packed volume");
 const compactHeader = decodeNcf1EquipmentHeader(compactForgeFixture);
 assert.deepEqual(
   forgeDesignStatsVector(compactForgeFixture),
@@ -942,20 +942,23 @@ assert.deepEqual(
 assert.equal(forgeMaterialScoreFromCompactAttributes(compactHeader.attributes6), 59, "standalone material scoring should match requirement derivation");
 
 const materialCapacity = sumForgeMaterialCapacities([
-  { volumeMm3: 3_000, durabilityCurrent: 300, durabilityMax: 400, qualityBps: 5_000 },
-  { volumeMm3: 2_000, durabilityCurrent: 191, durabilityMax: 191, qualityBps: 10_000 },
+  { volumeMm3: 3_000, durabilityCurrent: 30, durabilityMax: 400, qualityBps: 5_000, massGrams: 30 },
+  { volumeMm3: 2_000, durabilityCurrent: 29, durabilityMax: 191, qualityBps: 10_000, massGrams: 15 },
 ]);
-assert.deepEqual(materialCapacity.vector, [5_000, 341], "slot capacity should sum volume and floored quality-adjusted durability");
+assert.deepEqual(materialCapacity.vector, [5_000, 44, 45], "slot capacity should sum volume, quality-adjusted durability, and mass");
 const exactCapacity = compareForgeMaterialCapacity(materialRequirements, materialCapacity);
-assert.equal(exactCapacity.ok, true, "two-field material capacity should accept exact coverage");
-const missingVolume = compareForgeMaterialCapacity(materialRequirements, [4_999, 341]);
+assert.equal(exactCapacity.ok, true, "three-field material capacity should accept exact coverage");
+const missingVolume = compareForgeMaterialCapacity(materialRequirements, [4_999, 44, 45]);
 assert.equal(missingVolume.ok, false, "material capacity must reject volume one unit below the requirement");
 assert.equal(missingVolume.fields[0].deficit, 1, "volume comparison should expose the exact integer deficit");
-const missingDurability = compareForgeMaterialCapacity(materialRequirements, [5_000, 340]);
+const missingDurability = compareForgeMaterialCapacity(materialRequirements, [5_000, 43, 45]);
 assert.equal(missingDurability.ok, false, "material capacity must reject effective durability one unit below the requirement");
 assert.equal(missingDurability.fields[1].deficit, 1, "durability comparison should expose the exact integer deficit");
+const missingMass = compareForgeMaterialCapacity(materialRequirements, [5_000, 44, 44]);
+assert.equal(missingMass.ok, false, "material capacity must reject mass one gram below the output");
+assert.equal(missingMass.fields[2].deficit, 1, "mass comparison should expose the exact integer deficit");
 assert.throws(
-  () => compareForgeMaterialCapacity([0, 0], [0, 0]),
+  () => compareForgeMaterialCapacity([0, 0, 0], [0, 0, 0]),
   (error) => error?.code === "invalid-material-requirements",
   "manual requirements must preserve the chain's non-zero invariant",
 );

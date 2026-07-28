@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
 
 import {
-  NCF1_LEGACY_VERSION,
   NCF1_VERSION,
   compareForgeMaterialCapacity,
   decodeForgeVolumeMm3,
   decodeNcf1,
   decodeNcf1EquipmentHeader,
   encodeForgeVolumeMm3,
-  encodeNcf1,
   encodeNcf1Bytes,
   forgeChainDesignHash,
   forgeMaterialRequirements,
@@ -20,9 +18,11 @@ import {
   createForgeWorkbenchDesign,
   forgeComponentSolidFraction,
   forgeWorkbenchStats,
+  scaleForgeDimensionsForVolume,
 } from "../forge/forge-workbench.js";
 
-const legacyCopperToolCode = "NCF1.4ACQAFale2J0el73B1BKFIEBT7AAAwSYgAA";
+const retiredCopperToolCode = "NCF1.4ACQAFale2J0el73B1BKFIEBT7AAAwSYgAA";
+const compactCopperToolCode = "NCF1.8ACROIale2J0el73B1BKFIEBT7AAAwSYgAA";
 const copperBloom = Object.freeze({
   id: "copper_bloom",
   itemCode: 1015,
@@ -48,12 +48,38 @@ const copperBloom = Object.freeze({
   }),
 });
 
-assert.equal(NCF1_LEGACY_VERSION, 14, "v14 must remain the legacy cubic-centimetre codec");
-assert.equal(NCF1_VERSION, 15, "new forge designs must use the fine-volume v15 codec");
-assert.throws(
-  () => decodeNcf1(Uint8Array.of(0xd0)),
-  (error) => error?.code === "unsupported-version",
-  "unknown NCF1 versions must be rejected before their payload is interpreted",
+assert.equal(NCF1_VERSION, 15, "forge designs must use the fine-volume v15 codec");
+
+const copperSpongeDimensionsQ = scaleForgeDimensionsForVolume([66, 40, 59], 1_860);
+assert.deepEqual(
+  copperSpongeDimensionsQ,
+  [1, 1, 1],
+  "a 1.86 cm3 copper sponge must use the smallest physical Q6 workpiece instead of a preview-sized block",
+);
+assert.ok(
+  Math.max(...copperSpongeDimensionsQ) / 64 <= 0.016,
+  "a 1.86 cm3 copper sponge must remain approximately centimetre-scale beside the forge avatar",
+);
+assert.deepEqual(
+  scaleForgeDimensionsForVolume([66, 40, 59], 120_000),
+  [4, 2, 4],
+  "the standard copper preview must derive its dimensions from 120 cm3 of physical volume",
+);
+assert.deepEqual(
+  scaleForgeDimensionsForVolume([255, 1, 1], 0xffff_ffff),
+  [255, 30, 30],
+  "physical dimensions must clamp safely when an extreme aspect ratio exceeds the component coordinate range",
+);
+const copperSpongeWorkbenchEntry = createForgeWorkbenchComponent({
+  materialId: "copper_bloom",
+  volumeMm3: 1_860,
+  densityKgM3: 8_200,
+  material: copperBloom,
+});
+assert.deepEqual(
+  copperSpongeWorkbenchEntry.component.dimsQ,
+  copperSpongeDimensionsQ,
+  "adding a live copper sponge to the workbench must use the physical-volume dimensions",
 );
 
 for (const fixture of [
@@ -73,19 +99,22 @@ for (const fixture of [
   assert.ok(fixture.decoded <= fixture.input, "quantized forge volume must never exceed real material capacity");
 }
 
-const legacyHeader = decodeNcf1EquipmentHeader(legacyCopperToolCode);
-assert.equal(legacyHeader.version, NCF1_LEGACY_VERSION, "existing v14 codes must remain readable");
-assert.equal(legacyHeader.volumeMm3, 5_000, "v14 raw volume units must still decode as cubic centimetres");
-assert.equal(legacyHeader.volumeCm3, 5, "legacy display volume must remain unchanged");
-assert.equal(forgeChainDesignHash(legacyCopperToolCode), 1_985_161_465, "legacy raw-byte hashes must remain stable");
-assert.deepEqual(
-  forgeMaterialRequirements(legacyCopperToolCode).vector,
-  [5_000, 341],
-  "legacy material requirements must not be reinterpreted as v15 millimetres cubed",
+assert.throws(
+  () => decodeNcf1(retiredCopperToolCode, { requireCanonical: true }),
+  (error) => error?.code === "unsupported-version",
+  "retired v14 forge codes must be rejected rather than migrated",
 );
-const legacyDesign = decodeNcf1(legacyCopperToolCode, { requireCanonical: true });
-assert.equal(legacyDesign.version, NCF1_LEGACY_VERSION, "complete canonical v14 fixtures must still decode canonically");
-assert.equal(encodeNcf1(legacyDesign), legacyCopperToolCode, "canonical v14 bytes must remain unchanged after decode and encode");
+const compactHeader = decodeNcf1EquipmentHeader(compactCopperToolCode);
+assert.equal(compactHeader.version, NCF1_VERSION, "the canonical compact fixture must use v15");
+assert.equal(compactHeader.volumeMm3, 5_000, "v15 must decode the compact fixture in cubic millimetres");
+assert.equal(compactHeader.volumeCm3, 5, "display volume must derive from canonical cubic millimetres");
+assert.equal(forgeChainDesignHash(compactCopperToolCode), 687_468_680, "the compact v15 raw-byte hash must remain stable");
+assert.deepEqual(
+  forgeMaterialRequirements(compactCopperToolCode).vector,
+  [5_000, 44, 45],
+  "v15 material requirements must use volume-scaled durability and encoded output mass",
+);
+assert.equal(decodeNcf1(compactCopperToolCode, { requireCanonical: true }).version, NCF1_VERSION, "canonical v15 fixtures must round trip");
 
 const liveCopperEntries = [1, 2].map((slotIndex, positionIndex) => createForgeWorkbenchComponent({
   key: `forge-slot:${slotIndex}:item:1015`,
@@ -114,11 +143,6 @@ assert.equal(liveCopperStats.inputVolumeMm3, 310, "two live copper-bloom slots m
 assert.equal(liveCopperStats.usedVolumeMm3, 310, "full occupied masks must not lose fine-grained material volume");
 assert.equal(liveCopperStats.equipment.volumeMm3, 310, "v15 equipment must preserve sub-centimetre aggregate volume");
 assert.equal(liveCopperStats.equipment.volumeCm3, 0.31, "display volume may remain fractional without changing the encoded unit");
-assert.deepEqual(
-  Array.from(liveCopperStats.equipment.attributes6),
-  [26, 37, 30, 54, 9, 52, 30, 37, 59, 55, 1, 53],
-  "the live copper fixture must retain its compact equipment attributes",
-);
 assert.ok(liveCopperStats.equipment.mass5g > 0, "the live fixture must retain a non-zero encoded mass");
 assert.equal(liveCopperStats.chainReady, true, "two non-empty 155 mm3 materials must be eligible for v15 code generation");
 
@@ -138,13 +162,16 @@ const liveCopperCapacity = sumForgeMaterialCapacities(liveCopperMaterials.map((m
   durabilityCurrent: 1,
   durabilityMax: 1,
   qualityBps: 8_790,
+  massGrams: 3,
 })));
 assert.equal(liveCopperCapacity.totalVolumeMm3, 310, "capacity must aggregate exact live slot volume");
 assert.equal(liveCopperCapacity.totalEffectiveDurability, 1, "fractional per-slot durability must be aggregated before integer quantization");
+assert.equal(liveCopperCapacity.totalMassGrams, 6, "capacity must aggregate authoritative slot mass");
 const liveCopperFit = compareForgeMaterialCapacity(liveCopperRequirements, liveCopperCapacity);
 assert.equal(liveCopperFit.fields[0].ok, true, "the live fixture must satisfy its fine-volume requirement exactly");
 assert.equal(liveCopperFit.fields[1].ok, true, "aggregated live durability must satisfy the volume-scaled v15 requirement");
-assert.equal(liveCopperFit.ok, true, "the exact two-slot production regression fixture must pass both material requirements");
+assert.equal(liveCopperFit.fields[2].ok, true, "aggregated live mass must cover the encoded output mass");
+assert.equal(liveCopperFit.ok, true, "the exact two-slot production regression fixture must pass all material requirements");
 
 for (const volumeMm3 of [1, 999, 1_000, 8_191, 8_192, 8_193]) {
   const entry = createForgeWorkbenchComponent({

@@ -509,7 +509,16 @@ export class ForgeWorkbenchRenderer {
     const yaw = Number.isFinite(Number(params.yaw)) ? Number(params.yaw) : this.avatar.yaw;
     const state = String(params.state || (runtime ? "equipped" : "empty"));
     const signature = runtime
-      ? `${modelCode}:${runtime.mode || "components"}:${Number(runtime.designHash) >>> 0}`
+      ? [
+          modelCode,
+          runtime.mode || "components",
+          Number(runtime.designHash) >>> 0,
+          Number(runtime.fixedScale ?? 64),
+          ...Array.from(runtime.grip.offsetQ, Number),
+          Number(runtime.grip.axis),
+          Number(runtime.grip.sign),
+          Number(runtime.grip.rotation),
+        ].join(":")
       : `${modelCode}:empty`;
     const poseChanged = yaw !== this.avatar.yaw || !floatArraysEqual(position, this.avatar.position);
     this.avatar.position = position;
