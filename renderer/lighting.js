@@ -6,7 +6,7 @@ const UNDERWATER_LIGHTING = Object.freeze({
   sunColor: hexToRgb(0xa6d7d2),
   skyLightColor: hexToRgb(0x83d0cf),
   groundLightColor: hexToRgb(0x2a6d67),
-  fogNearFar: [10, 112],
+  fogNearFar: [16, 160],
   ambientStrength: 0.52,
   sunStrength: 0.30,
   hemiStrength: 0.58,
