@@ -1,5 +1,18 @@
 export const MAIN_GAME_SUN_DIRECTION = Object.freeze(normalize3([-0.72, 0.34, 0.62]));
 
+const UNDERWATER_LIGHTING = Object.freeze({
+  skyColor: hexToRgb(0x06283a),
+  fogColor: hexToRgb(0x075064),
+  sunColor: hexToRgb(0x78b9bb),
+  skyLightColor: hexToRgb(0x58b6bd),
+  groundLightColor: hexToRgb(0x164b48),
+  fogNearFar: [6, 72],
+  ambientStrength: 0.46,
+  sunStrength: 0.24,
+  hemiStrength: 0.52,
+  exposure: 0.90,
+});
+
 export const DEFAULT_WORLD_LIGHTING = Object.freeze({
   skyColor: hexToRgb(0x78c9ef),
   fogColor: hexToRgb(0xe1f5fb),
@@ -48,6 +61,31 @@ export function createWorldLighting(options = {}, { mobile = isCoarsePointer() }
     sunDiscDistance: numberOr(options.sunDiscDistance, base.sunDiscDistance),
     sunDiscRadius: numberOr(options.sunDiscRadius, base.sunDiscRadius),
     sunDiscOpacity: numberOr(options.sunDiscOpacity, base.sunDiscOpacity),
+    cloudOpacity: 1,
+    underwaterBlend: 0,
+  };
+}
+
+export function createUnderwaterLighting(lighting, amount = 0) {
+  const blend = clamp01(amount);
+  if (!lighting || blend <= 0) return lighting;
+  const skyColor = mixColor(lighting.skyColor, UNDERWATER_LIGHTING.skyColor, blend);
+  return {
+    ...lighting,
+    skyColor,
+    clearColor: [...skyColor, lighting.clearColor?.[3] ?? 1],
+    fogColor: mixColor(lighting.fogColor, UNDERWATER_LIGHTING.fogColor, blend),
+    fogNearFar: mixPair(lighting.fogNearFar, UNDERWATER_LIGHTING.fogNearFar, blend),
+    sunColor: mixColor(lighting.sunColor, UNDERWATER_LIGHTING.sunColor, blend),
+    skyLightColor: mixColor(lighting.skyLightColor, UNDERWATER_LIGHTING.skyLightColor, blend),
+    groundLightColor: mixColor(lighting.groundLightColor, UNDERWATER_LIGHTING.groundLightColor, blend),
+    ambientStrength: mixNumber(lighting.ambientStrength, UNDERWATER_LIGHTING.ambientStrength, blend),
+    sunStrength: mixNumber(lighting.sunStrength, UNDERWATER_LIGHTING.sunStrength, blend),
+    hemiStrength: mixNumber(lighting.hemiStrength, UNDERWATER_LIGHTING.hemiStrength, blend),
+    exposure: mixNumber(lighting.exposure, UNDERWATER_LIGHTING.exposure, blend),
+    sunDiscOpacity: Math.max(0, Number(lighting.sunDiscOpacity) || 0) * (1 - blend),
+    cloudOpacity: numberOr(lighting.cloudOpacity, 1) * (1 - blend),
+    underwaterBlend: blend,
   };
 }
 
@@ -88,6 +126,19 @@ function vectorOr(value, fallback) {
 
 function numberOr(value, fallback) {
   return Number.isFinite(value) ? Number(value) : fallback;
+}
+
+function mixColor(from, to, amount) {
+  return [0, 1, 2].map((index) => mixNumber(from?.[index], to[index], amount));
+}
+
+function mixPair(from, to, amount) {
+  return [0, 1].map((index) => mixNumber(from?.[index], to[index], amount));
+}
+
+function mixNumber(from, to, amount) {
+  const start = Number.isFinite(Number(from)) ? Number(from) : Number(to) || 0;
+  return start + (to - start) * amount;
 }
 
 function hexToRgb(hex) {

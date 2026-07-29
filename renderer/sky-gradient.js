@@ -78,8 +78,11 @@ export class SkyGradient {
     if (!this.program) this.init();
     const gl = this.gl;
     gl.useProgram(this.program);
-    gl.uniform3f(this.uniforms.uTopColor, 0.025, 0.300, 0.820);
-    gl.uniform3f(this.uniforms.uMidColor, 0.22, 0.76, 0.98);
+    const underwater = Math.max(0, Math.min(1, Number(lighting?.underwaterBlend) || 0));
+    const topColor = mixColor([0.025, 0.300, 0.820], [0.004, 0.075, 0.125], underwater);
+    const midColor = mixColor([0.22, 0.76, 0.98], [0.018, 0.205, 0.285], underwater);
+    gl.uniform3f(this.uniforms.uTopColor, topColor[0], topColor[1], topColor[2]);
+    gl.uniform3f(this.uniforms.uMidColor, midColor[0], midColor[1], midColor[2]);
     gl.uniform3f(this.uniforms.uHorizonColor, lighting?.fogColor?.[0] ?? 0.92, lighting?.fogColor?.[1] ?? 0.98, lighting?.fogColor?.[2] ?? 1.0);
     gl.uniform1f(this.uniforms.uCameraPitch, Number(cameraState?.pitch) || 0);
     gl.bindVertexArray(this.vao);
@@ -97,6 +100,10 @@ export class SkyGradient {
     this.vao = null;
     this.program = null;
   }
+}
+
+function mixColor(from, to, amount) {
+  return from.map((value, index) => value + (to[index] - value) * amount);
 }
 
 function collectUniforms(gl, program) {

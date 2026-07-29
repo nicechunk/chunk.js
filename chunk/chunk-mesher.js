@@ -284,7 +284,7 @@ export function meshChunkVisual(chunkState, { getBlockAtWorld = null, getColumnT
             if (shouldUseGradientWaterSurface(chunkState, x, water, z, blockId, getBlockAtWorld, waterDepthCache)) {
               quadCount += appendWaterSurfaceQuad(chunkState, x, water, z, blockId, getBlockAtWorld, waterDepthCache, positions, indices);
             } else {
-              addFaceCell(faceGroups, 2, x, water, z, blockId, waterSurfaceDepthAoCached(chunkState, x, water, z, blockId, getBlockAtWorld, waterDepthCache));
+              addWaterSurfaceCells(faceGroups, x, water, z, blockId, waterSurfaceDepthAoCached(chunkState, x, water, z, blockId, getBlockAtWorld, waterDepthCache));
             }
           }
           continue;
@@ -329,7 +329,7 @@ export function meshChunkVisual(chunkState, { getBlockAtWorld = null, getColumnT
               if (shouldUseGradientWaterSurface(chunkState, x, y, z, blockId, getBlockAtWorld, waterDepthCache)) {
                 quadCount += appendWaterSurfaceQuad(chunkState, x, y, z, blockId, getBlockAtWorld, waterDepthCache, positions, indices);
               } else {
-                addFaceCell(faceGroups, 2, x, y, z, blockId, waterSurfaceDepthAoCached(chunkState, x, y, z, blockId, getBlockAtWorld, waterDepthCache));
+                addWaterSurfaceCells(faceGroups, x, y, z, blockId, waterSurfaceDepthAoCached(chunkState, x, y, z, blockId, getBlockAtWorld, waterDepthCache));
               }
             }
             continue;
@@ -712,24 +712,32 @@ function shouldUseGradientWaterSurface(chunkState, x, y, z, blockId, getBlockAtW
 }
 
 function appendWaterSurfaceQuad(chunkState, x, y, z, blockId, getBlockAtWorld, waterDepthCache, vertices, indices) {
-  const face = FACE_DEFS[2];
   const material = materialDef(blockDef(blockId).materialId);
-  const vertexOffset = vertices.length;
-  const corners = quadCorners(2, y + 1, x, z, 1, 1);
-  const uvs = quadUvs(2, corners);
-  for (let i = 0; i < 4; i += 1) {
-    const corner = corners[i];
-    vertices.push({
-      p: corner,
-      n: face.normal,
-      uv: uvs[i],
-      layer: material.textureLayer,
-      ao: waterCornerDepthAo(chunkState, corner[0], y, corner[2], blockId, getBlockAtWorld, waterDepthCache),
-      flags: 0,
-    });
+  const faceIndexes = blockId === BLOCK_ID.lava ? [2] : [2, 3];
+  for (const faceIndex of faceIndexes) {
+    const face = FACE_DEFS[faceIndex];
+    const vertexOffset = vertices.length;
+    const corners = quadCorners(faceIndex, y + 1, x, z, 1, 1);
+    const uvs = quadUvs(faceIndex, corners);
+    for (let i = 0; i < 4; i += 1) {
+      const corner = corners[i];
+      vertices.push({
+        p: corner,
+        n: face.normal,
+        uv: uvs[i],
+        layer: material.textureLayer,
+        ao: waterCornerDepthAo(chunkState, corner[0], y, corner[2], blockId, getBlockAtWorld, waterDepthCache),
+        flags: 0,
+      });
+    }
+    indices.push(vertexOffset, vertexOffset + 1, vertexOffset + 2, vertexOffset, vertexOffset + 2, vertexOffset + 3);
   }
-  indices.push(vertexOffset, vertexOffset + 1, vertexOffset + 2, vertexOffset, vertexOffset + 2, vertexOffset + 3);
-  return 1;
+  return faceIndexes.length;
+}
+
+function addWaterSurfaceCells(faceGroups, x, y, z, blockId, ao) {
+  addFaceCell(faceGroups, 2, x, y, z, blockId, ao);
+  if (blockId !== BLOCK_ID.lava) addFaceCell(faceGroups, 3, x, y + 1, z, blockId, ao);
 }
 
 function waterCornerDepthAo(chunkState, gridX, y, gridZ, blockId, getBlockAtWorld, waterDepthCache) {
@@ -900,7 +908,7 @@ function appendVisualDeltaGeometry(chunkState, faceGroups, positions, indices, g
         if (shouldUseGradientWaterSurface(chunkState, x, y, z, blockId, getBlockAtWorld, waterDepthCache)) {
           quads += appendWaterSurfaceQuad(chunkState, x, y, z, blockId, getBlockAtWorld, waterDepthCache, positions, indices);
         } else {
-          addFaceCell(faceGroups, 2, x, y, z, blockId, waterSurfaceDepthAoCached(chunkState, x, y, z, blockId, getBlockAtWorld, waterDepthCache));
+          addWaterSurfaceCells(faceGroups, x, y, z, blockId, waterSurfaceDepthAoCached(chunkState, x, y, z, blockId, getBlockAtWorld, waterDepthCache));
         }
       }
       continue;

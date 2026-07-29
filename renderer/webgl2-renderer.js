@@ -1,10 +1,11 @@
 import { DEFAULT_VIEW_DISTANCE, MAX_DESKTOP_DPR, MAX_MOBILE_DPR } from "../core/constants.js";
+import { BLOCK_ID } from "../world/block-registry.js";
 import { cameraOrigin, cameraViewProjection } from "./camera.js";
 import { filterChunksByCameraFrustum } from "./frustum.js";
 import { updateAvatarMeshVertices } from "./avatar-mesh.js";
 import { BufferManager } from "./buffer-manager.js";
 import { CloudLayer } from "./cloud-layer.js";
-import { applyLightingUniforms, createWorldLighting } from "./lighting.js";
+import { applyLightingUniforms, createUnderwaterLighting, createWorldLighting } from "./lighting.js";
 import { createProgram, OPAQUE_FRAGMENT_SHADER, OPAQUE_VERTEX_SHADER } from "./shader-manager.js";
 import { ProjectedShadowLayer } from "./projected-shadow-layer.js";
 import { SkyGradient } from "./sky-gradient.js";
@@ -43,6 +44,9 @@ void main() {
   vFogDepth = max(0.0, gl_Position.w);
 }
 `;
+
+const UNDERWATER_ENTER_RATE = 6.5;
+const UNDERWATER_EXIT_RATE = 4.0;
 
 const AVATAR_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
@@ -126,6 +130,8 @@ export class WebGL2VoxelRenderer {
     this.renderFrameId = 0;
     this.regionGroupCache = new Map();
     this.frustumFilterCache = null;
+    this.underwaterBlend = 0;
+    this.lastUnderwaterFrameAt = null;
     this._contextListenersAttached = false;
     this._onContextLost = (event) => {
       event.preventDefault();
@@ -719,7 +725,19 @@ export class WebGL2VoxelRenderer {
     if (logDraw) this.renderLogger.beginFrame({ visibleChunks: renderChunks.length });
     const viewProjection = cameraViewProjection(cameraState);
     const origin = cameraOrigin(cameraState);
-    const lighting = this.lighting;
+    const frameTime = performance.now();
+    const underwater = cameraIsInsideFluid(cameraState, visibleChunks);
+    if (this.lastUnderwaterFrameAt === null) {
+      this.underwaterBlend = underwater ? 1 : 0;
+    } else {
+      this.underwaterBlend = advanceUnderwaterBlend(
+        this.underwaterBlend,
+        underwater,
+        frameTime - this.lastUnderwaterFrameAt,
+      );
+    }
+    this.lastUnderwaterFrameAt = frameTime;
+    const lighting = createUnderwaterLighting(this.lighting, this.underwaterBlend);
     const clear = lighting.clearColor ?? this.options.clearColor;
 
     gl.clearColor(clear[0], clear[1], clear[2], clear[3]);
@@ -746,7 +764,8 @@ export class WebGL2VoxelRenderer {
     gl.uniform1f(this.uniforms.uTileScale, 1.0);
     gl.uniform1f(this.uniforms.uOpacity, 1.0);
     applyLightingUniforms(gl, this.uniforms, lighting);
-    gl.uniform1f(this.uniforms.uTime, performance.now() * 0.001);
+    gl.uniform1f(this.uniforms.uTime, frameTime * 0.001);
+    gl.uniform1f(this.uniforms.uUnderwater, this.underwaterBlend);
     gl.uniform2f(this.uniforms.uWorldOrigin, origin.worldX, origin.worldZ);
     this.textureArray.bind(0);
 
@@ -890,6 +909,8 @@ export class WebGL2VoxelRenderer {
       width: this.canvas.width,
       height: this.canvas.height,
       dpr: this.clampedDpr(),
+      underwater: underwater || this.underwaterBlend >= 0.5,
+      underwaterBlend: this.underwaterBlend,
     };
     this.frustumFilterCache = null;
     return this.stats;
@@ -1363,6 +1384,39 @@ export function detectWebGl2Support() {
   }
 }
 
+export function cameraIsInsideFluid(cameraState = {}, visibleChunks = []) {
+  if (typeof cameraState?.underwater === "boolean") return cameraState.underwater;
+  const worldX = Math.floor((Number(cameraState?.worldX) || 0) + (Number(cameraState?.localOffsetX) || 0));
+  const worldY = Math.floor((Number(cameraState?.worldY) || 0) + (Number(cameraState?.localOffsetY) || 0));
+  const worldZ = Math.floor((Number(cameraState?.worldZ) || 0) + (Number(cameraState?.localOffsetZ) || 0));
+  for (const chunk of visibleChunks ?? []) {
+    if (!chunk || chunk.buildingPreview === true || typeof chunk.getFinalBlock !== "function") continue;
+    const size = Math.max(1, Math.trunc(Number(chunk.chunkSize) || 0));
+    const chunkX = Math.trunc(Number(chunk.chunkX));
+    const chunkZ = Math.trunc(Number(chunk.chunkZ));
+    if (!Number.isFinite(chunkX) || !Number.isFinite(chunkZ)) continue;
+    if (Math.floor(worldX / size) !== chunkX || Math.floor(worldZ / size) !== chunkZ) continue;
+    const minY = Math.trunc(Number(chunk.minY) || 0);
+    const height = Math.max(0, Math.trunc(Number(chunk.height) || 0));
+    if (worldY < minY || worldY >= minY + height) return false;
+    const localX = worldX - chunkX * size;
+    const localZ = worldZ - chunkZ * size;
+    const blockId = chunk.getFinalBlock(localX, worldY, localZ);
+    return blockId === BLOCK_ID.water || blockId === BLOCK_ID.swampWater || blockId === BLOCK_ID.toxicWater;
+  }
+  return false;
+}
+
+export function advanceUnderwaterBlend(current, underwater, elapsedMs) {
+  const value = Math.max(0, Math.min(1, Number(current) || 0));
+  const target = underwater ? 1 : 0;
+  const elapsed = Math.max(0, Math.min(250, Number(elapsedMs) || 0)) / 1000;
+  if (elapsed <= 0 || value === target) return value;
+  const rate = target > value ? UNDERWATER_ENTER_RATE : UNDERWATER_EXIT_RATE;
+  const next = target + (value - target) * Math.exp(-rate * elapsed);
+  return Math.abs(next - target) < 0.001 ? target : next;
+}
+
 function collectUniforms(gl, program) {
   const names = [
     "uViewProjection",
@@ -1379,6 +1433,7 @@ function collectUniforms(gl, program) {
     "uLightParams",
     "uTime",
     "uOpacity",
+    "uUnderwater",
   ];
   const uniforms = {};
   for (const name of names) uniforms[name] = gl.getUniformLocation(program, name);
@@ -1739,5 +1794,5 @@ function isCoarsePointer() {
 }
 
 function emptyStats() {
-  return { backend: "webgl2", drawCalls: 0, visibleChunks: 0, triangles: 0, bufferMemory: 0, gpuChunks: 0, width: 0, height: 0, dpr: 1 };
+  return { backend: "webgl2", drawCalls: 0, visibleChunks: 0, triangles: 0, bufferMemory: 0, gpuChunks: 0, width: 0, height: 0, dpr: 1, underwater: false, underwaterBlend: 0 };
 }

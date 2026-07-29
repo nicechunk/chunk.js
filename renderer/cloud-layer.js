@@ -41,6 +41,7 @@ uniform vec3 uGroundLightColor;
 uniform vec3 uFogColor;
 uniform vec2 uFogNearFar;
 uniform vec4 uLightParams;
+uniform float uOpacity;
 
 in vec3 vNormal;
 in vec4 vColor;
@@ -62,7 +63,7 @@ void main() {
   color = mix(color * shadow, color * whiteCap, topLight);
   color = mix(color, vec3(1.0, 1.0, 1.0), 0.30);
   float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);
-  outColor = vec4(mix(color, uFogColor, fog * 0.62), min(vColor.a, 0.990));
+  outColor = vec4(mix(color, uFogColor, fog * 0.62), min(vColor.a, 0.990) * uOpacity);
 }
 `;
 
@@ -128,6 +129,7 @@ export class CloudLayer {
     const originZ = this.followCamera ? 0 : (cameraOrigin.worldZ || 0);
     gl.uniform3f(this.uniforms.uCameraOrigin, originX, originY, originZ);
     applyLightingUniforms(gl, this.uniforms, lighting);
+    gl.uniform1f(this.uniforms.uOpacity, Math.max(0, Math.min(1, Number(lighting?.cloudOpacity ?? 1))));
     gl.bindVertexArray(this.vao);
     gl.drawElements(gl.TRIANGLES, this.indexCount, this.indexType, 0);
     gl.bindVertexArray(null);
@@ -267,6 +269,7 @@ function collectCloudUniforms(gl, program) {
     "uFogColor",
     "uFogNearFar",
     "uLightParams",
+    "uOpacity",
   ];
   const uniforms = {};
   for (const name of names) uniforms[name] = gl.getUniformLocation(program, name);

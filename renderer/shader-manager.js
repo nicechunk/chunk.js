@@ -59,6 +59,7 @@ uniform vec2 uFogNearFar;
 uniform vec4 uLightParams;
 uniform float uTime;
 uniform float uOpacity;
+uniform float uUnderwater;
 
 in vec3 vNormal;
 in vec2 vUv;
@@ -137,6 +138,7 @@ void main() {
     return;
   }
   vec3 normal = normalize(vNormal);
+  bool isWaterUnderside = isWaterSurface && normal.y < -0.5;
   float sun = max(dot(normal, normalize(uSunDirection)), 0.0);
   float toonSun = mix(sun, smoothstep(0.10, 0.82, sun), 0.55);
   float hemiUp = normal.y * 0.5 + 0.5;
@@ -233,10 +235,22 @@ void main() {
       color = min(color, vec3(1.24, 1.25, 1.20));
       texel.a = mix(0.60, 0.82, distanceFactor) + ripple * 0.03 + clamp(sparkleGlow, 0.0, 1.0) * 0.030;
     }
+    if (isWaterUnderside) {
+      vec3 undersideTint = layer == 18.0
+        ? vec3(0.075, 0.27, 0.24)
+        : layer == 19.0
+          ? vec3(0.11, 0.34, 0.20)
+          : vec3(0.035, 0.31, 0.43);
+      color = mix(color * vec3(0.56, 0.82, 0.91), undersideTint, 0.48 + ripple * 0.08);
+      color += vec3(0.08, 0.28, 0.32) * lineEnergy * 0.16;
+      texel.a = max(texel.a, 0.76 + ripple * 0.04);
+      waterGlareCore = 0.0;
+      waterGlareHalo = 0.0;
+    }
   }
   color *= uLightParams.w;
   color = animeGrade(color);
-  if (isWaterSurface) {
+  if (isWaterSurface && !isWaterUnderside) {
     float glareCore = smoothstep(0.22, 0.82, waterGlareCore);
     float glareHalo = smoothstep(0.08, 0.68, waterGlareHalo);
     color += vec3(0.34, 0.74, 1.00) * glareHalo * 0.12;
@@ -250,9 +264,15 @@ void main() {
   float horizonHaze = clamp(horizonAngle * horizonDistance, 0.0, 1.0);
   vec3 horizonFog = mix(uFogColor, uSkyLightColor, 0.28);
   color = mix(color, horizonFog, horizonHaze * 0.42);
-  if (isWaterSurface) {
+  if (isWaterSurface && !isWaterUnderside) {
     texel.a = mix(texel.a, min(texel.a, 0.42), horizonHaze * 0.56);
     color = mix(color, horizonFog, horizonHaze * 0.24);
+  }
+  if (uUnderwater > 0.001 && !isWaterSurface) {
+    float absorptionDistance = smoothstep(0.0, max(1.0, uFogNearFar.y), vFogDepth);
+    float absorption = uUnderwater * mix(0.20, 0.54, absorptionDistance);
+    vec3 absorbedColor = color * vec3(0.48, 0.82, 0.90) + vec3(0.008, 0.055, 0.070);
+    color = mix(color, absorbedColor, absorption);
   }
   float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);
   color = mix(color, uFogColor, fog);
