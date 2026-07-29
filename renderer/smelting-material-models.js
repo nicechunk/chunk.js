@@ -2,7 +2,7 @@ const MODEL_CACHE_LIMIT = 96;
 const modelCache = new Map();
 const surfaceProfileCache = new Map();
 
-export const SMELTING_MATERIAL_VISUAL_REVISION = "nicechunk-smelting-material-visuals-v2";
+export const SMELTING_MATERIAL_VISUAL_REVISION = "nicechunk-smelting-material-visuals-v3";
 
 const MODEL_DEFS = Object.freeze({
   charcoal: model({
@@ -46,21 +46,21 @@ const MODEL_DEFS = Object.freeze({
   ceramic_brick: model({
     name: "Ceramic Brick",
     className: "ceramic",
-    shape: "fired brick stack",
+    shape: "single fired ceramic brick",
     roughness: 0.94,
-    description: "Two offset fired-clay bricks with dark kiln seams and chipped highlights.",
+    description: "One fired ceramic brick with a dark kiln edge and chipped face highlight.",
     build(builder) {
-      brickStack(builder, [184, 103, 65, 255], [113, 65, 48, 255], [222, 143, 91, 255]);
+      singleBrick(builder, [184, 103, 65, 255], [113, 65, 48, 255], [222, 143, 91, 255]);
     },
   }),
   lime_ceramic: model({
     name: "Lime Ceramic",
     className: "ceramic",
-    shape: "refractory tile stack",
+    shape: "single refractory ceramic tile",
     roughness: 0.88,
-    description: "Pale refractory tiles with a warm clay core and lime-rich face band.",
+    description: "One pale refractory tile with a warm clay core and lime-rich face band.",
     build(builder) {
-      tileStack(builder, [224, 215, 180, 255], [185, 151, 105, 255], [247, 239, 207, 255]);
+      singleCeramicTile(builder, [224, 215, 180, 255], [185, 151, 105, 255], [247, 239, 207, 255]);
     },
   }),
   quicklime: model({
@@ -189,11 +189,11 @@ const MODEL_DEFS = Object.freeze({
   carbon_plate: model({
     name: "Carbon Plate",
     className: "carbon",
-    shape: "layered carbon laminate",
+    shape: "single carbon laminate plate",
     roughness: 0.82,
-    description: "Three compressed carbon laminates with a visible crossed fiber weave.",
+    description: "One compressed carbon laminate plate with a visible crossed fiber weave.",
     build(builder) {
-      layeredPlate(builder, [42, 45, 47, 255], [76, 82, 84, 255], [112, 120, 120, 255]);
+      singleCarbonPlate(builder, [42, 45, 47, 255], [76, 82, 84, 255], [112, 120, 120, 255]);
     },
   }),
   carbon_steel: model({
@@ -335,21 +335,21 @@ const MODEL_DEFS = Object.freeze({
   wooden_plank: model({
     name: "Wooden Plank",
     className: "wood",
-    shape: "stacked sawn planks",
+    shape: "single square wooden plank",
     roughness: 0.88,
-    description: "Three offset sawn planks with readable end grain and a pale planed edge.",
+    description: "One square sawn plank with readable end grain and a pale planed face.",
     build(builder) {
-      plankStack(builder, [151, 104, 61, 255], [101, 67, 42, 255], [196, 147, 88, 255]);
+      singleWoodenPlank(builder, [151, 104, 61, 255], [101, 67, 42, 255], [196, 147, 88, 255]);
     },
   }),
   wooden_stick: model({
     name: "Wooden Stick",
     className: "wood",
-    shape: "bound carpentry sticks",
+    shape: "single rectangular wooden stick",
     roughness: 0.9,
-    description: "A compact crossed bundle of squared wooden sticks tied for construction use.",
+    description: "One long rectangular carpentry stick with end grain and a planed highlight.",
     build(builder) {
-      stickBundle(builder, [164, 115, 67, 255], [105, 72, 45, 255], [207, 172, 112, 255]);
+      singleWoodenStick(builder, [164, 115, 67, 255], [105, 72, 45, 255], [207, 172, 112, 255]);
     },
   }),
   squared_timber: model({
@@ -365,34 +365,34 @@ const MODEL_DEFS = Object.freeze({
   clear_glass_panel: model({
     name: "Clear Glass Panel",
     className: "glass",
-    shape: "stacked clear glazing panels",
+    shape: "single clear glazing panel",
     roughness: 0.12,
     translucency: 0.62,
-    description: "Two thin clear glazing panels with thick cooled edges and a diagonal light catch.",
+    description: "One thin clear glazing panel with cooled edges and a diagonal light catch.",
     build(builder) {
-      glassPanelStack(builder, [165, 226, 237, 126], [224, 249, 250, 206], [81, 163, 184, 218]);
+      singleGlassPanel(builder, [165, 226, 237, 126], [224, 249, 250, 206], [81, 163, 184, 218]);
     },
   }),
   ice_blue_glass_panel: model({
     name: "Ice-blue Glass Panel",
     className: "glass",
-    shape: "frost-tinted glazing panels",
+    shape: "single frost-tinted glazing panel",
     roughness: 0.16,
     translucency: 0.54,
     description: "Cold-blue glazing with a frosted lower band and bright crystalline edge.",
     build(builder) {
-      glassPanelStack(builder, [91, 174, 220, 144], [190, 237, 255, 224], [53, 112, 176, 226], [221, 250, 255, 215]);
+      singleGlassPanel(builder, [91, 174, 220, 144], [190, 237, 255, 224], [53, 112, 176, 226], [221, 250, 255, 215]);
     },
   }),
   amber_glass_panel: model({
     name: "Amber Glass Panel",
     className: "glass",
-    shape: "warm amber glazing panels",
+    shape: "single warm amber glazing panel",
     roughness: 0.18,
     translucency: 0.47,
     description: "Warm amber glazing with a dark carbon edge and a honey-colored light streak.",
     build(builder) {
-      glassPanelStack(builder, [205, 139, 48, 158], [255, 213, 119, 230], [118, 72, 35, 236], [255, 230, 145, 222]);
+      singleGlassPanel(builder, [205, 139, 48, 158], [255, 213, 119, 230], [118, 72, 35, 236], [255, 230, 145, 222]);
     },
   }),
   basalt_reinforced_glass: model({
@@ -409,53 +409,53 @@ const MODEL_DEFS = Object.freeze({
   fired_clay_brick: model({
     name: "Fired Clay Brick",
     className: "ceramic",
-    shape: "kiln-fired masonry stack",
+    shape: "single kiln-fired clay brick",
     roughness: 0.96,
-    description: "Offset kiln-fired bricks with dark mortar gaps and orange chipped edges.",
+    description: "One kiln-fired clay brick with a dark edge and orange chipped face.",
     build(builder) {
-      brickStack(builder, [167, 77, 48, 255], [87, 50, 40, 255], [207, 112, 68, 255]);
+      singleBrick(builder, [167, 77, 48, 255], [87, 50, 40, 255], [207, 112, 68, 255]);
     },
   }),
   adobe_brick: model({
     name: "Adobe Brick",
     className: "composite",
-    shape: "sun-dried fiber bricks",
+    shape: "single sun-dried fiber brick",
     roughness: 1,
-    description: "Sun-dried earth bricks with pale straw fibers visible across their rough faces.",
+    description: "One sun-dried earth brick with pale straw fibers visible across its rough face.",
     build(builder) {
-      brickStack(builder, [173, 119, 71, 255], [105, 76, 53, 255], [204, 153, 99, 255]);
-      builder.box(0.17, 0.40, 0.224, 0.26, 0.024, 0.025, [221, 191, 116, 255], { z: -0.08 });
+      singleBrick(builder, [173, 119, 71, 255], [105, 76, 53, 255], [204, 153, 99, 255]);
+      builder.box(0.17, 0.31, 0.263, 0.26, 0.024, 0.025, [221, 191, 116, 255], { z: -0.08 });
     },
   }),
   stone_brick: model({
     name: "Stone Brick",
     className: "stone",
-    shape: "regular cut-stone stack",
+    shape: "single regular cut-stone brick",
     roughness: 0.9,
     description: "Regular pale-gray cut masonry with a crisp chisel line and recessed joint.",
     build(builder) {
-      brickStack(builder, [139, 149, 151, 255], [83, 91, 94, 255], [181, 191, 190, 255]);
+      singleBrick(builder, [139, 149, 151, 255], [83, 91, 94, 255], [181, 191, 190, 255]);
     },
   }),
   deep_stone_brick: model({
     name: "Deep-stone Brick",
     className: "stone",
-    shape: "dense fortress brick stack",
+    shape: "single dense fortress brick",
     roughness: 0.92,
     description: "Dense blue-black fortress masonry with a cool mineral seam and worn edge.",
     build(builder) {
-      brickStack(builder, [65, 70, 83, 255], [34, 38, 48, 255], [99, 107, 121, 255]);
+      singleBrick(builder, [65, 70, 83, 255], [34, 38, 48, 255], [99, 107, 121, 255]);
     },
   }),
   basalt_brick: model({
     name: "Basalt Brick",
     className: "stone",
-    shape: "heat-resistant basalt brick stack",
+    shape: "single heat-resistant basalt brick",
     roughness: 0.95,
     description: "Near-black volcanic masonry with a restrained rust-red heat fracture.",
     build(builder) {
-      brickStack(builder, [47, 51, 59, 255], [24, 27, 32, 255], [78, 82, 91, 255]);
-      builder.box(0.10, 0.515, 0.095, 0.25, 0.024, 0.025, [145, 67, 43, 255], { y: -0.08 });
+      singleBrick(builder, [47, 51, 59, 255], [24, 27, 32, 255], [78, 82, 91, 255]);
+      builder.box(0.10, 0.425, 0.095, 0.25, 0.024, 0.025, [145, 67, 43, 255], { y: -0.08 });
     },
   }),
   sandstone_block: model({
@@ -481,11 +481,11 @@ const MODEL_DEFS = Object.freeze({
   polished_stone_slab: model({
     name: "Polished Stone Slab",
     className: "stone",
-    shape: "stacked polished floor slabs",
+    shape: "single polished floor slab",
     roughness: 0.34,
-    description: "Two thin polished slabs with a mirror-bright bevel and a dark sawn underside.",
+    description: "One thin polished slab with a mirror-bright bevel and a dark sawn underside.",
     build(builder) {
-      polishedSlabStack(builder, [164, 176, 179, 255], [98, 108, 112, 255], [224, 232, 231, 255]);
+      singlePolishedSlab(builder, [164, 176, 179, 255], [98, 108, 112, 255], [224, 232, 231, 255]);
     },
   }),
   lime_plaster: model({
@@ -531,21 +531,21 @@ const MODEL_DEFS = Object.freeze({
   white_ceramic_tile: model({
     name: "White Ceramic Tile",
     className: "ceramic",
-    shape: "stacked glazed finish tiles",
+    shape: "single white glazed finish tile",
     roughness: 0.22,
-    description: "Thin white glazed tiles with a warm ceramic core and bright kiln-fired face.",
+    description: "One thin white glazed tile with a warm ceramic core and bright kiln-fired face.",
     build(builder) {
-      finishTileStack(builder, [220, 219, 207, 255], [164, 145, 119, 255], [252, 250, 234, 255]);
+      singleFinishTile(builder, [220, 219, 207, 255], [164, 145, 119, 255], [252, 250, 234, 255]);
     },
   }),
   blue_ceramic_tile: model({
     name: "Blue Ceramic Tile",
     className: "ceramic",
-    shape: "stacked blue glazed tiles",
+    shape: "single blue glazed finish tile",
     roughness: 0.18,
-    description: "Blue glazed finish tiles with a pale clay edge and a crisp water-blue highlight.",
+    description: "One blue glazed tile with a pale clay edge and a crisp water-blue highlight.",
     build(builder) {
-      finishTileStack(builder, [69, 132, 186, 255], [171, 153, 125, 255], [125, 195, 231, 255]);
+      singleFinishTile(builder, [69, 132, 186, 255], [171, 153, 125, 255], [125, 195, 231, 255]);
     },
   }),
   volcanic_ash_concrete: model({
@@ -572,62 +572,62 @@ const MODEL_DEFS = Object.freeze({
   roof_tile_terracotta: model({
     name: "Terracotta Roof Tile",
     className: "ceramic",
-    shape: "stacked overlapping roof tiles",
+    shape: "single ridged terracotta roof tile",
     roughness: 0.9,
-    description: "Overlapping terracotta roof tiles with stepped curved ridges and fired-orange edges.",
+    description: "One terracotta roof tile with a raised ridge and fired-orange edge.",
     build(builder) {
-      roofTileStack(builder, [146, 69, 40, 255], [92, 48, 34, 255], [197, 107, 61, 255]);
+      singleRoofTile(builder, [146, 69, 40, 255], [92, 48, 34, 255], [197, 107, 61, 255]);
     },
   }),
   roof_tile_ice_blue: model({
     name: "Ice-blue Glazed Roof Tile",
     className: "ceramic",
-    shape: "ice-blue glazed roof-tile stack",
+    shape: "single ice-blue glazed roof tile",
     roughness: 0.2,
-    description: "Overlapping blue-glazed tiles with icy highlights along their raised ridges.",
+    description: "One blue-glazed roof tile with an icy highlight along its raised ridge.",
     build(builder) {
-      roofTileStack(builder, [68, 132, 199, 255], [43, 78, 130, 255], [133, 203, 248, 255]);
+      singleRoofTile(builder, [68, 132, 199, 255], [43, 78, 130, 255], [133, 203, 248, 255]);
     },
   }),
   roof_tile_shell_white: model({
     name: "Shell-white Glazed Roof Tile",
     className: "ceramic",
-    shape: "shell-white glazed roof-tile stack",
+    shape: "single shell-white glazed roof tile",
     roughness: 0.24,
-    description: "Cream-white glazed tiles with warm shell edges and a pearl face highlight.",
+    description: "One cream-white glazed roof tile with a warm shell edge and pearl face highlight.",
     build(builder) {
-      roofTileStack(builder, [211, 205, 184, 255], [155, 143, 122, 255], [255, 247, 218, 255]);
+      singleRoofTile(builder, [211, 205, 184, 255], [155, 143, 122, 255], [255, 247, 218, 255]);
     },
   }),
   roof_tile_charcoal: model({
     name: "Charcoal-black Glazed Roof Tile",
     className: "ceramic",
-    shape: "charcoal glazed roof-tile stack",
+    shape: "single charcoal glazed roof tile",
     roughness: 0.28,
-    description: "Black glazed tiles with graphite ridge reflections and a warm fired-clay underside.",
+    description: "One black glazed roof tile with a graphite ridge and warm fired-clay underside.",
     build(builder) {
-      roofTileStack(builder, [38, 42, 49, 255], [22, 25, 30, 255], [90, 97, 109, 255], [126, 67, 43, 255]);
+      singleRoofTile(builder, [38, 42, 49, 255], [22, 25, 30, 255], [90, 97, 109, 255], [126, 67, 43, 255]);
     },
   }),
   roof_tile_ash_gray: model({
     name: "Volcanic-ash Glazed Roof Tile",
     className: "ceramic",
-    shape: "ash-gray glazed roof-tile stack",
+    shape: "single ash-gray glazed roof tile",
     roughness: 0.32,
-    description: "Gray glazed tiles with mottled volcanic aggregate and a cool silver ridge.",
+    description: "One gray glazed roof tile with mottled volcanic aggregate and a cool silver ridge.",
     build(builder) {
-      roofTileStack(builder, [105, 108, 113, 255], [61, 64, 70, 255], [166, 165, 159, 255]);
+      singleRoofTile(builder, [105, 108, 113, 255], [61, 64, 70, 255], [166, 165, 159, 255]);
     },
   }),
   roof_tile_mycelium: model({
     name: "Mycelium-glow Glazed Roof Tile",
     className: "ceramic",
-    shape: "luminous teal roof-tile stack",
+    shape: "single luminous teal roof tile",
     roughness: 0.25,
     emissive: [0.03, 0.16, 0.12],
-    description: "Teal glazed tiles with a restrained mycelium glow running along their raised seams.",
+    description: "One teal glazed roof tile with a restrained mycelium glow along its raised ridge.",
     build(builder) {
-      roofTileStack(builder, [59, 155, 132, 255], [32, 92, 82, 255], [139, 239, 207, 255]);
+      singleRoofTile(builder, [59, 155, 132, 255], [32, 92, 82, 255], [139, 239, 207, 255]);
     },
   }),
   blasting_charge: model({
@@ -838,19 +838,16 @@ function jar(builder, shell, core, cap) {
   builder.box(-0.19, 0.38, 0.215, 0.035, 0.31, 0.025, [236, 248, 226, 170]);
 }
 
-function brickStack(builder, base, seam, highlight) {
-  builder.box(-0.17, 0.14, 0.03, 0.55, 0.22, 0.42, base, { y: 0.06 });
-  builder.box(0.22, 0.14, -0.04, 0.26, 0.22, 0.40, tint(base, -14), { y: 0.06 });
-  builder.box(0.12, 0.39, 0, 0.60, 0.22, 0.42, highlight, { y: -0.08 });
-  builder.box(-0.20, 0.39, 0, 0.05, 0.23, 0.43, seam, { y: -0.08 });
-  builder.box(0.12, 0.515, 0.08, 0.38, 0.025, 0.22, tint(highlight, 25), { y: -0.08 });
+function singleBrick(builder, base, seam, highlight) {
+  builder.box(0, 0.22, 0, 0.80, 0.38, 0.50, base);
+  builder.box(0, 0.422, 0, 0.68, 0.025, 0.38, highlight);
+  builder.box(-0.387, 0.22, 0, 0.025, 0.28, 0.38, seam);
 }
 
-function tileStack(builder, base, core, highlight) {
-  builder.box(-0.05, 0.13, 0.02, 0.72, 0.16, 0.52, core, { y: 0.09 });
-  builder.box(0.04, 0.30, 0, 0.72, 0.14, 0.52, base, { y: -0.05 });
-  builder.box(-0.02, 0.46, 0.01, 0.72, 0.13, 0.52, highlight, { y: 0.04 });
-  builder.box(-0.02, 0.535, 0.05, 0.48, 0.025, 0.28, [255, 249, 224, 255], { y: 0.04 });
+function singleCeramicTile(builder, base, core, highlight) {
+  builder.box(0, 0.10, 0, 0.72, 0.14, 0.58, core);
+  builder.box(0, 0.182, 0, 0.68, 0.025, 0.54, base);
+  builder.box(-0.08, 0.202, 0.08, 0.42, 0.018, 0.26, highlight);
 }
 
 function crystalCluster(builder, base, highlight, foot) {
@@ -913,12 +910,11 @@ function alloyBar(builder, base, highlight, band) {
   builder.box(0.04, 0.45, 0.12, 0.30, 0.025, 0.025, [238, 244, 242, 215], { y: 0.04 });
 }
 
-function layeredPlate(builder, base, middle, weave) {
-  builder.box(-0.04, 0.11, 0.03, 0.76, 0.10, 0.56, base, { y: 0.07 });
-  builder.box(0.03, 0.23, -0.01, 0.76, 0.09, 0.56, middle, { y: -0.05 });
-  builder.box(-0.02, 0.34, 0.02, 0.76, 0.08, 0.56, base, { y: 0.03 });
+function singleCarbonPlate(builder, base, surface, weave) {
+  builder.box(0, 0.12, 0, 0.76, 0.12, 0.56, base);
+  builder.box(0, 0.192, 0, 0.70, 0.025, 0.50, surface);
   for (let index = -2; index <= 2; index += 1) {
-    builder.box(index * 0.13, 0.39, 0.13, 0.025, 0.025, 0.34, weave, { z: 0.55 });
+    builder.box(index * 0.13, 0.212, 0, 0.025, 0.018, 0.42, weave, { z: 0.55 });
   }
 }
 
@@ -950,20 +946,17 @@ function pigmentCake(builder, pigment, highlight, shadow) {
   builder.box(0.02, 0.325, 0.12, 0.30, 0.025, 0.025, tint(highlight, 10), { z: 0.06 });
 }
 
-function plankStack(builder, wood, endGrain, highlight) {
-  builder.box(-0.03, 0.10, 0.06, 0.86, 0.12, 0.24, endGrain, { y: 0.05 });
-  builder.box(0.02, 0.23, -0.03, 0.86, 0.12, 0.24, wood, { y: -0.04 });
-  builder.box(-0.04, 0.36, 0.04, 0.86, 0.12, 0.24, highlight, { y: 0.03 });
-  builder.box(0.395, 0.36, 0.04, 0.035, 0.095, 0.19, endGrain, { y: 0.03 });
-  builder.box(-0.09, 0.425, 0.145, 0.48, 0.018, 0.018, tint(highlight, 25), { y: 0.03 });
+function singleWoodenPlank(builder, wood, endGrain, highlight) {
+  builder.box(0, 0.12, 0, 0.72, 0.12, 0.72, wood);
+  builder.box(0, 0.192, 0, 0.66, 0.025, 0.66, highlight);
+  builder.box(0.347, 0.12, 0, 0.025, 0.09, 0.62, endGrain);
+  builder.box(-0.10, 0.212, 0.10, 0.34, 0.018, 0.025, tint(highlight, 25), { y: 0.42 });
 }
 
-function stickBundle(builder, wood, shadow, tie) {
-  builder.box(-0.10, 0.23, 0.02, 0.72, 0.11, 0.11, wood, { y: 0.17, z: 0.12 });
-  builder.box(0.09, 0.25, -0.04, 0.74, 0.10, 0.10, tint(wood, 16), { y: -0.13, z: -0.08 });
-  builder.box(0, 0.38, 0.03, 0.68, 0.10, 0.10, shadow, { y: 0.04, z: 0.07 });
-  builder.box(-0.10, 0.27, 0.02, 0.08, 0.34, 0.17, tie, { y: 0.17, z: 0.12 });
-  builder.box(0.13, 0.30, 0, 0.075, 0.34, 0.17, tint(tie, -25), { y: -0.13, z: -0.08 });
+function singleWoodenStick(builder, wood, endGrain, highlight) {
+  builder.box(0, 0.18, 0, 0.84, 0.16, 0.16, wood);
+  builder.box(0.407, 0.18, 0, 0.025, 0.12, 0.12, endGrain);
+  builder.box(-0.08, 0.269, 0.03, 0.56, 0.018, 0.025, highlight);
 }
 
 function timberBeam(builder, wood, heartwood, highlight) {
@@ -974,12 +967,12 @@ function timberBeam(builder, wood, heartwood, highlight) {
   builder.box(-0.37, 0.20, -0.11, 0.035, 0.18, 0.08, tint(heartwood, -18), { y: -0.08 });
 }
 
-function glassPanelStack(builder, glass, highlight, edge, frost = null) {
-  builder.box(-0.03, 0.27, 0.02, 0.72, 0.48, 0.055, glass, { y: 0.08 });
-  builder.box(0.08, 0.31, -0.08, 0.70, 0.46, 0.05, tint(glass, -12), { y: -0.07 });
-  builder.box(-0.34, 0.27, 0.045, 0.035, 0.42, 0.075, edge, { y: 0.08 });
-  builder.box(0.04, 0.36, 0.055, 0.035, 0.32, 0.018, highlight, { z: -0.56, y: 0.08 });
-  builder.box(0.18, 0.49, 0.06, 0.24, 0.025, 0.018, frost ?? highlight, { y: 0.08 });
+function singleGlassPanel(builder, glass, highlight, edge, frost = null) {
+  builder.box(0, 0.30, 0, 0.72, 0.50, 0.055, glass);
+  builder.box(-0.348, 0.30, 0, 0.025, 0.46, 0.075, edge);
+  builder.box(0.348, 0.30, 0, 0.025, 0.46, 0.075, tint(edge, 18));
+  builder.box(0.02, 0.34, 0.04, 0.035, 0.34, 0.018, highlight, { z: -0.56 });
+  builder.box(0, 0.08, 0.04, 0.62, 0.025, 0.018, frost ?? highlight);
 }
 
 function reinforcedGlassPanel(builder, glass, highlight, rib) {
@@ -1007,12 +1000,11 @@ function cobblePile(builder, base, shadow, highlight) {
   builder.box(0.28, 0.32, -0.13, 0.22, 0.18, 0.20, tint(shadow, 24), { y: 0.14 });
 }
 
-function polishedSlabStack(builder, slab, underside, highlight) {
-  builder.box(-0.02, 0.11, 0.04, 0.82, 0.12, 0.58, underside, { y: 0.06 });
-  builder.box(0.05, 0.24, -0.03, 0.80, 0.11, 0.58, slab, { y: -0.05 });
-  builder.box(0.05, 0.305, -0.03, 0.69, 0.018, 0.47, highlight, { y: -0.05 });
-  builder.box(-0.26, 0.316, 0.12, 0.22, 0.012, 0.025, tint(highlight, 20), { y: -0.05 });
-  builder.box(0.42, 0.24, -0.03, 0.025, 0.08, 0.45, tint(slab, -28), { y: -0.05 });
+function singlePolishedSlab(builder, slab, underside, highlight) {
+  builder.box(0, 0.11, 0, 0.82, 0.14, 0.58, underside);
+  builder.box(0, 0.192, 0, 0.78, 0.025, 0.54, slab);
+  builder.box(0, 0.212, 0, 0.68, 0.018, 0.44, highlight);
+  builder.box(-0.23, 0.224, 0.12, 0.20, 0.012, 0.025, tint(highlight, 20));
 }
 
 function plasterTray(builder, plaster, tray, highlight, fleck = null) {
@@ -1044,12 +1036,10 @@ function terrazzoSlab(builder, slab, edge, shell) {
   ], 0.08, 0.035);
 }
 
-function finishTileStack(builder, glaze, core, highlight) {
-  builder.box(-0.04, 0.10, 0.04, 0.70, 0.08, 0.52, core, { y: 0.08 });
-  builder.box(0.04, 0.19, -0.02, 0.70, 0.08, 0.52, tint(glaze, -10), { y: -0.05 });
-  builder.box(-0.01, 0.28, 0.02, 0.70, 0.075, 0.52, glaze, { y: 0.03 });
-  builder.box(-0.01, 0.325, 0.02, 0.61, 0.018, 0.43, highlight, { y: 0.03 });
-  builder.box(-0.22, 0.338, 0.11, 0.18, 0.012, 0.018, tint(highlight, 18), { y: 0.03 });
+function singleFinishTile(builder, glaze, core, highlight) {
+  builder.box(0, 0.10, 0, 0.70, 0.10, 0.60, core);
+  builder.box(0, 0.162, 0, 0.66, 0.025, 0.56, glaze);
+  builder.box(-0.18, 0.182, 0.11, 0.22, 0.018, 0.025, highlight);
 }
 
 function concreteSample(builder, concrete, shadow, aggregate) {
@@ -1069,14 +1059,12 @@ function saltCrystalBlock(builder, salt, highlight, edge) {
   builder.box(-0.14, 0.42, 0.13, 0.11, 0.18, 0.11, tint(highlight, -14), { z: 0.11 });
 }
 
-function roofTileStack(builder, glaze, shadow, highlight, underside = null) {
+function singleRoofTile(builder, glaze, shadow, highlight, underside = null) {
   const core = underside ?? shadow;
-  builder.box(-0.06, 0.11, 0.06, 0.70, 0.08, 0.40, core, { y: 0.08, z: -0.08 });
-  builder.box(0.02, 0.19, -0.01, 0.70, 0.075, 0.40, tint(glaze, -12), { y: -0.04, z: 0.05 });
-  builder.box(-0.02, 0.27, 0.04, 0.70, 0.07, 0.40, glaze, { y: 0.04, z: -0.04 });
-  builder.box(-0.22, 0.325, 0.04, 0.12, 0.07, 0.38, highlight, { y: 0.04 });
-  builder.box(0.02, 0.325, 0.04, 0.12, 0.07, 0.38, tint(highlight, -12), { y: 0.04 });
-  builder.box(0.26, 0.325, 0.04, 0.12, 0.07, 0.38, highlight, { y: 0.04 });
+  builder.box(0, 0.10, 0, 0.70, 0.10, 0.42, core);
+  builder.box(0, 0.162, 0, 0.66, 0.025, 0.38, glaze);
+  builder.box(0, 0.225, 0, 0.12, 0.11, 0.36, tint(glaze, -12));
+  builder.box(0, 0.292, 0, 0.08, 0.025, 0.32, highlight);
 }
 
 function specks(builder, entries, defaultSize = 0.09, depth = 0.05) {
