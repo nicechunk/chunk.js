@@ -237,13 +237,13 @@ void main() {
     }
     if (isWaterUnderside) {
       vec3 undersideTint = layer == 18.0
-        ? vec3(0.075, 0.27, 0.24)
+        ? vec3(0.13, 0.39, 0.35)
         : layer == 19.0
-          ? vec3(0.11, 0.34, 0.20)
-          : vec3(0.035, 0.31, 0.43);
-      color = mix(color * vec3(0.56, 0.82, 0.91), undersideTint, 0.48 + ripple * 0.08);
-      color += vec3(0.08, 0.28, 0.32) * lineEnergy * 0.16;
-      texel.a = max(texel.a, 0.76 + ripple * 0.04);
+          ? vec3(0.17, 0.46, 0.29)
+          : vec3(0.08, 0.44, 0.57);
+      color = mix(color * vec3(0.74, 0.92, 0.98), undersideTint, 0.32 + ripple * 0.05);
+      color += vec3(0.12, 0.36, 0.42) * lineEnergy * 0.20;
+      texel.a = min(texel.a, 0.64 + ripple * 0.03);
       waterGlareCore = 0.0;
       waterGlareHalo = 0.0;
     }
@@ -270,8 +270,8 @@ void main() {
   }
   if (uUnderwater > 0.001 && !isWaterSurface) {
     float absorptionDistance = smoothstep(0.0, max(1.0, uFogNearFar.y), vFogDepth);
-    float absorption = uUnderwater * mix(0.20, 0.54, absorptionDistance);
-    vec3 absorbedColor = color * vec3(0.48, 0.82, 0.90) + vec3(0.008, 0.055, 0.070);
+    float absorption = uUnderwater * mix(0.10, 0.34, absorptionDistance);
+    vec3 absorbedColor = color * vec3(0.68, 0.90, 0.94) + vec3(0.018, 0.075, 0.090);
     color = mix(color, absorbedColor, absorption);
   }
   float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);

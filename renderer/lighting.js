@@ -1,16 +1,16 @@
 export const MAIN_GAME_SUN_DIRECTION = Object.freeze(normalize3([-0.72, 0.34, 0.62]));
 
 const UNDERWATER_LIGHTING = Object.freeze({
-  skyColor: hexToRgb(0x06283a),
-  fogColor: hexToRgb(0x075064),
-  sunColor: hexToRgb(0x78b9bb),
-  skyLightColor: hexToRgb(0x58b6bd),
-  groundLightColor: hexToRgb(0x164b48),
-  fogNearFar: [6, 72],
-  ambientStrength: 0.46,
-  sunStrength: 0.24,
-  hemiStrength: 0.52,
-  exposure: 0.90,
+  skyColor: hexToRgb(0x0d4054),
+  fogColor: hexToRgb(0x147286),
+  sunColor: hexToRgb(0xa6d7d2),
+  skyLightColor: hexToRgb(0x83d0cf),
+  groundLightColor: hexToRgb(0x2a6d67),
+  fogNearFar: [10, 112],
+  ambientStrength: 0.52,
+  sunStrength: 0.30,
+  hemiStrength: 0.58,
+  exposure: 1.00,
 });
 
 export const DEFAULT_WORLD_LIGHTING = Object.freeze({

@@ -47,7 +47,7 @@ test("underwater lighting adds absorption without mutating world lighting", () =
 
   const underwater = createUnderwaterLighting(world, 1);
   assert.notEqual(underwater, world);
-  assert.deepEqual(underwater.fogNearFar, [6, 72]);
+  assert.deepEqual(underwater.fogNearFar, [10, 112]);
   assert.ok(underwater.fogColor[2] > underwater.fogColor[0]);
   assert.equal(underwater.sunDiscOpacity, 0);
   assert.equal(underwater.cloudOpacity, 0);
@@ -64,6 +64,7 @@ test("underwater transitions are smooth and the shader distinguishes the water u
   assert.match(OPAQUE_FRAGMENT_SHADER, /uniform float uUnderwater;/);
   assert.match(OPAQUE_FRAGMENT_SHADER, /isWaterUnderside/);
   assert.match(OPAQUE_FRAGMENT_SHADER, /normal\.y < -0\.5/);
+  assert.match(OPAQUE_FRAGMENT_SHADER, /texel\.a = min\(texel\.a, 0\.64/);
 });
 
 function waterChunk({ chunkX = 0, chunkZ = 0, fluidBlockId = BLOCK_ID.water } = {}) {
