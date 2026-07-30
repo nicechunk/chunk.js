@@ -1,6 +1,6 @@
 import { DEFAULT_CHUNK_HEIGHT, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_TERRAIN_HEIGHT, DEFAULT_MESH_BUDGET_MS, DEFAULT_MIN_WORLD_Y, DEFAULT_SEA_LEVEL, DEFAULT_VIEW_DISTANCE } from "../core/constants.js";
 import { chunkId, worldToChunk } from "../core/coordinates.js";
-import { isBlockingBlock, isOpaqueSolidBlock, BLOCK_ID } from "../world/block-registry.js";
+import { isBlockingBlock, isCameraOccluderBlock, isOpaqueSolidBlock, BLOCK_ID } from "../world/block-registry.js";
 import { compileSurfaceDecorationRules } from "../world/surface-decoration-rules.js";
 import {
   chunkLocalToWorldI32,
@@ -550,10 +550,10 @@ export class ChunkManager {
     if (this.supplementalCollisionProvider?.hasCollisionAtWorld?.(coord.worldX, coord.worldY, coord.worldZ)) return true;
     const chunk = this.chunks.get(coord.chunkId);
     if (chunk?.baseBlocksReady) {
-      return isBlockingBlock(this.getBlockAtWorld(coord.worldX, coord.worldY, coord.worldZ));
+      return isCameraOccluderBlock(this.getBlockAtWorld(coord.worldX, coord.worldY, coord.worldZ));
     }
     if (chunk?.hasDeltaAt(coord.localX, coord.localY, coord.localZ)) {
-      return isBlockingBlock(collisionBlockId(chunk.getFinalBlock(coord.localX, coord.localY, coord.localZ)));
+      return isCameraOccluderBlock(chunk.getFinalBlock(coord.localX, coord.localY, coord.localZ));
     }
 
     // Camera collision only needs an opaque terrain boundary while a worker is

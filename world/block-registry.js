@@ -262,6 +262,10 @@ export function isBlockingBlock(blockId) {
   return Boolean(flags & BLOCK_FLAGS.SOLID) && !Boolean(flags & BLOCK_FLAGS.LIQUID) && !Boolean(flags & BLOCK_FLAGS.CUTOUT) && blockId !== BLOCK_ID.air;
 }
 
+export function isCameraOccluderBlock(blockId) {
+  return blockDef(blockId).resourceId !== RESOURCE_ID.leaves && isBlockingBlock(blockId);
+}
+
 export function isVisualBlock(blockId) {
   const flags = blockFlags(blockId);
   return blockId !== BLOCK_ID.air && (Boolean(flags & BLOCK_FLAGS.TRANSPARENT) || Boolean(flags & BLOCK_FLAGS.LIQUID) || Boolean(flags & BLOCK_FLAGS.CUTOUT));
