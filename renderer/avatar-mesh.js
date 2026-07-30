@@ -81,6 +81,7 @@ export function createAvatarMeshFromNcm(ncmCode, {
   attachIronPickaxe = false,
   attachForgedPickaxe = attachIronPickaxe,
   forgeRuntime = null,
+  forgeMetersToWorldUnits = null,
 } = {}) {
   const resolvedCode = resolveAvatarNcmCode(ncmCode);
   if (/^NCM4:/i.test(resolvedCode)) {
@@ -106,7 +107,14 @@ export function createAvatarMeshFromNcm(ncmCode, {
   const rig = avatarRig(bodyParts, runtimeBounds);
   addAvatarToolRig(rig);
   const restoredForge = attachIronPickaxe && attachForgedPickaxe
-    ? createRestoredForgeEquipment(bodyParts, runtimeBounds, rig, scale, forgeRuntime)
+    ? createRestoredForgeEquipment(
+        bodyParts,
+        runtimeBounds,
+        rig,
+        scale,
+        forgeRuntime,
+        forgeMetersToWorldUnits,
+      )
     : null;
   const equipmentParts = attachIronPickaxe
     ? [
@@ -162,6 +170,7 @@ export function forgeRuntimeAvatarCollisionReport(runtime, {
   avatarMesh = null,
   avatarModelCode = DEFAULT_PEASANT_GUY_NCM,
   clearance = 0.006,
+  forgeMetersToWorldUnits = null,
 } = {}) {
   if (!runtime?.mesh || !runtime?.grip?.offsetQ) return emptyForgeAvatarCollisionReport();
   const mesh = avatarMesh ?? createAvatarMeshFromNcm(avatarModelCode, {
@@ -181,7 +190,7 @@ export function forgeRuntimeAvatarCollisionReport(runtime, {
   const avatarScale = Math.max(0.1, Number.isFinite(mesh.modelScale) && mesh.modelScale > 0
     ? mesh.modelScale
     : avatarHeight / 2.52);
-  const toolScale = Math.max(0.52, Math.min(1.02, avatarScale * 0.58));
+  const toolScale = resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits);
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;
   const targetGrip = forgeAvatarTargetGrip(handAnchor, avatarScale);
   const placement = forgeGripPlacement(runtime.grip, targetGrip, toolScale, runtime.fixedScale ?? 64);
@@ -610,7 +619,14 @@ function createBlueprintParts(parts, bodyBounds, rig, scale = 1) {
   });
 }
 
-function createRestoredForgeEquipment(parts, bodyBounds, rig, scale, runtime) {
+function createRestoredForgeEquipment(
+  parts,
+  bodyBounds,
+  rig,
+  scale,
+  runtime,
+  forgeMetersToWorldUnits,
+) {
   const packedMesh = runtime?.mesh;
   const grip = runtime?.grip;
   if (!packedMesh?.vertices?.byteLength || !packedMesh?.indices?.length || !grip?.offsetQ) return null;
@@ -621,7 +637,7 @@ function createRestoredForgeEquipment(parts, bodyBounds, rig, scale, runtime) {
 
   const avatarHeight = Math.max(1, bodyBounds.maxY - bodyBounds.minY);
   const avatarScale = Math.max(0.1, Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / 2.52);
-  const toolScale = Math.max(0.52, Math.min(1.02, avatarScale * 0.58));
+  const toolScale = resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits);
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;
   const targetGrip = forgeAvatarTargetGrip(handAnchor, avatarScale);
   const placement = forgeGripPlacement(grip, targetGrip, toolScale, runtime.fixedScale ?? 64);
@@ -678,6 +694,15 @@ function createRestoredForgeEquipment(parts, bodyBounds, rig, scale, runtime) {
     collisionParts,
     pose: createSafeForgedEquipmentPose(parts, collisionParts, rig, scale),
   };
+}
+
+function resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits) {
+  // NCF1 geometry is authored in metres. Block-world callers provide their
+  // world-units-per-metre conversion; previews without a world scale retain
+  // the established avatar-relative fallback.
+  const explicitScale = Number(forgeMetersToWorldUnits);
+  if (Number.isFinite(explicitScale) && explicitScale > 0) return explicitScale;
+  return Math.max(0.52, Math.min(1.02, avatarScale * 0.58));
 }
 
 function createSafeForgedEquipmentPose(bodyParts, collisionParts, rig, scale) {
