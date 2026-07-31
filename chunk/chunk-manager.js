@@ -1,6 +1,6 @@
 import { DEFAULT_CHUNK_HEIGHT, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_TERRAIN_HEIGHT, DEFAULT_MESH_BUDGET_MS, DEFAULT_MIN_WORLD_Y, DEFAULT_SEA_LEVEL, DEFAULT_VIEW_DISTANCE } from "../core/constants.js";
 import { chunkId, worldToChunk } from "../core/coordinates.js";
-import { isBlockingBlock, isCameraOccluderBlock, isOpaqueSolidBlock, BLOCK_ID } from "../world/block-registry.js";
+import { isBlockingBlock, isOpaqueSolidBlock, BLOCK_ID } from "../world/block-registry.js";
 import { compileSurfaceDecorationRules } from "../world/surface-decoration-rules.js";
 import {
   chunkLocalToWorldI32,
@@ -39,6 +39,12 @@ const MAX_CONSECUTIVE_WORKER_FAILURES = 3;
 const COLLISION_COLUMN_CACHE_LIMIT = 4096;
 const MAX_GENERATED_TREE_TRUNK_HEIGHT = 7;
 const managerWorldSeeds = new WeakMap();
+
+function isCameraOccluderBlock(blockId) {
+  if (blockId === BLOCK_ID.leaves || blockId === BLOCK_ID.pineLeaves) return false;
+  return isBlockingBlock(blockId);
+}
+
 export const CHUNK_MANAGER_LIMITS = Object.freeze({
   maxViewDistance: 32,
   maxPreloadMargin: 8,
