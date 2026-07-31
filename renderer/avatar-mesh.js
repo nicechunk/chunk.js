@@ -9,6 +9,10 @@ import {
   ncm4RotationForBone,
   sampleNcm4Action,
 } from "./avatar-action.js";
+import {
+  PEASANT_GUY_SOURCE_HEIGHT_UNITS,
+  PLAYER_AVATAR_HEIGHT_METERS,
+} from "../core/constants.js";
 
 export {
   ncm4PartGroupVisible,
@@ -32,8 +36,6 @@ export const BUILTIN_AVATAR_MODEL_CODES = new Map([
 ]);
 
 const AVATAR_VERTEX_STRIDE_FLOATS = 10;
-const DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS = 2.52;
-const DEFAULT_AVATAR_HEIGHT_METERS = 1.75;
 const BASIC_PICKAXE_EQUIPMENT_ID = EQUIPMENT_MODEL_ID.basicPickaxe;
 const FORGED_PICKAXE_EQUIPMENT_ID = EQUIPMENT_MODEL_ID.forgedPickaxe;
 const BLUEPRINT_EQUIPMENT_ID = EQUIPMENT_MODEL_ID.blueprint;
@@ -191,7 +193,7 @@ export function forgeRuntimeAvatarCollisionReport(runtime, {
   const avatarHeight = Math.max(1, bodyBounds.maxY - bodyBounds.minY);
   const avatarScale = Math.max(0.1, Number.isFinite(mesh.modelScale) && mesh.modelScale > 0
     ? mesh.modelScale
-    : avatarHeight / DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS);
+    : avatarHeight / PEASANT_GUY_SOURCE_HEIGHT_UNITS);
   const toolScale = resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits);
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;
   const targetGrip = forgeAvatarTargetGrip(handAnchor, avatarScale);
@@ -640,7 +642,7 @@ function createRestoredForgeEquipment(
   const avatarHeight = Math.max(1, bodyBounds.maxY - bodyBounds.minY);
   const avatarScale = Math.max(
     0.1,
-    Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS,
+    Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / PEASANT_GUY_SOURCE_HEIGHT_UNITS,
   );
   const toolScale = resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits);
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;
@@ -707,7 +709,7 @@ function resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits) {
   // scale by treating the standard avatar as 1.75 metres tall.
   const explicitScale = Number(forgeMetersToWorldUnits);
   if (Number.isFinite(explicitScale) && explicitScale > 0) return explicitScale;
-  return avatarScale * DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS / DEFAULT_AVATAR_HEIGHT_METERS;
+  return avatarScale * PEASANT_GUY_SOURCE_HEIGHT_UNITS / PLAYER_AVATAR_HEIGHT_METERS;
 }
 
 function createSafeForgedEquipmentPose(bodyParts, collisionParts, rig, scale) {
@@ -1026,7 +1028,7 @@ function createPickaxeParts(parts, bodyBounds, rig, scale = 1, style = {}) {
   const avatarHeight = Math.max(1, bodyBounds.maxY - bodyBounds.minY);
   const k = Math.max(
     0.1,
-    Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS,
+    Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / PEASANT_GUY_SOURCE_HEIGHT_UNITS,
   );
   // The avatar is scaled from a compact NCM source into block units. Tools need a
   // smaller independent scale, otherwise the pickaxe reads oversized in-hand.
@@ -1081,7 +1083,7 @@ function createHeldBlockParts(parts, bodyBounds, rig, scale = 1) {
   const avatarHeight = Math.max(1, bodyBounds.maxY - bodyBounds.minY);
   const k = Math.max(
     0.1,
-    Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS,
+    Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / PEASANT_GUY_SOURCE_HEIGHT_UNITS,
   );
   const heldBlockK = Math.max(0.30, Math.min(0.42, k * 0.22));
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;

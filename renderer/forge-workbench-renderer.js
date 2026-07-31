@@ -1,4 +1,8 @@
-import { MAX_DESKTOP_DPR, MAX_MOBILE_DPR } from "../core/constants.js";
+import {
+  MAX_DESKTOP_DPR,
+  MAX_MOBILE_DPR,
+  PEASANT_GUY_METER_SCALE,
+} from "../core/constants.js";
 import { mat4LookAt, mat4Multiply, mat4Perspective, normalize3 } from "../core/math.js";
 import {
   DEFAULT_PEASANT_GUY_NCM,
@@ -231,6 +235,7 @@ const FORGE_CONSTRUCTION_RETICLE_MESH = createForgeConstructionReticleMesh();
 const FORGE_TRANSFORM_SNAP = FORGE_RENDER_POSITION_SCALE / 2;
 const FORGE_GIZMO_TARGET_PIXELS = 82;
 const FORGE_RETICLE_TARGET_PIXELS = 34;
+export const FORGE_SCENE_UNITS_PER_METER = 1;
 const DEFAULT_FORGE_AVATAR_POSITION = Object.freeze([-2.62, 1.5, 0.92]);
 const DEFAULT_FORGE_AVATAR_YAW = -0.18;
 
@@ -268,6 +273,11 @@ export class ForgeWorkbenchRenderer {
         FORGE_MATERIAL_SURFACE_TILE_SIZE,
       ),
       materialTileScale: Math.max(0.01, finite(options.materialTileScale, 1)),
+      avatarScale: Math.max(0.01, finite(options.avatarScale, PEASANT_GUY_METER_SCALE)),
+      forgeMetersToWorldUnits: Math.max(
+        0.01,
+        finite(options.forgeMetersToWorldUnits, FORGE_SCENE_UNITS_PER_METER),
+      ),
       workpieceOffset: vector3(options.workpieceOffset ?? [0, workpieceFloorY ?? 0, 0]),
     };
     this.camera = {
@@ -536,9 +546,11 @@ export class ForgeWorkbenchRenderer {
       : { rightHand: "empty" };
     const mesh = createAvatarMeshFromNcm(modelCode, {
       name: "forge_scene_avatar",
+      scale: this.options.avatarScale,
       attachIronPickaxe: equipped,
       attachForgedPickaxe: equipped,
       forgeRuntime: runtime,
+      forgeMetersToWorldUnits: this.options.forgeMetersToWorldUnits,
     });
     const vertices = updateAvatarMeshVertices(mesh, {
       moving: false,

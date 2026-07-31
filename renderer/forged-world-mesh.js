@@ -1,12 +1,20 @@
+import { WORLD_UNITS_PER_METER } from "../core/constants.js";
+
 const WORLD_ITEM_VERTEX_STRIDE_FLOATS = 10;
 
-export function createForgedWorldItemMesh(runtime) {
+export function createForgedWorldItemMesh(runtime, {
+  metersToWorldUnits = WORLD_UNITS_PER_METER,
+} = {}) {
   const packed = runtime?.mesh;
   if (runtime?.kind !== "ncf1-forge-runtime-v1" || !packed?.vertices || !packed?.indices?.length) {
     throw new TypeError("A verified NCF1 runtime mesh is required.");
   }
   const stride = Math.max(16, Math.trunc(Number(packed.vertexStrideBytes) || 16));
   const positionScale = Math.max(1, Number(packed.positionScale) || 1);
+  const physicalScale = Number(metersToWorldUnits);
+  if (!Number.isFinite(physicalScale) || physicalScale <= 0) {
+    throw new TypeError("Forged world-item metre scale must be positive.");
+  }
   const vertexCount = Math.min(
     Math.trunc(Number(packed.vertexCount) || 0),
     Math.floor(packed.vertices.byteLength / stride),
@@ -19,9 +27,9 @@ export function createForgedWorldItemMesh(runtime) {
   for (let index = 0; index < vertexCount; index += 1) {
     const sourceOffset = index * stride;
     const positionOffset = index * 3;
-    const x = source.getInt16(sourceOffset, true) / positionScale;
-    const y = source.getInt16(sourceOffset + 2, true) / positionScale;
-    const z = source.getInt16(sourceOffset + 4, true) / positionScale;
+    const x = source.getInt16(sourceOffset, true) / positionScale * physicalScale;
+    const y = source.getInt16(sourceOffset + 2, true) / positionScale * physicalScale;
+    const z = source.getInt16(sourceOffset + 4, true) / positionScale * physicalScale;
     positions[positionOffset] = x;
     positions[positionOffset + 1] = y;
     positions[positionOffset + 2] = z;

@@ -10,6 +10,17 @@ export const DEFAULT_LAND_BASE_HEIGHT = 100;
 export const DEFAULT_MAX_TERRAIN_HEIGHT = 240;
 export const WATER_SURFACE_OFFSET = 1;
 
+// Canonical physical scale shared by the game world, forged NCF1 assets, and
+// every character-relative preview. NCF1 dimensions are metres; the live game
+// renders one world unit per voxel block.
+export const WORLD_BLOCK_SIZE_METERS = 0.4;
+export const PLAYER_AVATAR_HEIGHT_METERS = 1.75;
+export const PEASANT_GUY_SOURCE_HEIGHT_UNITS = 2.52;
+export const WORLD_UNITS_PER_METER = 1 / WORLD_BLOCK_SIZE_METERS;
+export const PLAYER_AVATAR_HEIGHT_WORLD_UNITS = PLAYER_AVATAR_HEIGHT_METERS * WORLD_UNITS_PER_METER;
+export const PEASANT_GUY_GAME_SCALE = PLAYER_AVATAR_HEIGHT_WORLD_UNITS / PEASANT_GUY_SOURCE_HEIGHT_UNITS;
+export const PEASANT_GUY_METER_SCALE = PLAYER_AVATAR_HEIGHT_METERS / PEASANT_GUY_SOURCE_HEIGHT_UNITS;
+
 export const REVEAL_STATE = Object.freeze({
   UNKNOWN: 0,
   COMMITTED: 1,

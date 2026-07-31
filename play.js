@@ -4,6 +4,10 @@ export {
   BLOCK_FLAGS,
   DEFAULT_CHUNK_SIZE,
   DEFAULT_MESH_BUDGET_MS,
+  PEASANT_GUY_SOURCE_HEIGHT_UNITS,
+  PLAYER_AVATAR_HEIGHT_METERS,
+  WORLD_BLOCK_SIZE_METERS,
+  WORLD_UNITS_PER_METER,
 } from "./core/constants.js";
 export { chunkId, worldToChunk } from "./core/coordinates.js";
 export {
