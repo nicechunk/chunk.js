@@ -27,8 +27,14 @@ const forgedPose = mesh.equipmentPoses.forged_pickaxe;
 assert.equal(runtime.designHash, 163893351, "the regression fixture must remain the canonical v15 forged design");
 assert.deepEqual(runtime.grip.offsetQ, [-49, 32, 113], "Play must convert the component-local grip into design space");
 assert.equal(forgedPose.adaptive, true);
-assert.ok(forgedPose.carryZ > 0 && forgedPose.carryZ < 0.2, "long forged equipment should use only the minimum safe carry abduction");
-assert.ok(forgedPose.miningZ > 0 && forgedPose.miningZ < 0.2, "the mining swing should use a volume-safe shoulder angle");
+assert.ok(
+  forgedPose.carryZ >= 0.35 && forgedPose.carryZ <= 0.4,
+  "full-scale long forged equipment should use only the minimum safe carry abduction",
+);
+assert.ok(
+  forgedPose.miningZ >= 0.35 && forgedPose.miningZ <= 0.4,
+  "the full-scale mining swing should use a volume-safe shoulder angle",
+);
 
 for (const frame of [
   { label: "idle", moving: false, timeMs: 0 },

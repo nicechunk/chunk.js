@@ -32,6 +32,8 @@ export const BUILTIN_AVATAR_MODEL_CODES = new Map([
 ]);
 
 const AVATAR_VERTEX_STRIDE_FLOATS = 10;
+const DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS = 2.52;
+const DEFAULT_AVATAR_HEIGHT_METERS = 1.75;
 const BASIC_PICKAXE_EQUIPMENT_ID = EQUIPMENT_MODEL_ID.basicPickaxe;
 const FORGED_PICKAXE_EQUIPMENT_ID = EQUIPMENT_MODEL_ID.forgedPickaxe;
 const BLUEPRINT_EQUIPMENT_ID = EQUIPMENT_MODEL_ID.blueprint;
@@ -189,7 +191,7 @@ export function forgeRuntimeAvatarCollisionReport(runtime, {
   const avatarHeight = Math.max(1, bodyBounds.maxY - bodyBounds.minY);
   const avatarScale = Math.max(0.1, Number.isFinite(mesh.modelScale) && mesh.modelScale > 0
     ? mesh.modelScale
-    : avatarHeight / 2.52);
+    : avatarHeight / DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS);
   const toolScale = resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits);
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;
   const targetGrip = forgeAvatarTargetGrip(handAnchor, avatarScale);
@@ -636,7 +638,10 @@ function createRestoredForgeEquipment(
   if (!Number.isFinite(rightArm.minX) || rightArm.maxX <= rightArm.minX || !Array.isArray(rightArmRoot)) return null;
 
   const avatarHeight = Math.max(1, bodyBounds.maxY - bodyBounds.minY);
-  const avatarScale = Math.max(0.1, Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / 2.52);
+  const avatarScale = Math.max(
+    0.1,
+    Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS,
+  );
   const toolScale = resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits);
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;
   const targetGrip = forgeAvatarTargetGrip(handAnchor, avatarScale);
@@ -698,11 +703,11 @@ function createRestoredForgeEquipment(
 
 function resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits) {
   // NCF1 geometry is authored in metres. Block-world callers provide their
-  // world-units-per-metre conversion; previews without a world scale retain
-  // the established avatar-relative fallback.
+  // world-units-per-metre conversion. Avatar previews derive the same physical
+  // scale by treating the standard avatar as 1.75 metres tall.
   const explicitScale = Number(forgeMetersToWorldUnits);
   if (Number.isFinite(explicitScale) && explicitScale > 0) return explicitScale;
-  return Math.max(0.52, Math.min(1.02, avatarScale * 0.58));
+  return avatarScale * DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS / DEFAULT_AVATAR_HEIGHT_METERS;
 }
 
 function createSafeForgedEquipmentPose(bodyParts, collisionParts, rig, scale) {
@@ -1019,7 +1024,10 @@ function createPickaxeParts(parts, bodyBounds, rig, scale = 1, style = {}) {
   const rightHandAnchor = rig?.handAnchors?.right_hand_item;
   if (!Number.isFinite(rightArm.minX) || rightArm.maxX <= rightArm.minX || !Array.isArray(rightArmRoot)) return [];
   const avatarHeight = Math.max(1, bodyBounds.maxY - bodyBounds.minY);
-  const k = Math.max(0.1, Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / 2.52);
+  const k = Math.max(
+    0.1,
+    Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS,
+  );
   // The avatar is scaled from a compact NCM source into block units. Tools need a
   // smaller independent scale, otherwise the pickaxe reads oversized in-hand.
   const toolK = Math.max(0.52, Math.min(1.02, k * 0.58));
@@ -1071,7 +1079,10 @@ function createHeldBlockParts(parts, bodyBounds, rig, scale = 1) {
   const rightHandAnchor = rig?.handAnchors?.right_hand_item;
   if (!Number.isFinite(rightArm.minX) || rightArm.maxX <= rightArm.minX || !Array.isArray(rightArmRoot)) return [];
   const avatarHeight = Math.max(1, bodyBounds.maxY - bodyBounds.minY);
-  const k = Math.max(0.1, Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / 2.52);
+  const k = Math.max(
+    0.1,
+    Number.isFinite(scale) && scale > 0 ? scale : avatarHeight / DEFAULT_AVATAR_SOURCE_HEIGHT_UNITS,
+  );
   const heldBlockK = Math.max(0.30, Math.min(0.42, k * 0.22));
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;
   const blockOffset = Array.isArray(rightHandAnchor)
