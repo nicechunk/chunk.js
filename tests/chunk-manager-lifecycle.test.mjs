@@ -51,6 +51,44 @@ test("ChunkManager detaches and terminates module workers on disposal", () => {
   }
 });
 
+test("ChunkManager starts module workers from an explicit browser bundle URL", () => {
+  const OriginalWorker = globalThis.Worker;
+  const workers = [];
+  globalThis.Worker = class FakeWorker {
+    constructor(url, options) {
+      this.url = url;
+      this.options = options;
+      workers.push(this);
+    }
+
+    postMessage() {}
+
+    terminate() {}
+  };
+
+  try {
+    const manager = new ChunkManager({
+      useWorkers: true,
+      workerCount: 1,
+      workerUrl: "/chunk.js/chunk/chunk-build-worker.bundle.js",
+    });
+    assert.equal(workers.length, 1);
+    assert.equal(workers[0].url, "/chunk.js/chunk/chunk-build-worker.bundle.js");
+    assert.deepEqual(workers[0].options, { type: "module" });
+    manager.dispose();
+  } finally {
+    if (OriginalWorker === undefined) delete globalThis.Worker;
+    else globalThis.Worker = OriginalWorker;
+  }
+});
+
+test("ChunkManager rejects an empty explicit worker URL before allocating workers", () => {
+  assert.throws(
+    () => new ChunkManager({ useWorkers: false, workerUrl: "  " }),
+    /worker URL must be a non-empty string or URL/,
+  );
+});
+
 test("Worker construction failure falls back without disposing the manager", () => {
   const OriginalWorker = globalThis.Worker;
   globalThis.Worker = class BlockedWorker {

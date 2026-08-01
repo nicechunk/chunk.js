@@ -70,6 +70,7 @@ export class ChunkManager {
     surfaceDecorationRules = [],
     useWorkers = typeof Worker !== "undefined",
     workerCount = defaultWorkerCount(),
+    workerUrl = null,
     deferInitialBuilds = false,
     deferContinuousBuildDispatch = false,
     maxQueuedBuilds = DEFAULT_MAX_BUILD_QUEUE,
@@ -110,6 +111,7 @@ export class ChunkManager {
     this.workerCount = this.useWorkers
       ? boundedManagerInteger(workerCount, 1, CHUNK_MANAGER_LIMITS.maxWorkers, "worker count")
       : 0;
+    this.workerUrl = normalizeWorkerUrl(workerUrl);
     this.deferInitialBuilds = Boolean(deferInitialBuilds && this.useWorkers);
     this.continuousBuildDispatch = !Boolean(deferContinuousBuildDispatch && this.useWorkers);
     this.activeBuildLimit = this.deferInitialBuilds ? 0 : Math.min(this.workerCount, INITIAL_BUILD_CONCURRENCY);
@@ -782,7 +784,7 @@ export class ChunkManager {
       const requested = boundedManagerInteger(targetCount, 0, CHUNK_MANAGER_LIMITS.maxWorkers, "worker pool target");
       const target = Math.min(this.workerCount, requested);
       for (let i = this.workers.length; i < target; i += 1) {
-        const worker = new Worker(new URL("./chunk-build-worker.js", import.meta.url), { type: "module" });
+        const worker = new Worker(this.workerUrl, { type: "module" });
         try {
           worker.onmessage = (event) => this.handleWorkerMessage(worker, event.data);
           worker.onerror = (event) => this.handleWorkerError(worker, event);
@@ -1644,6 +1646,15 @@ function defaultWorkerCount() {
   const coarse = globalThis.matchMedia?.("(pointer: coarse)")?.matches ?? false;
   if (coarse) return Math.max(1, Math.min(3, cores - 1));
   return Math.max(1, Math.min(6, cores - 2));
+}
+
+function normalizeWorkerUrl(value) {
+  if (value === null || value === undefined) return new URL("./chunk-build-worker.js", import.meta.url);
+  if (value instanceof URL) return new URL(value.href);
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError("Chunk worker URL must be a non-empty string or URL.");
+  }
+  return value;
 }
 
 function workerResponsePhase(type) {

@@ -57,18 +57,24 @@
     "./play": "./play.js",
     "./world": "./src/world.js",
     "./renderer": "./src/renderer.js",
+    "./browser-runtime": "./chunk/browser-runtime.js",
     "./capabilities": "./src/capabilities.js",
     "./math": "./src/math.js",
     "./ncm/blueprint": "./ncm/blueprint-codec.js",
     "./ncm/character": "./ncm/character-codec.js"
   },
   "scripts": {
-    "check": "npm run check:policy && node tools/check.mjs && npm run check:package && npm test",
+    "build:browser": "node tools/build-browser-runtime.mjs",
+    "check": "npm run check:policy && node tools/check.mjs && npm run check:browser && npm run check:package && npm test",
+    "check:browser": "node tools/build-browser-runtime.mjs --check",
     "check:package": "node tools/check-package.mjs",
     "check:policy": "node tools/repository-policy.mjs",
     "test": "node tools/run-tests.mjs",
     "test:integration": "node tools/run-tests.mjs --integration",
     "test:all": "node tools/run-tests.mjs --all",
     "benchmark:building": "node --expose-gc benchmarks/building-mesher.mjs 1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
   }
 }
