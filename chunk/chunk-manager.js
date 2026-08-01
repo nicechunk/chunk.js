@@ -986,11 +986,15 @@ export class ChunkManager {
         this.idleWorkers.push(worker);
         continue;
       }
+      // A base build may wait in the queue while initial world deltas arrive.
+      // Snapshot the latest revision at dispatch so the first mesh can include
+      // those deltas instead of immediately scheduling an identical remesh.
+      if (task.mode !== "remesh") task.version = chunk.version;
       let finalDeltas;
       let neighborDeltas;
       let treeDeltas;
       try {
-        finalDeltas = task.mode === "remesh" ? packedFinalDeltasForWorker(chunk) : EMPTY_PACKED_DELTAS;
+        finalDeltas = packedFinalDeltasForWorker(chunk);
         neighborDeltas = this.neighborDeltasForWorker(chunk.chunkX, chunk.chunkZ);
         treeDeltas = this.treeNeighborDeltasForWorker(chunk.chunkX, chunk.chunkZ);
       } catch (error) {
@@ -1014,6 +1018,7 @@ export class ChunkManager {
         waitMs,
         mode: task.mode || "base",
         version: task.version,
+        includesFinalDeltas: true,
         materialVersion: this.materialVersion,
         phase: "chunk",
         cancelled: false,
@@ -1185,7 +1190,7 @@ export class ChunkManager {
     if (message.baseProfile) chunk.setBaseProfile(message.baseProfile, message.treeInstances, this.baseBlockResolverForChunk(message.chunkX, message.chunkZ, message.baseProfile));
     else chunk.setBaseBlocks(message.baseBlocks, message.treeInstances);
     this.lastWorkerBuildMs = Number(message.elapsedMs) || 0;
-    if (hasDeltas(chunk)) {
+    if (hasDeltas(chunk) && timingTask?.includesFinalDeltas !== true) {
       chunk.markDirty();
       return;
     }
@@ -1200,7 +1205,9 @@ export class ChunkManager {
     if (message.materialVersion !== this.materialVersion) return;
     if (timingTask?.mode === "remesh") {
       if (chunk.version !== timingTask.version || message.taskVersion !== timingTask.version) return;
-    } else if (hasDeltas(chunk)) {
+    } else if (timingTask && chunk.version !== timingTask.version) {
+      return;
+    } else if (hasDeltas(chunk) && timingTask?.includesFinalDeltas !== true) {
       return;
     }
     chunk.setVisualMesh(message.visualMesh, timingTask?.version ?? message.taskVersion);
@@ -1514,8 +1521,6 @@ function residentDeltaLimitError(id) {
     `Chunk ${id} exceeds the ${DELTA_RESOURCE_LIMITS.maxResidentEntriesPerChunk}-entry resident delta safety limit.`,
   );
 }
-
-const EMPTY_PACKED_DELTAS = new Int32Array(0);
 
 function finalDeltaValues(chunk) {
   if (typeof chunk?.getFinalDeltaMap === "function") return chunk.getFinalDeltaMap().values();

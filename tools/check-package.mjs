@@ -39,6 +39,11 @@ try {
   }
 
   const archive = join(temporaryDirectory, artifact.filename);
+  await writeFile(join(temporaryDirectory, "package.json"), `${JSON.stringify({
+    name: "chunk-js-package-verifier",
+    private: true,
+    type: "module",
+  }, null, 2)}\n`);
   run(npmCommand(), [
     "install",
     "--ignore-scripts",

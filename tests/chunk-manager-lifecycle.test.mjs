@@ -190,6 +190,75 @@ test("Worker seed payloads are detached from manager, config, and chunk ownershi
   }
 });
 
+test("queued base builds absorb compact deltas and finish without a duplicate remesh", () => {
+  const harness = fakeChunkWorkerHarness();
+  try {
+    const manager = harness.createManager();
+    const chunk = manager.ensureChunk(0, 0);
+    const packed = Int32Array.of(
+      1, 1, 1, 2,
+      2, 1, 1, 3,
+    );
+    chunk.applyPendingDelta(packed, "initial-presentation");
+
+    manager.dispatchBuilds();
+    const [taskId, task] = Array.from(manager.inFlightBuilds.entries())[0];
+    const request = task.worker.messages.find((message) => message.type === "buildChunk");
+    assert.equal(task.version, chunk.version);
+    assert.equal(task.includesFinalDeltas, true);
+    assert.equal(request.taskVersion, chunk.version);
+    assert.deepEqual(request.finalDeltas, packed);
+
+    const mesh = emptyMesh();
+    task.worker.emit(chunkBuiltResponse(taskId, task, {
+      baseBlocks: new Uint16Array(16 * 8 * 16),
+      mesh,
+      visualMesh: null,
+    }));
+
+    assert.equal(chunk.mesh, mesh);
+    assert.equal(chunk.dirty, false);
+    manager.rebuildDirtyChunks(100);
+    assert.equal(manager.buildQueue.length, 0);
+    manager.dispose();
+  } finally {
+    harness.restore();
+  }
+});
+
+test("base builds still reject deltas that change after Worker dispatch", () => {
+  const harness = fakeChunkWorkerHarness();
+  try {
+    const manager = harness.createManager();
+    const chunk = manager.ensureChunk(0, 0);
+    chunk.applyPendingDelta(Int32Array.of(1, 1, 1, 2), "initial-presentation");
+    manager.dispatchBuilds();
+    const [taskId, task] = Array.from(manager.inFlightBuilds.entries())[0];
+
+    chunk.applyPendingDelta(Int32Array.of(2, 1, 1, 3), "later-change");
+    task.worker.emit(chunkBuiltResponse(taskId, task, {
+      baseBlocks: new Uint16Array(16 * 8 * 16),
+      mesh: emptyMesh(),
+      visualMesh: null,
+    }));
+
+    assert.equal(chunk.mesh, null);
+    assert.equal(chunk.dirty, true);
+    assert.equal(chunk.buildState, "empty");
+    manager.rebuildDirtyChunks(100);
+    manager.dispatchBuilds();
+    const nextRequest = task.worker.messages.filter((message) => message.type === "buildChunk").at(-1);
+    assert.equal(nextRequest.taskVersion, chunk.version);
+    assert.deepEqual(Array.from(nextRequest.finalDeltas), [
+      1, 1, 1, 2,
+      2, 1, 1, 3,
+    ]);
+    manager.dispose();
+  } finally {
+    harness.restore();
+  }
+});
+
 for (const [label, corrupt] of [
   ["unknown task ID", (message) => ({ ...message, taskId: message.taskId + 10_000 })],
   ["wrong coordinates", (message) => ({ ...message, chunkX: message.chunkX + 1 })],
@@ -303,6 +372,16 @@ function chunkBuiltResponse(taskId, task, overrides = {}) {
     materialVersion: task.materialVersion,
     visualPending: false,
     ...overrides,
+  };
+}
+
+function emptyMesh() {
+  return {
+    vertices: new Float32Array(),
+    indices: new Uint16Array(),
+    vertexCount: 0,
+    indexCount: 0,
+    triangleCount: 0,
   };
 }
 

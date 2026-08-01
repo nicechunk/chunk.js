@@ -36,6 +36,31 @@ test("applyPendingDelta rejects a mixed valid-invalid batch without changing aut
   assertAuthorityStateUnchanged(chunk, before);
 });
 
+test("applyPendingDelta accepts compact transferable integer batches", () => {
+  const chunk = createChunk();
+  const result = chunk.applyPendingDelta(Int32Array.of(
+    1, 1, 1, 2,
+    2, 1, 1, 3,
+  ), "packed-pending");
+
+  assert.equal(result.applied, true);
+  assert.equal(result.accepted, 2);
+  assert.equal(chunk.pendingDeltas.size, 2);
+  assert.equal(chunk.getFinalBlock(1, 1, 1), 2);
+  assert.equal(chunk.getFinalBlock(2, 1, 1), 3);
+});
+
+test("malformed compact delta batches fail atomically", () => {
+  const chunk = cachedChunkState();
+  const before = captureAuthorityState(chunk);
+
+  assert.throws(
+    () => chunk.applyPendingDelta(Int32Array.of(1, 1, 1), "malformed-packed"),
+    /four integers per entry/,
+  );
+  assertAuthorityStateUnchanged(chunk, before);
+});
+
 test("foreign-only incremental batches are ignored without changing authoritative state", () => {
   const chunk = cachedChunkState();
   const foreignDelta = { worldX: 16, worldY: 1, worldZ: 1, blockId: 4 };

@@ -520,6 +520,7 @@ function normalizedMeshVersion(value, fallback) {
 
 function normalizeDeltaBatch(deltas, chunk) {
   const source = deltas ?? [];
+  if (source instanceof Int32Array) return normalizePackedDeltaBatch(source, chunk);
   if (Array.isArray(source) && source.length > DELTA_RESOURCE_LIMITS.maxBatchEntries) {
     throw deltaBatchEntryLimitError();
   }
@@ -533,6 +534,30 @@ function normalizeDeltaBatch(deltas, chunk) {
       );
     }
     normalized.push(entry);
+  }
+  return normalized;
+}
+
+function normalizePackedDeltaBatch(source, chunk) {
+  if (source.length % 4 !== 0) {
+    throw new RangeError("Packed chunk deltas must contain four integers per entry.");
+  }
+  const entryCount = source.length / 4;
+  if (entryCount > DELTA_RESOURCE_LIMITS.maxBatchEntries) throw deltaBatchEntryLimitError();
+  const normalized = new Array(entryCount);
+  for (let offset = 0, index = 0; offset < source.length; offset += 4, index += 1) {
+    const entry = normalizeDelta({
+      worldX: source[offset],
+      worldY: source[offset + 1],
+      worldZ: source[offset + 2],
+      blockId: source[offset + 3],
+    }, chunk.chunkSize);
+    if (entry.worldY < chunk.minY || entry.worldY > chunk.maxBuildY) {
+      throw new RangeError(
+        `Delta world Y must be an integer from the configured build minimum ${chunk.minY} to maximum ${chunk.maxBuildY}.`,
+      );
+    }
+    normalized[index] = entry;
   }
   return normalized;
 }
