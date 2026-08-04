@@ -86,6 +86,7 @@ export function createAvatarMeshFromNcm(ncmCode, {
   attachForgedPickaxe = attachIronPickaxe,
   forgeRuntime = null,
   forgeMetersToWorldUnits = null,
+  forgeGripRollQuarterTurns = 0,
 } = {}) {
   const resolvedCode = resolveAvatarNcmCode(ncmCode);
   if (/^NCM4:/i.test(resolvedCode)) {
@@ -118,6 +119,7 @@ export function createAvatarMeshFromNcm(ncmCode, {
         scale,
         forgeRuntime,
         forgeMetersToWorldUnits,
+        forgeGripRollQuarterTurns,
       )
     : null;
   const equipmentParts = attachIronPickaxe
@@ -175,6 +177,7 @@ export function forgeRuntimeAvatarCollisionReport(runtime, {
   avatarModelCode = DEFAULT_PEASANT_GUY_NCM,
   clearance = 0.006,
   forgeMetersToWorldUnits = null,
+  forgeGripRollQuarterTurns = 0,
 } = {}) {
   if (!runtime?.mesh || !runtime?.grip?.offsetQ) return emptyForgeAvatarCollisionReport();
   const mesh = avatarMesh ?? createAvatarMeshFromNcm(avatarModelCode, {
@@ -197,7 +200,13 @@ export function forgeRuntimeAvatarCollisionReport(runtime, {
   const toolScale = resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits);
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;
   const targetGrip = forgeAvatarTargetGrip(handAnchor, avatarScale);
-  const placement = forgeGripPlacement(runtime.grip, targetGrip, toolScale, runtime.fixedScale ?? 64);
+  const placement = forgeGripPlacement(
+    runtime.grip,
+    targetGrip,
+    toolScale,
+    runtime.fixedScale ?? 64,
+    forgeGripRollQuarterTurns,
+  );
   const avatarBoxes = bodyParts
     .filter((part) => !["left_arm", "right_arm", "right_hand_item"].includes(part.bone))
     .map((part) => ({ name: part.name || part.bone || "body", bounds: avatarRestPartBounds(part, mesh) }));
@@ -630,6 +639,7 @@ function createRestoredForgeEquipment(
   scale,
   runtime,
   forgeMetersToWorldUnits,
+  forgeGripRollQuarterTurns,
 ) {
   const packedMesh = runtime?.mesh;
   const grip = runtime?.grip;
@@ -647,7 +657,13 @@ function createRestoredForgeEquipment(
   const toolScale = resolveForgeEquipmentScale(avatarScale, forgeMetersToWorldUnits);
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;
   const targetGrip = forgeAvatarTargetGrip(handAnchor, avatarScale);
-  const placement = forgeGripPlacement(grip, targetGrip, toolScale, runtime.fixedScale ?? 64);
+  const placement = forgeGripPlacement(
+    grip,
+    targetGrip,
+    toolScale,
+    runtime.fixedScale ?? 64,
+    forgeGripRollQuarterTurns,
+  );
   const clothComponentIndexes = Array.isArray(runtime.clothComponentIndexes)
     ? runtime.clothComponentIndexes
     : (runtime.components ?? [])
@@ -764,7 +780,7 @@ function forgedPoseCollides({ armXSamples, collisionParts, avatarBoxes, pivot, c
   return false;
 }
 
-function forgeGripPlacement(grip, targetGrip, scale, fixedScale) {
+function forgeGripPlacement(grip, targetGrip, scale, fixedScale, rollQuarterTurns = 0) {
   const approach = [0, 0, 0];
   approach[Math.max(0, Math.min(2, Math.trunc(grip.axis ?? 1)))] = Number(grip.sign) >= 0 ? 1 : -1;
   let front = Math.abs(approach[1]) < 0.75 ? [0, 1, 0] : [0, 0, -Math.sign(approach[1]) || -1];
@@ -772,9 +788,13 @@ function forgeGripPlacement(grip, targetGrip, scale, fixedScale) {
   const rotation = (Math.trunc(Number(grip.rotation) || 0) & 3) * Math.PI / 2;
   if (rotation) front = rotateAroundAxis(front, approach, rotation);
   const side = normalizeVector3(crossVector3(front, approach));
+  const targetFront = [0, 0, -1];
+  const roll = (Math.trunc(Number(rollQuarterTurns) || 0) & 3) * Math.PI / 2;
+  const targetSide = roll ? rotateAroundAxis([1, 0, 0], targetFront, roll) : [1, 0, 0];
+  const targetApproach = roll ? rotateAroundAxis([0, 1, 0], targetFront, roll) : [0, 1, 0];
   return {
     source: { side, front, approach },
-    target: { side: [1, 0, 0], front: [0, 0, -1], approach: [0, 1, 0] },
+    target: { side: targetSide, front: targetFront, approach: targetApproach },
     grip: Array.from(grip.offsetQ, (value) => Number(value) / fixedScale),
     targetGrip,
     scale,
