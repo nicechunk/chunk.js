@@ -33,6 +33,8 @@ CPU chunk state owns source meshes and committed revisions. The renderer owns th
 
 Application code must not mutate or transfer a mesh buffer while the renderer expects to upload it.
 
+By default, `render()` measures and resizes the canvas before each frame. A host that already observes its canvas may set `autoResizeEachFrame: false` and call `resize(width, height, dpr)` from its `ResizeObserver`; explicit dimensions avoid a synchronous layout read. The host must submit an initial size and every later size or DPR change when using this mode.
+
 ## Animation loop
 
 The high-level engine owns its `requestAnimationFrame` loop:

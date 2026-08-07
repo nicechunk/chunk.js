@@ -103,6 +103,7 @@ export class WebGL2VoxelRenderer {
       cloudFarPadding: options.cloudFarPadding ?? 540,
       maxVoxelParticles: options.maxVoxelParticles ?? 320,
       maxDynamicShadowCasters: options.maxDynamicShadowCasters ?? 8,
+      autoResizeEachFrame: options.autoResizeEachFrame ?? true,
     };
     this.onInitStage = typeof options.onInitStage === "function" ? options.onInitStage : null;
     this.gl = null;
@@ -236,7 +237,13 @@ export class WebGL2VoxelRenderer {
   resize(width = null, height = null, dpr = null) {
     const gl = this.gl;
     if (!gl) return false;
-    const rect = this.canvas.getBoundingClientRect?.() ?? { width: this.canvas.clientWidth || 1, height: this.canvas.clientHeight || 1 };
+    const explicitSize = Number.isFinite(width) && Number.isFinite(height);
+    const rect = explicitSize
+      ? null
+      : this.canvas.getBoundingClientRect?.() ?? {
+          width: this.canvas.clientWidth || 1,
+          height: this.canvas.clientHeight || 1,
+        };
     const cssWidth = Math.max(1, Math.floor(width ?? rect.width ?? 1));
     const cssHeight = Math.max(1, Math.floor(height ?? rect.height ?? 1));
     const pixelRatio = this.clampedDpr(dpr);
@@ -710,7 +717,7 @@ export class WebGL2VoxelRenderer {
     if (!this.initialized) this.init();
     if (this.contextLost || !this.gl || !this.program) return this.stats;
     const gl = this.gl;
-    this.resize();
+    if (this.options.autoResizeEachFrame) this.resize();
     cameraState.aspect = Math.max(1, this.canvas.width) / Math.max(1, this.canvas.height);
     const renderChunks = this.filterChunksForCamera(
       filterChunksByRenderRadius(visibleChunks, cameraState, this.options.viewDistance),

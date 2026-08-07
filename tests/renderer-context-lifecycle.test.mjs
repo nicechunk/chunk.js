@@ -7,6 +7,42 @@ test("renderer preserves configured dynamic shadow capacity", () => {
   const { canvas } = fakeCanvas();
   const renderer = new WebGL2VoxelRenderer(canvas, { maxDynamicShadowCasters: 23 });
   assert.equal(renderer.options.maxDynamicShadowCasters, 23);
+  assert.equal(renderer.options.autoResizeEachFrame, true);
+  renderer.dispose();
+});
+
+test("renderer can rely on explicit resize observations without reading layout every frame", () => {
+  let layoutReads = 0;
+  const canvas = {
+    width: 1,
+    height: 1,
+    clientWidth: 1,
+    clientHeight: 1,
+    addEventListener() {},
+    removeEventListener() {},
+    getBoundingClientRect() {
+      layoutReads += 1;
+      return { width: 999, height: 999 };
+    },
+  };
+  const renderer = new WebGL2VoxelRenderer(canvas, {
+    autoResizeEachFrame: false,
+    dpr: 1,
+  });
+  const viewports = [];
+  renderer.gl = {
+    viewport(...args) {
+      viewports.push(args);
+    },
+  };
+
+  assert.equal(renderer.options.autoResizeEachFrame, false);
+  assert.equal(renderer.resize(320, 180, 1), true);
+  assert.equal(layoutReads, 0);
+  assert.deepEqual(viewports, [[0, 0, 320, 180]]);
+  assert.equal(canvas.width, 320);
+  assert.equal(canvas.height, 180);
+
   renderer.dispose();
 });
 
