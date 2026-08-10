@@ -5,6 +5,7 @@ import {
 } from "../core/constants.js";
 import { mat4LookAt, mat4Multiply, mat4Perspective, normalize3 } from "../core/math.js";
 import {
+  AVATAR_VERTEX_STRIDE_FLOATS,
   DEFAULT_PEASANT_GUY_NCM,
   createAvatarMeshFromNcm,
   updateAvatarMeshVertices,
@@ -603,7 +604,11 @@ export class ForgeWorkbenchRenderer {
       equipment: this.avatar.equipment,
       clothMotionScale: this.reducedMotion ? 0.28 : 1,
     }) || this.avatar.mesh.vertices;
-    writePackedAvatarVertices(this.avatar.packedMesh.vertices, vertices);
+    writePackedAvatarVertices(
+      this.avatar.packedMesh.vertices,
+      vertices,
+      avatarVertexStrideFloats(this.avatar.mesh),
+    );
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.avatarHandle.vbo);
     this.gl.bufferSubData(this.gl.ARRAY_BUFFER, 0, this.avatar.packedMesh.vertices);
     return true;
@@ -2157,12 +2162,13 @@ function uploadMesh(gl, mesh, usage) {
 }
 
 function packAvatarMesh(mesh, sourceVertices) {
+  const sourceStrideFloats = avatarVertexStrideFloats(mesh);
   const vertexCount = Math.max(0, Math.min(
     Number(mesh?.vertexCount) || 0,
-    Math.floor((sourceVertices?.length || 0) / 10),
+    Math.floor((sourceVertices?.length || 0) / sourceStrideFloats),
   ));
   const vertices = new Uint8Array(vertexCount * FORGE_MESH_VERTEX_STRIDE_BYTES);
-  writePackedAvatarVertices(vertices, sourceVertices);
+  writePackedAvatarVertices(vertices, sourceVertices, sourceStrideFloats);
   const indices = mesh?.indices ?? new Uint16Array(0);
   return {
     vertices,
@@ -2175,15 +2181,16 @@ function packAvatarMesh(mesh, sourceVertices) {
   };
 }
 
-function writePackedAvatarVertices(target, source) {
+function writePackedAvatarVertices(target, source, sourceStrideFloats = AVATAR_VERTEX_STRIDE_FLOATS) {
   if (!target?.byteLength || !source?.length) return target;
+  const sourceStride = Math.max(10, Math.trunc(Number(sourceStrideFloats) || AVATAR_VERTEX_STRIDE_FLOATS));
   const view = new DataView(target.buffer, target.byteOffset, target.byteLength);
   const vertexCount = Math.min(
     Math.floor(target.byteLength / FORGE_MESH_VERTEX_STRIDE_BYTES),
-    Math.floor(source.length / 10),
+    Math.floor(source.length / sourceStride),
   );
   for (let index = 0; index < vertexCount; index += 1) {
-    const sourceOffset = index * 10;
+    const sourceOffset = index * sourceStride;
     const targetOffset = index * FORGE_MESH_VERTEX_STRIDE_BYTES;
     for (let axis = 0; axis < 3; axis += 1) {
       view.setInt16(
@@ -2206,6 +2213,13 @@ function writePackedAvatarVertices(target, source) {
     view.setUint16(targetOffset + 14, 0, true);
   }
   return target;
+}
+
+function avatarVertexStrideFloats(mesh) {
+  const strideBytes = Math.trunc(Number(mesh?.vertexStrideBytes) || 0);
+  return strideBytes >= 40 && strideBytes % 4 === 0
+    ? strideBytes / 4
+    : AVATAR_VERTEX_STRIDE_FLOATS;
 }
 
 function setForgeHighlightUniforms(gl, uniforms, selected, hovered) {

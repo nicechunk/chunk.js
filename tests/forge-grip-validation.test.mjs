@@ -14,6 +14,7 @@ import {
   forgeRuntimeGripFromDesign,
 } from "../forge/forge-runtime-cache.js";
 import {
+  AVATAR_VERTEX_STRIDE_FLOATS,
   DEFAULT_PEASANT_GUY_NCM,
   createAvatarMeshFromNcm,
   updateAvatarMeshVertices,
@@ -106,10 +107,10 @@ function animatedPartBounds(mesh, vertices, predicate) {
   const bounds = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
   let vertexCursor = 0;
   for (const part of mesh.parts) {
-    const vertexCount = part.geometry ? part.geometry.vertices.length / 10 : 24;
+    const vertexCount = part.geometry ? part.geometry.vertices.length / AVATAR_VERTEX_STRIDE_FLOATS : 24;
     if (predicate(part)) {
       for (let index = vertexCursor; index < vertexCursor + vertexCount; index += 1) {
-        const offset = index * 10;
+        const offset = index * AVATAR_VERTEX_STRIDE_FLOATS;
         for (let axis = 0; axis < 3; axis += 1) {
           bounds.min[axis] = Math.min(bounds.min[axis], vertices[offset + axis]);
           bounds.max[axis] = Math.max(bounds.max[axis], vertices[offset + axis]);

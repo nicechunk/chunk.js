@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  AVATAR_VERTEX_STRIDE_FLOATS,
   createAvatarMeshFromNcm,
   createAvatarMeshFromNcm4Character,
   sampleNcm4Action,
@@ -207,12 +208,12 @@ assert.notDeepEqual(
   "relative target and eye heights must move the preview framing",
 );
 
-const propVertexOffset = 2 * 24 * 10;
-for (let offset = propVertexOffset; offset < mesh.vertices.length; offset += 10) {
+const propVertexOffset = 2 * 24 * AVATAR_VERTEX_STRIDE_FLOATS;
+for (let offset = propVertexOffset; offset < mesh.vertices.length; offset += AVATAR_VERTEX_STRIDE_FLOATS) {
   assert.equal(mesh.vertices[offset + 9], 0, "the static NCM4 rest mesh should not flash inactive props before its first update");
 }
 const hidden = new Float32Array(updateAvatarMeshVertices(mesh, {}));
-for (let offset = propVertexOffset; offset < hidden.length; offset += 10) {
+for (let offset = propVertexOffset; offset < hidden.length; offset += AVATAR_VERTEX_STRIDE_FLOATS) {
   assert.equal(hidden[offset + 9], 0, "unselected action props should be collapsed without changing the buffer layout");
 }
 
@@ -221,12 +222,12 @@ const posed = new Float32Array(updateAvatarMeshVertices(mesh, { action: 2, progr
 assert.equal(posed.length, mesh.vertices.length, "NCM4 animation must keep one stable vertex buffer");
 assert.ok(Array.from(posed).every(Number.isFinite));
 assert.notDeepEqual(
-  Array.from(posed.slice(24 * 10, 25 * 10)),
-  Array.from(rest.slice(24 * 10, 25 * 10)),
+  Array.from(posed.slice(24 * AVATAR_VERTEX_STRIDE_FLOATS, 25 * AVATAR_VERTEX_STRIDE_FLOATS)),
+  Array.from(rest.slice(24 * AVATAR_VERTEX_STRIDE_FLOATS, 25 * AVATAR_VERTEX_STRIDE_FLOATS)),
   "an explicitly bound child bone should move its cuboids",
 );
-for (let offset = propVertexOffset; offset < posed.length; offset += 10) {
-  const partIndex = Math.floor(offset / (24 * 10));
+for (let offset = propVertexOffset; offset < posed.length; offset += AVATAR_VERTEX_STRIDE_FLOATS) {
+  const partIndex = Math.floor(offset / (24 * AVATAR_VERTEX_STRIDE_FLOATS));
   const expectedAlpha = character.cuboids[partIndex].group === 1 ? 1 : 0;
   assert.equal(
     posed[offset + 9],
@@ -303,7 +304,7 @@ try {
       const group = authoringCharacter.cuboids[partIndex].group;
       const expectedAlpha = group === 0 || group === visibleGroup ? 1 : 0;
       assert.equal(
-        uploaded[partIndex * 24 * 10 + 9],
+        uploaded[partIndex * 24 * AVATAR_VERTEX_STRIDE_FLOATS + 9],
         expectedAlpha,
         `${action.name} must keep group ${group} visibility in the direct-object preview`,
       );

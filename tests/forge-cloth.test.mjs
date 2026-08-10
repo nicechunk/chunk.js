@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { AVATAR_VERTEX_STRIDE_FLOATS } from "../renderer/avatar-mesh.js";
 import {
   FORGE_CLOTH_RESOURCE_ID,
   FORGE_MESH_VERTEX_STRIDE_BYTES,
@@ -221,7 +222,7 @@ function maxDeployedPositionDelta(left, right, includeComponent) {
   for (let vertex = 0; vertex < deployedPart.geometry.vertexCount; vertex += 1) {
     const component = deployedPart.geometry.clothVertexComponents[vertex];
     if (!includeComponent(component)) continue;
-    const offset = (deployedPartFirstVertex + vertex) * 10;
+    const offset = (deployedPartFirstVertex + vertex) * AVATAR_VERTEX_STRIDE_FLOATS;
     const dx = left[offset] - right[offset];
     const dy = left[offset + 1] - right[offset + 1];
     const dz = left[offset + 2] - right[offset + 2];

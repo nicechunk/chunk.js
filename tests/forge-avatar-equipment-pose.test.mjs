@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { restoreForgeRuntime } from "../forge/forge-runtime-cache.js";
 import { createAvatarToolCollisionResolver } from "../physics/voxel-item-collision.js";
 import {
+  AVATAR_VERTEX_STRIDE_FLOATS,
   DEFAULT_PEASANT_GUY_NCM,
   avatarRightHandRotations,
   createAvatarMeshFromNcm,
@@ -109,11 +110,11 @@ function partBounds(avatarMesh, vertices, predicate) {
   const result = [];
   let vertexCursor = 0;
   for (const part of avatarMesh.parts) {
-    const vertexCount = part.geometry ? part.geometry.vertices.length / 10 : 24;
+    const vertexCount = part.geometry ? part.geometry.vertices.length / AVATAR_VERTEX_STRIDE_FLOATS : 24;
     if (predicate(part)) {
       const bounds = { name: part.name || part.bone || "part", min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
       for (let index = vertexCursor; index < vertexCursor + vertexCount; index += 1) {
-        const offset = index * 10;
+        const offset = index * AVATAR_VERTEX_STRIDE_FLOATS;
         for (let axis = 0; axis < 3; axis += 1) {
           bounds.min[axis] = Math.min(bounds.min[axis], vertices[offset + axis]);
           bounds.max[axis] = Math.max(bounds.max[axis], vertices[offset + axis]);

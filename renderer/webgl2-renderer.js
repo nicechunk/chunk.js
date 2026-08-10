@@ -2,7 +2,7 @@ import { DEFAULT_VIEW_DISTANCE, MAX_DESKTOP_DPR, MAX_MOBILE_DPR } from "../core/
 import { BLOCK_ID } from "../world/block-registry.js";
 import { cameraOrigin, cameraViewProjection } from "./camera.js";
 import { filterChunksByCameraFrustum } from "./frustum.js";
-import { updateAvatarMeshVertices } from "./avatar-mesh.js";
+import { avatarHoldsTransparentBlock, updateAvatarMeshVertices } from "./avatar-mesh.js";
 import { BufferManager } from "./buffer-manager.js";
 import { CloudLayer } from "./cloud-layer.js";
 import { applyLightingUniforms, createUnderwaterLighting, createWorldLighting } from "./lighting.js";
@@ -20,6 +20,9 @@ precision highp float;
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;
+layout(location = 3) in vec2 aUv;
+layout(location = 4) in float aTextureLayer;
+layout(location = 5) in float aTransparentSurface;
 
 uniform mat4 uViewProjection;
 uniform vec3 uAvatarOrigin;
@@ -27,6 +30,9 @@ uniform float uAvatarYaw;
 
 out vec3 vNormal;
 out vec4 vColor;
+out vec2 vUv;
+flat out float vTextureLayer;
+flat out float vTransparentSurface;
 out float vFogDepth;
 
 void main() {
@@ -41,6 +47,9 @@ void main() {
   gl_Position = uViewProjection * vec4(p, 1.0);
   vNormal = normalize(yaw * aNormal);
   vColor = aColor;
+  vUv = aUv;
+  vTextureLayer = aTextureLayer;
+  vTransparentSurface = aTransparentSurface;
   vFogDepth = max(0.0, gl_Position.w);
 }
 `;
@@ -50,7 +59,9 @@ const UNDERWATER_EXIT_RATE = 4.0;
 
 const AVATAR_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
+precision highp sampler2DArray;
 
+uniform sampler2DArray uTextureArray;
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform vec3 uSkyLightColor;
@@ -59,23 +70,34 @@ uniform vec3 uFogColor;
 uniform vec2 uFogNearFar;
 uniform vec4 uLightParams;
 uniform float uAvatarOpacity;
+uniform float uAvatarSurfacePass;
 
 in vec3 vNormal;
 in vec4 vColor;
+in vec2 vUv;
+flat in float vTextureLayer;
+flat in float vTransparentSurface;
 in float vFogDepth;
 
 out vec4 outColor;
 
 void main() {
+  if (uAvatarSurfacePass > 0.5 && uAvatarSurfacePass < 1.5 && vTransparentSurface > 0.5) discard;
+  if (uAvatarSurfacePass > 1.5 && vTransparentSurface < 0.5) discard;
+  vec4 surface = vColor;
+  if (vTextureLayer >= 0.0) {
+    surface = texture(uTextureArray, vec3(fract(vUv), floor(vTextureLayer + 0.5)));
+    if (surface.a < 0.08) discard;
+  }
   vec3 normal = normalize(vNormal);
   float sun = max(dot(normal, normalize(uSunDirection)), 0.0);
   float hemiUp = normal.y * 0.5 + 0.5;
   vec3 ambient = uSkyLightColor * uLightParams.x;
   vec3 hemi = mix(uGroundLightColor, uSkyLightColor, hemiUp) * uLightParams.z;
   vec3 direct = uSunColor * (sun * uLightParams.y);
-  vec3 color = vColor.rgb * (ambient + hemi + direct) * uLightParams.w;
+  vec3 color = surface.rgb * (ambient + hemi + direct) * uLightParams.w;
   float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);
-  outColor = vec4(mix(color, uFogColor, fog), vColor.a * uAvatarOpacity);
+  outColor = vec4(mix(color, uFogColor, fog), surface.a * uAvatarOpacity);
 }
 `;
 
@@ -1181,11 +1203,25 @@ export class WebGL2VoxelRenderer {
     if (!avatars.length || !this.avatarProgram) return { drawCalls: 0, triangles: 0, bufferMemory: 0 };
     gl.useProgram(this.avatarProgram);
     gl.uniformMatrix4fv(this.avatarUniforms.uViewProjection, false, viewProjection);
+    gl.uniform1i(this.avatarUniforms.uTextureArray, 0);
+    this.textureArray.bind(0);
     applyLightingUniforms(gl, this.avatarUniforms, lighting);
     let drawCalls = 0;
     let triangles = 0;
     let bufferMemory = 0;
     let transparentPass = false;
+    const setTransparentPass = (transparent) => {
+      if (transparent === transparentPass) return;
+      transparentPass = transparent;
+      if (transparent) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(false);
+      } else {
+        gl.disable(gl.BLEND);
+        gl.depthMask(true);
+      }
+    };
     for (const avatar of avatars) {
       const entry = this.avatarBuffers.get(String(avatar.meshId || avatar.id));
       if (!entry?.handle) continue;
@@ -1206,23 +1242,30 @@ export class WebGL2VoxelRenderer {
       );
       gl.uniform1f(this.avatarUniforms.uAvatarYaw, avatar.yaw || 0);
       const opacity = Math.max(0, Math.min(1, Number(avatar.opacity ?? 1) || 0));
-      const transparent = opacity < 0.999;
-      if (transparent !== transparentPass) {
-        transparentPass = transparent;
-        if (transparent) {
-          gl.enable(gl.BLEND);
-          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-          gl.depthMask(false);
-        } else {
-          gl.disable(gl.BLEND);
-          gl.depthMask(true);
-        }
-      }
       gl.uniform1f(this.avatarUniforms.uAvatarOpacity, opacity);
       gl.bindVertexArray(handle.vao);
-      gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
-      drawCalls += 1;
-      triangles += handle.triangleCount;
+      if (opacity < 0.999) {
+        setTransparentPass(true);
+        gl.uniform1f(this.avatarUniforms.uAvatarSurfacePass, 0);
+        gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
+        drawCalls += 1;
+        triangles += handle.triangleCount;
+      } else if (avatarHoldsTransparentBlock(avatar.animation)) {
+        setTransparentPass(false);
+        gl.uniform1f(this.avatarUniforms.uAvatarSurfacePass, 1);
+        gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
+        setTransparentPass(true);
+        gl.uniform1f(this.avatarUniforms.uAvatarSurfacePass, 2);
+        gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
+        drawCalls += 2;
+        triangles += handle.triangleCount * 2;
+      } else {
+        setTransparentPass(false);
+        gl.uniform1f(this.avatarUniforms.uAvatarSurfacePass, 0);
+        gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
+        drawCalls += 1;
+        triangles += handle.triangleCount;
+      }
       bufferMemory += handle.byteLength;
     }
     if (transparentPass) {
@@ -1349,6 +1392,24 @@ export class WebGL2VoxelRenderer {
     gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
     gl.enableVertexAttribArray(2);
     gl.vertexAttribPointer(2, 4, gl.FLOAT, false, stride, 24);
+    if (stride >= 52) {
+      gl.enableVertexAttribArray(3);
+      gl.vertexAttribPointer(3, 2, gl.FLOAT, false, stride, 40);
+      gl.enableVertexAttribArray(4);
+      gl.vertexAttribPointer(4, 1, gl.FLOAT, false, stride, 48);
+    } else {
+      gl.disableVertexAttribArray(3);
+      gl.vertexAttrib2f(3, 0, 0);
+      gl.disableVertexAttribArray(4);
+      gl.vertexAttrib1f(4, -1);
+    }
+    if (stride >= 56) {
+      gl.enableVertexAttribArray(5);
+      gl.vertexAttribPointer(5, 1, gl.FLOAT, false, stride, 52);
+    } else {
+      gl.disableVertexAttribArray(5);
+      gl.vertexAttrib1f(5, 0);
+    }
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
     gl.bindVertexArray(null);
@@ -1453,6 +1514,8 @@ function collectAvatarUniforms(gl, program) {
     "uAvatarOrigin",
     "uAvatarYaw",
     "uAvatarOpacity",
+    "uAvatarSurfacePass",
+    "uTextureArray",
     "uSunDirection",
     "uSunColor",
     "uSkyLightColor",

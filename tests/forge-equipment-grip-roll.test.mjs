@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import { restoreForgeRuntime } from "../forge/forge-runtime-cache.js";
 import {
+  AVATAR_VERTEX_STRIDE_FLOATS,
   DEFAULT_PEASANT_GUY_NCM,
   createAvatarMeshFromNcm,
   forgeAvatarTargetGrip,
@@ -73,13 +74,13 @@ function forgedComponentBounds(mesh) {
   const part = mesh.parts.find((candidate) => candidate.forgedTool);
   assert.ok(part?.geometry?.vertices);
   const vertices = part.geometry.vertices;
-  const componentVertexCount = vertices.length / 10 / runtime.componentCount;
+  const componentVertexCount = vertices.length / AVATAR_VERTEX_STRIDE_FLOATS / runtime.componentCount;
   assert.equal(componentVertexCount, 24);
   return Array.from({ length: runtime.componentCount }, (_, componentIndex) => {
     const bounds = emptyBounds();
     const start = componentIndex * componentVertexCount;
     for (let index = start; index < start + componentVertexCount; index += 1) {
-      const offset = index * 10;
+      const offset = index * AVATAR_VERTEX_STRIDE_FLOATS;
       includePoint(bounds, [vertices[offset], vertices[offset + 1], vertices[offset + 2]]);
     }
     return bounds;
@@ -113,10 +114,10 @@ function animatedPartBounds(mesh, vertices, predicate) {
   const bounds = emptyBounds();
   let vertexCursor = 0;
   for (const part of mesh.parts) {
-    const vertexCount = part.geometry ? part.geometry.vertices.length / 10 : 24;
+    const vertexCount = part.geometry ? part.geometry.vertices.length / AVATAR_VERTEX_STRIDE_FLOATS : 24;
     if (predicate(part)) {
       for (let index = vertexCursor; index < vertexCursor + vertexCount; index += 1) {
-        const offset = index * 10;
+        const offset = index * AVATAR_VERTEX_STRIDE_FLOATS;
         includePoint(bounds, [vertices[offset], vertices[offset + 1], vertices[offset + 2]]);
       }
     }

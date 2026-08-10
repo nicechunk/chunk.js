@@ -13,6 +13,8 @@ import {
   PEASANT_GUY_SOURCE_HEIGHT_UNITS,
   PLAYER_AVATAR_HEIGHT_METERS,
 } from "../core/constants.js";
+import { blockMaterialIdForFace, BLOCK_ID } from "../world/block-registry.js";
+import { materialDef } from "../world/material-registry.js";
 
 export {
   ncm4PartGroupVisible,
@@ -35,7 +37,10 @@ export const BUILTIN_AVATAR_MODEL_CODES = new Map([
   ["peasant_guy", DEFAULT_PEASANT_GUY_NCM],
 ]);
 
-const AVATAR_VERTEX_STRIDE_FLOATS = 10;
+export const AVATAR_VERTEX_STRIDE_FLOATS = 14;
+export const AVATAR_TEXTURE_LAYER_NONE = -1;
+export const AVATAR_TEXTURE_SURFACE_OPAQUE = 0;
+export const AVATAR_TEXTURE_SURFACE_TRANSPARENT = 1;
 const BASIC_PICKAXE_EQUIPMENT_ID = EQUIPMENT_MODEL_ID.basicPickaxe;
 const FORGED_PICKAXE_EQUIPMENT_ID = EQUIPMENT_MODEL_ID.forgedPickaxe;
 const BLUEPRINT_EQUIPMENT_ID = EQUIPMENT_MODEL_ID.blueprint;
@@ -430,7 +435,11 @@ export function updateAvatarMeshVertices(mesh, animation = {}) {
           clothTimeSeconds,
           clothMotionScale,
         })
-      : appendBoxToArray(out, cursor, part, pivot, rotation, offset, { hidden: !equipmentVisible, color: colorOverride });
+      : appendBoxToArray(out, cursor, part, pivot, rotation, offset, {
+          hidden: !equipmentVisible,
+          color: colorOverride,
+          blockId: part.equipmentId === "held_block" ? equipment.blockId : BLOCK_ID.air,
+        });
   }
   return out;
 }
@@ -555,8 +564,10 @@ function appendNcm4BoxToArray(out, cursor, box, boneIndex, skeleton, rotations) 
     { n: [0, 0, 1], p: [[x0, y0, z1], [x0, y1, z1], [x1, y1, z1], [x1, y0, z1]] },
     { n: [0, 0, -1], p: [[x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z0]] },
   ];
-  for (const face of faces) {
-    for (const point of face.p) {
+  for (let faceIndex = 0; faceIndex < faces.length; faceIndex += 1) {
+    const face = faces[faceIndex];
+    for (let vertexIndex = 0; vertexIndex < face.p.length; vertexIndex += 1) {
+      const point = face.p[vertexIndex];
       const transformedPoint = transformNcm4Point(point, boneIndex, skeleton, rotations);
       const transformedNormal = transformNcm4Normal(face.n, boneIndex, skeleton, rotations);
       out[cursor++] = transformedPoint[0];
@@ -569,6 +580,10 @@ function appendNcm4BoxToArray(out, cursor, box, boneIndex, skeleton, rotations) 
       out[cursor++] = box.color[1];
       out[cursor++] = box.color[2];
       out[cursor++] = box.color[3];
+      out[cursor++] = AVATAR_FACE_UVS[faceIndex][vertexIndex][0];
+      out[cursor++] = AVATAR_FACE_UVS[faceIndex][vertexIndex][1];
+      out[cursor++] = AVATAR_TEXTURE_LAYER_NONE;
+      out[cursor++] = AVATAR_TEXTURE_SURFACE_OPAQUE;
     }
   }
   return cursor;
@@ -851,6 +866,10 @@ function unpackPlacedForgeGeometry(mesh, placement, { clothComponentIndexes = []
     vertices[outputOffset + 7] = source.getUint8(packedOffset + 11) / 255;
     vertices[outputOffset + 8] = source.getUint8(packedOffset + 12) / 255;
     vertices[outputOffset + 9] = source.getUint8(packedOffset + 13) / 255;
+    vertices[outputOffset + 10] = 0;
+    vertices[outputOffset + 11] = 0;
+    vertices[outputOffset + 12] = AVATAR_TEXTURE_LAYER_NONE;
+    vertices[outputOffset + 13] = AVATAR_TEXTURE_SURFACE_OPAQUE;
     const componentIndex = source.getUint16(packedOffset + 14, true);
     if (clothVertexComponents && clothIndexes.has(componentIndex) && clothComponentBounds[componentIndex]) {
       clothVertexComponents[index] = componentIndex;
@@ -1174,11 +1193,31 @@ function avatarEquipmentState(animation = {}) {
   return {
     rightHand: normalizedRightHand,
     equipmentId,
+    blockId: normalizedRightHand === "block"
+      ? normalizeHeldBlockId(raw?.blockId ?? animation.blockId)
+      : BLOCK_ID.air,
     blockColor,
     forged,
     designHash,
     forgedColors: forgedPickaxePalette(designHash),
   };
+}
+
+function normalizeHeldBlockId(value) {
+  const blockId = Math.trunc(Number(value) || 0);
+  return blockId > BLOCK_ID.air && blockMaterialIdForFace(blockId, 2) !== 0
+    ? blockId
+    : BLOCK_ID.air;
+}
+
+export function avatarHoldsTransparentBlock(animation = {}) {
+  const equipment = avatarEquipmentState(animation);
+  if (equipment.rightHand !== "block" || equipment.blockId === BLOCK_ID.air) return false;
+  for (let faceIndex = 0; faceIndex < 6; faceIndex += 1) {
+    const shaderType = materialDef(blockMaterialIdForFace(equipment.blockId, faceIndex)).shaderType;
+    if (shaderType === "transparent" || shaderType === "fluid") return true;
+  }
+  return false;
 }
 
 function avatarEquipmentPartVisible(part, equipment) {
@@ -1274,6 +1313,17 @@ function appendGeometry(vertices, indices, geometry) {
   for (const index of geometry.indices) indices.push(base + index);
 }
 
+// Match chunk-mesher.js UV axes for each box face so held blocks use the
+// exact same texture orientation as their full-size world counterpart.
+const AVATAR_FACE_UVS = Object.freeze([
+  Object.freeze([[1, 0], [1, 1], [0, 1], [0, 0]]),
+  Object.freeze([[0, 0], [0, 1], [1, 1], [1, 0]]),
+  Object.freeze([[0, 1], [0, 0], [1, 0], [1, 1]]),
+  Object.freeze([[0, 0], [0, 1], [1, 1], [1, 0]]),
+  Object.freeze([[0, 0], [0, 1], [1, 1], [1, 0]]),
+  Object.freeze([[1, 0], [1, 1], [0, 1], [0, 0]]),
+]);
+
 function appendBox(vertices, indices, box) {
   const x0 = box.cx - box.sx * 0.5;
   const x1 = box.cx + box.sx * 0.5;
@@ -1289,12 +1339,21 @@ function appendBox(vertices, indices, box) {
     { n: [0, 0, 1], p: [[x0, y0, z1], [x0, y1, z1], [x1, y1, z1], [x1, y0, z1]] },
     { n: [0, 0, -1], p: [[x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z0]] },
   ];
-  for (const face of faces) {
+  for (let faceIndex = 0; faceIndex < faces.length; faceIndex += 1) {
+    const face = faces[faceIndex];
     const offset = vertices.length / AVATAR_VERTEX_STRIDE_FLOATS;
-    for (const p of face.p) {
+    for (let vertexIndex = 0; vertexIndex < face.p.length; vertexIndex += 1) {
+      const p = face.p[vertexIndex];
       const lp = transformBoxLocalPoint(p, box);
       const ln = transformBoxLocalNormal(face.n, box);
-      vertices.push(lp[0], lp[1], lp[2], ln[0], ln[1], ln[2], box.color[0], box.color[1], box.color[2], box.color[3]);
+      vertices.push(
+        lp[0], lp[1], lp[2],
+        ln[0], ln[1], ln[2],
+        box.color[0], box.color[1], box.color[2], box.color[3],
+        AVATAR_FACE_UVS[faceIndex][vertexIndex][0], AVATAR_FACE_UVS[faceIndex][vertexIndex][1],
+        AVATAR_TEXTURE_LAYER_NONE,
+        AVATAR_TEXTURE_SURFACE_OPAQUE,
+      );
     }
     indices.push(offset, offset + 2, offset + 1, offset, offset + 3, offset + 2);
   }
@@ -1317,8 +1376,11 @@ function appendBoxToArray(out, cursor, box, pivot, rotation, offset = null, opti
     { n: [0, 0, -1], p: [[x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z0]] },
   ];
   const color = options.color ?? box.color;
-  for (const face of faces) {
-    for (const p of face.p) {
+  for (let faceIndex = 0; faceIndex < faces.length; faceIndex += 1) {
+    const face = faces[faceIndex];
+    const textureSurface = avatarBoxTextureSurface(box, faceIndex, options.blockId);
+    for (let vertexIndex = 0; vertexIndex < face.p.length; vertexIndex += 1) {
+      const p = face.p[vertexIndex];
       const lp = transformBoxLocalPoint(p, box);
       const ln = transformBoxLocalNormal(face.n, box);
       const tp = transformPoint(lp, pivot, rotation);
@@ -1333,9 +1395,26 @@ function appendBoxToArray(out, cursor, box, pivot, rotation, offset = null, opti
       out[cursor++] = color[1];
       out[cursor++] = color[2];
       out[cursor++] = color[3];
+      out[cursor++] = AVATAR_FACE_UVS[faceIndex][vertexIndex][0];
+      out[cursor++] = AVATAR_FACE_UVS[faceIndex][vertexIndex][1];
+      out[cursor++] = textureSurface.textureLayer;
+      out[cursor++] = textureSurface.transparent;
     }
   }
   return cursor;
+}
+
+function avatarBoxTextureSurface(box, faceIndex, blockId) {
+  if (box?.equipmentId !== "held_block" || blockId === BLOCK_ID.air) {
+    return { textureLayer: AVATAR_TEXTURE_LAYER_NONE, transparent: AVATAR_TEXTURE_SURFACE_OPAQUE };
+  }
+  const material = materialDef(blockMaterialIdForFace(blockId, faceIndex));
+  return {
+    textureLayer: material.textureLayer,
+    transparent: material.shaderType === "transparent" || material.shaderType === "fluid"
+      ? AVATAR_TEXTURE_SURFACE_TRANSPARENT
+      : AVATAR_TEXTURE_SURFACE_OPAQUE,
+  };
 }
 
 function appendGeometryToArray(out, cursor, part, pivot, rotation, offset = null, options = {}) {
@@ -1364,6 +1443,10 @@ function appendGeometryToArray(out, cursor, part, pivot, rotation, offset = null
     out[cursor++] = source[sourceOffset + 7];
     out[cursor++] = source[sourceOffset + 8];
     out[cursor++] = source[sourceOffset + 9];
+    out[cursor++] = source[sourceOffset + 10];
+    out[cursor++] = source[sourceOffset + 11];
+    out[cursor++] = source[sourceOffset + 12];
+    out[cursor++] = source[sourceOffset + 13];
   }
   return cursor;
 }
@@ -1403,6 +1486,10 @@ function appendCollapsedVerticesToArray(out, cursor, pivot, offset, vertexCount)
     out[cursor++] = 0;
     out[cursor++] = 0;
     out[cursor++] = 0;
+    out[cursor++] = 0;
+    out[cursor++] = 0;
+    out[cursor++] = AVATAR_TEXTURE_LAYER_NONE;
+    out[cursor++] = AVATAR_TEXTURE_SURFACE_OPAQUE;
   }
   return cursor;
 }
