@@ -406,10 +406,15 @@ export function updateAvatarMeshVertices(mesh, animation = {}) {
     torso: { x: 0, y: 0 },
   };
   const miningPose = resolveAvatarMiningPose(animation.miningProgress ?? 0, animation.miningAimPitch ?? 0);
+  const placementPose = resolveAvatarPlacementPose(animation.placementProgress ?? 0, animation.placementAimPitch ?? 0);
   if (miningPose.active) {
     Object.assign(rotations, avatarRightHandRotations(mesh, equipment.equipmentId, {
       armX: miningPose.armX,
       mining: true,
+    }));
+  } else if (placementPose.active) {
+    Object.assign(rotations, avatarRightHandRotations(mesh, equipment.equipmentId, {
+      armX: placementPose.armX,
     }));
   }
   const offsets = mesh.boneOffsets ?? {};
@@ -1212,6 +1217,22 @@ export function resolveAvatarMiningPose(progress, pitchOffset = 0) {
   return { active: true, armX: lerp(1.95, -0.2, strike) + offset };
 }
 
+export function resolveAvatarPlacementPose(progress, pitchOffset = 0) {
+  const t = Math.max(0, Math.min(1, Number(progress) || 0));
+  if (t <= 0 || t >= 1) return { active: false, armX: 0 };
+  const offset = Math.max(-0.7, Math.min(0.7, Number(pitchOffset) || 0));
+  if (t < 0.22) {
+    return { active: true, armX: lerp(0.05, 0.88, easeOut(t / 0.22)) + offset };
+  }
+  if (t < 0.52) {
+    return { active: true, armX: lerp(0.88, 1.12, easeInOut((t - 0.22) / 0.3)) + offset };
+  }
+  if (t < 0.68) {
+    return { active: true, armX: lerp(1.12, 1.02, easeInOut((t - 0.52) / 0.16)) + offset };
+  }
+  return { active: true, armX: lerp(1.02, 0, easeInOut((t - 0.68) / 0.32)) + offset };
+}
+
 function lerp(a, b, t) {
   return a + (b - a) * t;
 }
@@ -1222,6 +1243,10 @@ function easeOut(t) {
 
 function easeIn(t) {
   return t * t * t;
+}
+
+function easeInOut(t) {
+  return t * t * (3 - 2 * t);
 }
 
 function boundsOfParts(parts) {
