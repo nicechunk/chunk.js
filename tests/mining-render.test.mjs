@@ -67,6 +67,8 @@ assert.ok(isOpaqueSolidBlock(reloadedManager.getBlockAtWorld(delta.worldX, delta
 await assertWorkerBuildExposesBoundaryFace(sourceManager, delta);
 assertProfileSurfaceVisualsRequireSupport();
 assertBackpackDecorationMeshesMatchWorld();
+assertFloatingBlockKeepsLowerTerrainVisible();
+assertNonHeightfieldOverhangKeepsLowerTerrainVisible();
 assertTreeLeafDeltaCarvesOnlyTheMinedCanopyArea();
 assertRegionBufferRevisionHandoff();
 assertBuildingUploadsDoNotInvalidateTerrainRegions();
@@ -204,6 +206,59 @@ function createSingleColumnProfileChunk({ surfaceBlockId = BLOCK_ID.grass, surfa
     },
     baseBlockResolver: (_x, y) => y < 4 ? BLOCK_ID.dirt : BLOCK_ID.air,
   });
+}
+
+function assertFloatingBlockKeepsLowerTerrainVisible() {
+  const chunk = createSingleColumnProfileChunk({});
+  chunk.applyChainDelta([{
+    worldX: 0,
+    worldY: 7,
+    worldZ: 0,
+    blockId: BLOCK_ID.stone,
+  }], { protectUntilSnapshot: false });
+
+  const mesh = meshChunkOpaqueFast(chunk);
+  assert.ok(hasFaceCovering(mesh, {
+    normal: [0, 127, 0],
+    x: [0, 1],
+    y: [5, 5],
+    z: [0, 1],
+  }), "a floating opaque delta must not hide the exposed terrain surface below it");
+  assert.ok(hasFaceCovering(mesh, {
+    normal: [0, 127, 0],
+    x: [0, 1],
+    y: [8, 8],
+    z: [0, 1],
+  }), "the floating opaque delta must keep its own exposed top face");
+}
+
+function assertNonHeightfieldOverhangKeepsLowerTerrainVisible() {
+  const blocks = new Uint16Array(10);
+  blocks[4] = BLOCK_ID.grass;
+  blocks[7] = BLOCK_ID.stone;
+  const chunk = new ChunkState({
+    chunkX: 0,
+    chunkZ: 0,
+    chunkSize: 1,
+    height: 10,
+    minY: 0,
+    worldSeed: "non-heightfield-overhang-test",
+    baseBlocks: blocks,
+  });
+
+  const mesh = meshChunkOpaqueFast(chunk);
+  assert.ok(hasFaceCovering(mesh, {
+    normal: [0, 127, 0],
+    x: [0, 1],
+    y: [5, 5],
+    z: [0, 1],
+  }), "arbitrary voxel chunks must preserve exposed surfaces below an overhang");
+  assert.ok(hasFaceCovering(mesh, {
+    normal: [0, -127, 0],
+    x: [0, 1],
+    y: [7, 7],
+    z: [0, 1],
+  }), "arbitrary voxel chunks must preserve the underside of an overhang");
 }
 
 function assertBackpackDecorationMeshesMatchWorld() {

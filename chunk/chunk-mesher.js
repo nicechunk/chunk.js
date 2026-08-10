@@ -110,6 +110,13 @@ export function meshChunkOpaqueFast(chunkState, {
   getColumnTopAtWorld = null,
   treeDeltaCandidateCount = 0,
 } = {}) {
+  if (!chunkState.baseProfile) {
+    return meshChunkOpaque(chunkState, {
+      getBlockAtWorld,
+      getDeltaAtWorld,
+      treeDeltaCandidateCount,
+    });
+  }
   const positions = [];
   const indices = [];
   let blockCount = 0;
@@ -156,7 +163,11 @@ export function meshChunkOpaqueFast(chunkState, {
       const column = x + z * size;
       const yTop = topY[column];
       if (yTop < minY) continue;
-      addFaceCell(faceGroups, 2, x, yTop, z, topBlock[column], terrainSunShadowShade(chunkState, x, yTop, z, getBlockAtWorld, getColumnTopAtWorld, FACE_DEFS[2].shade));
+      if (deltaColumns.has(column)) {
+        appendExposedOpaqueTopFaces(chunkState, faceGroups, x, z, yTop, getBlockAtWorld, getColumnTopAtWorld);
+      } else {
+        addFaceCell(faceGroups, 2, x, yTop, z, topBlock[column], terrainSunShadowShade(chunkState, x, yTop, z, getBlockAtWorld, getColumnTopAtWorld, FACE_DEFS[2].shade));
+      }
 
       for (const side of FAST_SIDE_FACES) {
         const nx = x + side.dx;
@@ -210,6 +221,26 @@ export function meshChunkOpaqueFast(chunkState, {
     minY: chunkState.minY,
     fastHeightfield: true,
   };
+}
+
+function appendExposedOpaqueTopFaces(chunkState, faceGroups, x, z, yTop, getBlockAtWorld, getColumnTopAtWorld) {
+  let aboveIsOpaque = false;
+  for (let y = yTop; y >= chunkState.minY; y -= 1) {
+    const blockId = chunkState.getFinalBlock(x, y, z);
+    const opaque = isGreedyOpaqueBlock(blockId);
+    if (opaque && !aboveIsOpaque) {
+      addFaceCell(
+        faceGroups,
+        2,
+        x,
+        y,
+        z,
+        blockId,
+        terrainSunShadowShade(chunkState, x, y, z, getBlockAtWorld, getColumnTopAtWorld, FACE_DEFS[2].shade),
+      );
+    }
+    aboveIsOpaque = opaque;
+  }
 }
 
 function profileOpaqueColumnTop(chunkState, localX, localZ, maxY) {
