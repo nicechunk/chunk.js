@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Terrain-aware batched foundation overlays with per-cell surface heights, stepped boundaries, bounded GPU buffers, and optional x-ray grid lines.
+- Public `ChunkManager.getWaterLevelAtWorld()` queries for overlays and other hosts that must distinguish water surfaces from terrain floors.
 - Reproducible, self-contained browser runtime and chunk Worker bundles for latency-sensitive static deployments.
 - An explicit `workerUrl` option for loading a bundled module Worker without changing the native ESM default.
 - MIT licensing and a detailed license-status boundary for repository code, the embedded default avatar, NiceChunk marks, and external assets.

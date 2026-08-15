@@ -1177,7 +1177,7 @@ export class WebGL2VoxelRenderer {
   }
 
   renderVoxelOverlays(viewProjection, origin, overlays = []) {
-    if (!this.voxelOverlay || !overlays?.length) return { drawCalls: 0, triangles: 0, bufferMemory: 0 };
+    if (!this.voxelOverlay) return { drawCalls: 0, triangles: 0, bufferMemory: 0 };
     return this.voxelOverlay.render({ viewProjection, origin, overlays });
   }
 

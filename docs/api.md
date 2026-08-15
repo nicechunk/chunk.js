@@ -104,7 +104,7 @@ pending delta > chain delta > deterministic base
 - applying or replacing confirmed chain deltas;
 - applying, confirming, or rolling back pending deltas;
 - rebuilding dirty chunks within a time budget;
-- querying integer blocks and visible chunks;
+- querying integer blocks, opaque column tops, generated water levels, and visible chunks;
 - injecting validated surface-decoration rules;
 - calling `dispose()` to terminate Workers and clear queued/in-flight work.
 

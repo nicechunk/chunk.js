@@ -59,6 +59,8 @@ const FOUNDATION_GLOW_WIDTH = 0.13;
 const FOUNDATION_WALL_HEIGHT = 0.24;
 const FOUNDATION_MEASURE_OFFSET = 0.42;
 const FOUNDATION_MEASURE_TICK = 0.16;
+const FOUNDATION_MAX_TERRAIN_CELLS = 4_096;
+const FOUNDATION_DYNAMIC_CACHE_FRAMES = 300;
 
 export class VoxelOverlay {
   constructor(gl) {
@@ -74,6 +76,7 @@ export class VoxelOverlay {
     this.sphereLineIbo = null;
     this.foundationGeometry = new Map();
     this.foundationByteLength = 0;
+    this.renderFrame = 0;
     this.byteLength = 0;
   }
 
@@ -123,7 +126,12 @@ export class VoxelOverlay {
 
   render({ viewProjection, origin, overlays = [] } = {}) {
     const gl = this.gl;
-    if (!gl || !this.program || !overlays?.length) {
+    if (!gl || !this.program) {
+      return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength + this.foundationByteLength };
+    }
+    this.renderFrame += 1;
+    if (!overlays?.length) {
+      this.pruneFoundationGeometry();
       return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength + this.foundationByteLength };
     }
     gl.useProgram(this.program);
@@ -133,7 +141,6 @@ export class VoxelOverlay {
     gl.disable(gl.CULL_FACE);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
     let drawCalls = 0;
     let triangles = 0;
     for (const overlay of overlays) {
@@ -177,6 +184,7 @@ export class VoxelOverlay {
     }
 
     gl.bindVertexArray(null);
+    this.pruneFoundationGeometry();
     gl.depthMask(true);
     gl.disable(gl.BLEND);
     gl.enable(gl.CULL_FACE);
@@ -185,7 +193,7 @@ export class VoxelOverlay {
 
   renderFoundation(foundation, origin) {
     const gl = this.gl;
-    const geometry = this.getFoundationGeometry(foundation.width, foundation.depth);
+    const geometry = this.getFoundationGeometry(foundation);
     if (!geometry) return { drawCalls: 0, triangles: 0 };
     gl.bindVertexArray(geometry.vao);
     gl.uniform3f(
@@ -224,6 +232,7 @@ export class VoxelOverlay {
       drawCalls += 1;
       triangles += geometry.walls.count / 3;
     }
+    if (foundation.xray) gl.disable(gl.DEPTH_TEST);
     if (foundation.grid && foundation.gridColor[3] > 0.001) {
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.uniform4fv(this.uniforms.uColor, foundation.gridColor);
@@ -241,15 +250,26 @@ export class VoxelOverlay {
         drawCalls += 1;
       }
     }
+    if (foundation.xray) gl.enable(gl.DEPTH_TEST);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     return { drawCalls, triangles };
   }
 
-  getFoundationGeometry(width, depth) {
-    const key = `${width}x${depth}`;
+  getFoundationGeometry(foundation) {
+    const terrain = foundation.terrain;
+    const key = terrain
+      ? `terrain:${foundation.geometryKey}`
+      : `flat:${foundation.width}x${foundation.depth}`;
+    const revision = terrain?.revision ?? key;
     const cached = this.foundationGeometry.get(key);
-    if (cached) return cached;
-    const data = buildFoundationGeometry(width, depth);
+    if (cached?.revision === revision) {
+      cached.lastUsedFrame = this.renderFrame;
+      return cached;
+    }
+    if (cached) this.deleteFoundationGeometry(key, cached);
+    const data = terrain
+      ? buildTerrainFoundationGeometry(terrain)
+      : buildFoundationGeometry(foundation.width, foundation.depth);
     const gl = this.gl;
     const vao = gl.createVertexArray();
     const vbo = gl.createBuffer();
@@ -259,10 +279,26 @@ export class VoxelOverlay {
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
     gl.bindVertexArray(null);
-    const geometry = { vao, vbo, ...data };
+    const geometry = { vao, vbo, revision, lastUsedFrame: this.renderFrame, ...data };
     this.foundationGeometry.set(key, geometry);
     this.foundationByteLength += data.vertices.byteLength;
     return geometry;
+  }
+
+  pruneFoundationGeometry() {
+    for (const [key, geometry] of this.foundationGeometry) {
+      if (!key.startsWith("terrain:")) continue;
+      if (this.renderFrame - geometry.lastUsedFrame <= FOUNDATION_DYNAMIC_CACHE_FRAMES) continue;
+      this.deleteFoundationGeometry(key, geometry);
+    }
+  }
+
+  deleteFoundationGeometry(key, geometry) {
+    const gl = this.gl;
+    if (geometry?.vbo) gl.deleteBuffer(geometry.vbo);
+    if (geometry?.vao) gl.deleteVertexArray(geometry.vao);
+    this.foundationByteLength = Math.max(0, this.foundationByteLength - (geometry?.vertices?.byteLength || 0));
+    this.foundationGeometry.delete(key);
   }
 
   dispose() {
@@ -369,6 +405,130 @@ function buildFoundationGeometry(width, depth) {
   return { vertices: new Float32Array(vertices), ...ranges };
 }
 
+export function buildTerrainFoundationGeometry({ columns, rows, cellSize, heights, width, depth }) {
+  const vertices = [];
+  const ranges = {};
+  const begin = (name) => {
+    ranges[name] = { first: vertices.length / 3, count: 0 };
+  };
+  const end = (name) => {
+    ranges[name].count = vertices.length / 3 - ranges[name].first;
+  };
+  const triangle = (a, b, c) => vertices.push(...a, ...b, ...c);
+  const quad = (a, b, c, d) => {
+    triangle(a, b, c);
+    triangle(a, c, d);
+  };
+  const line = (a, b) => vertices.push(...a, ...b);
+  const tileHeight = (column, row) => heights[row * columns + column];
+  const lineY = (height) => height + 0.008;
+
+  begin("fill");
+  forEachTerrainTile(columns, rows, cellSize, (column, row, x0, z0, x1, z1) => {
+    const y = tileHeight(column, row);
+    quad([x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]);
+  });
+  end("fill");
+
+  begin("glow");
+  const glow = FOUNDATION_GLOW_WIDTH;
+  forEachTerrainTile(columns, rows, cellSize, (column, row, x0, z0, x1, z1) => {
+    const y = tileHeight(column, row) - 0.004;
+    if (row === 0) quad([x0, y, -glow], [x0, y, glow], [x1, y, glow], [x1, y, -glow]);
+    if (row === rows - 1) quad([x0, y, depth - glow], [x0, y, depth + glow], [x1, y, depth + glow], [x1, y, depth - glow]);
+    if (column === 0) quad([-glow, y, z0], [-glow, y, z1], [glow, y, z1], [glow, y, z0]);
+    if (column === columns - 1) quad([width - glow, y, z0], [width - glow, y, z1], [width + glow, y, z1], [width + glow, y, z0]);
+  });
+  end("glow");
+
+  begin("walls");
+  forEachTerrainTile(columns, rows, cellSize, (column, row, x0, z0, x1, z1) => {
+    const y = tileHeight(column, row);
+    const floorY = y - FOUNDATION_WALL_HEIGHT;
+    if (row === 0) quad([x0, floorY, z0], [x1, floorY, z0], [x1, y, z0], [x0, y, z0]);
+    if (row === rows - 1) quad([x1, floorY, z1], [x0, floorY, z1], [x0, y, z1], [x1, y, z1]);
+    if (column === 0) quad([x0, floorY, z1], [x0, floorY, z0], [x0, y, z0], [x0, y, z1]);
+    if (column === columns - 1) quad([x1, floorY, z0], [x1, floorY, z1], [x1, y, z1], [x1, y, z0]);
+    if (column + 1 < columns) {
+      const neighborY = tileHeight(column + 1, row);
+      if (neighborY !== y) appendTerrainStepWall(quad, "x", x1, z0, z1, y, neighborY);
+    }
+    if (row + 1 < rows) {
+      const neighborY = tileHeight(column, row + 1);
+      if (neighborY !== y) appendTerrainStepWall(quad, "z", z1, x0, x1, y, neighborY);
+    }
+  });
+  end("walls");
+
+  begin("grid");
+  forEachTerrainTile(columns, rows, cellSize, (column, row, x0, z0, x1, z1) => {
+    const y = lineY(tileHeight(column, row));
+    line([x0, y, z0], [x1, y, z0]);
+    line([x0, y, z0], [x0, y, z1]);
+    if (row === rows - 1) line([x0, y, z1], [x1, y, z1]);
+    if (column === columns - 1) line([x1, y, z0], [x1, y, z1]);
+  });
+  end("grid");
+
+  begin("edges");
+  forEachTerrainTile(columns, rows, cellSize, (column, row, x0, z0, x1, z1) => {
+    const y = lineY(tileHeight(column, row));
+    if (row === 0) line([x0, y, z0], [x1, y, z0]);
+    if (row === rows - 1) line([x0, y, z1], [x1, y, z1]);
+    if (column === 0) line([x0, y, z0], [x0, y, z1]);
+    if (column === columns - 1) line([x1, y, z0], [x1, y, z1]);
+    if (column + 1 < columns) {
+      const neighborY = lineY(tileHeight(column + 1, row));
+      if (neighborY !== y) {
+        line([x1, Math.min(y, neighborY), z0], [x1, Math.max(y, neighborY), z0]);
+        line([x1, Math.min(y, neighborY), z1], [x1, Math.max(y, neighborY), z1]);
+      }
+    }
+    if (row + 1 < rows) {
+      const neighborY = lineY(tileHeight(column, row + 1));
+      if (neighborY !== y) {
+        line([x0, Math.min(y, neighborY), z1], [x0, Math.max(y, neighborY), z1]);
+        line([x1, Math.min(y, neighborY), z1], [x1, Math.max(y, neighborY), z1]);
+      }
+    }
+  });
+  end("edges");
+
+  begin("measure");
+  const measureY = Math.max(...heights) + 0.02;
+  const zMeasure = depth + FOUNDATION_MEASURE_OFFSET;
+  line([0, measureY, zMeasure], [width, measureY, zMeasure]);
+  line([0, measureY, zMeasure - FOUNDATION_MEASURE_TICK], [0, measureY, zMeasure + FOUNDATION_MEASURE_TICK]);
+  line([width, measureY, zMeasure - FOUNDATION_MEASURE_TICK], [width, measureY, zMeasure + FOUNDATION_MEASURE_TICK]);
+  const xMeasure = width + FOUNDATION_MEASURE_OFFSET;
+  line([xMeasure, measureY, 0], [xMeasure, measureY, depth]);
+  line([xMeasure - FOUNDATION_MEASURE_TICK, measureY, 0], [xMeasure + FOUNDATION_MEASURE_TICK, measureY, 0]);
+  line([xMeasure - FOUNDATION_MEASURE_TICK, measureY, depth], [xMeasure + FOUNDATION_MEASURE_TICK, measureY, depth]);
+  end("measure");
+
+  return { vertices: new Float32Array(vertices), ...ranges };
+}
+
+function forEachTerrainTile(columns, rows, cellSize, visit) {
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const x0 = column * cellSize;
+      const z0 = row * cellSize;
+      visit(column, row, x0, z0, x0 + cellSize, z0 + cellSize);
+    }
+  }
+}
+
+function appendTerrainStepWall(quad, axis, coordinate, start, end, firstY, secondY) {
+  const low = Math.min(firstY, secondY);
+  const high = Math.max(firstY, secondY);
+  if (axis === "x") {
+    quad([coordinate, low, start], [coordinate, low, end], [coordinate, high, end], [coordinate, high, start]);
+  } else {
+    quad([start, low, coordinate], [end, low, coordinate], [end, high, coordinate], [start, high, coordinate]);
+  }
+}
+
 function buildDebugSphereGeometry(segments) {
   const vertices = [];
   const indices = [];
@@ -430,13 +590,15 @@ function normalizeOverlaySphere(overlay) {
 
 function normalizeFoundationOverlay(overlay) {
   const x = Number(overlay.worldX);
-  const y = Number(overlay.worldY);
+  let y = Number(overlay.worldY);
   const z = Number(overlay.worldZ);
   const width = Math.trunc(Number(overlay.width));
   const depth = Math.trunc(Number(overlay.depth));
   if (![x, y, z].every(Number.isFinite)
     || !Number.isSafeInteger(width) || !Number.isSafeInteger(depth)
     || width < 1 || depth < 1 || width > 0xffff_ffff || depth > 0xffff_ffff) return null;
+  const terrain = normalizeFoundationTerrain(overlay, width, depth);
+  if (terrain) y = terrain.baseY;
   return {
     x,
     y,
@@ -445,11 +607,69 @@ function normalizeFoundationOverlay(overlay) {
     depth,
     preview: overlay.preview === true,
     grid: overlay.grid !== false,
+    xray: overlay.xray === true,
+    geometryKey: normalizedGeometryKey(overlay.geometryKey, x, z, width, depth),
+    terrain,
     fillColor: normalizeColor(overlay.fillColor, [0.08, 0.48, 1.0, 0.24]),
     gridColor: normalizeColor(overlay.gridColor, [0.48, 0.84, 1.0, 0.55]),
     edgeColor: normalizeColor(overlay.edgeColor ?? overlay.lineColor, [0.72, 0.96, 1.0, 0.96]),
     glowColor: normalizeColor(overlay.glowColor, [0.12, 0.68, 1.0, 0.30]),
   };
+}
+
+function normalizeFoundationTerrain(overlay, width, depth) {
+  const columns = Math.trunc(Number(overlay.terrainColumns));
+  const rows = Math.trunc(Number(overlay.terrainRows));
+  const cellSize = Number(overlay.terrainCellSize);
+  const source = overlay.surfaceHeights;
+  const arrayLike = Array.isArray(source) || ArrayBuffer.isView(source);
+  if (!arrayLike
+    || !Number.isSafeInteger(columns) || !Number.isSafeInteger(rows)
+    || columns < 1 || rows < 1 || columns * rows > FOUNDATION_MAX_TERRAIN_CELLS
+    || !Number.isFinite(cellSize) || cellSize <= 0
+    || Math.abs(columns * cellSize - width) > 0.001
+    || Math.abs(rows * cellSize - depth) > 0.001
+    || source.length !== columns * rows) return null;
+  const absoluteHeights = new Float32Array(source.length);
+  let baseY = Infinity;
+  for (let index = 0; index < source.length; index += 1) {
+    const height = Number(source[index]);
+    if (!Number.isFinite(height)) return null;
+    absoluteHeights[index] = height;
+    baseY = Math.min(baseY, height);
+  }
+  if (!Number.isFinite(baseY)) return null;
+  const heights = new Float32Array(absoluteHeights.length);
+  for (let index = 0; index < absoluteHeights.length; index += 1) {
+    heights[index] = absoluteHeights[index] - baseY;
+  }
+  return {
+    columns,
+    rows,
+    cellSize,
+    width,
+    depth,
+    heights,
+    baseY,
+    revision: normalizedGeometryRevision(overlay.geometryRevision, absoluteHeights),
+  };
+}
+
+function normalizedGeometryKey(value, x, z, width, depth) {
+  const fallback = `${x}:${z}:${width}:${depth}`;
+  const key = String(value ?? fallback).trim();
+  return (key || fallback).slice(0, 256);
+}
+
+function normalizedGeometryRevision(value, heights) {
+  const explicit = String(value ?? "").trim();
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < heights.length; index += 1) {
+    hash ^= Math.round(heights[index] * 1_000);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  const contentRevision = `${heights.length}:${hash.toString(16).padStart(8, "0")}`;
+  return explicit ? `${explicit.slice(0, 220)}:${contentRevision}` : contentRevision;
 }
 
 function normalizeColor(value, fallback) {

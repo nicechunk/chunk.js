@@ -362,7 +362,7 @@ export class ChunkManager {
         getBlockAtWorld: (x, y, z) => this.getBlockAtWorld(x, y, z),
         getDeltaAtWorld: (x, y, z) => this.getDeltaAtWorld(x, y, z),
         getColumnTopAtWorld: (x, z) => this.getOpaqueColumnTopAtWorld(x, z),
-        getWaterLevelAtWorld: (x, z, surface = terrainSurfaceHeight(this.config, x, z)) => waterLevelAt(this.config, x, z, surface),
+        getWaterLevelAtWorld: (x, z, surface) => this.getWaterLevelAtWorld(x, z, surface),
         treeDeltaCandidateCount: this.treeDeltaCandidateCountForChunk(chunk.chunkX, chunk.chunkZ),
       };
       const meshStartedAt = performance.now();
@@ -466,6 +466,15 @@ export class ChunkManager {
     const top = this.minY - 1;
     this.cacheCollisionColumnTop(cacheKey, chunk, top);
     return top;
+  }
+
+  getWaterLevelAtWorld(worldX, worldZ, surface = undefined) {
+    const x = Math.trunc(worldX);
+    const z = Math.trunc(worldZ);
+    const terrainTop = Number.isFinite(Number(surface))
+      ? Math.trunc(Number(surface))
+      : this.getOpaqueColumnTopAtWorld(x, z);
+    return waterLevelAt(this.config, x, z, terrainTop);
   }
 
   getCollisionBlockAtWorld(worldX, worldY, worldZ) {
