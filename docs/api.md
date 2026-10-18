@@ -301,8 +301,15 @@ components, masks, material statistics, and design identity unchanged. Pass
 The mesher defaults to `positionScale: 128`; the native workbench uses 2048 to
 resolve small stock and cut faces. Mesh consumers must use the returned
 `positionScale` when unpacking vertices. Hammering and normalization retain exact
-geometric material volume, including tiny components; a strike may be unchanged
-when no valid integer dimensions conserve that volume.
+geometric material volume, including tiny components. When integer placement
+dimensions cannot compress rectangular stock, hammering uses occupied cells of
+the finer 14x10x14 component grid and exact tangent-dimension factors instead.
+Editable machining drafts retain an optional reduced `materialCellScale` ratio
+so deformation preserves material mass, while later cuts still remove material.
+Legacy drafts omit this ratio and use `[1, 1]`. A strike remains unchanged at an
+actual occupied-cell or dimension limit, or when it would invalidate machining.
+Runtime assets use 2048 positions/metre for small components so thin shapes do
+not collapse to the coarser default mesh in Play or item previews.
 
 All NCF1 conversion and decode paths enforce the 640-byte format ceiling before copying a BufferSource or decoding Base64URL. The largest canonical unpadded Base64URL body is 854 characters. `forgeCodeToBytes()` rejects cyclic wrappers, non-byte array values, unsupported input types, and invalid caller-supplied byte limits.
 

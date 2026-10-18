@@ -4,7 +4,7 @@ import {
   createForgeDesign,
   forgeVoxelIndex,
 } from "./forge-core.js";
-import { createForgeRuntimeAsset } from "./forge-runtime-cache.js";
+import { createForgeRuntimeAsset } from "./forge-runtime-cache.js?v=62e1412238d51189";
 import {
   DEFAULT_PEASANT_GUY_NCM,
   createAvatarMeshFromNcm,

@@ -875,6 +875,8 @@ export function serializeForgeMachiningState(input) {
     referenceDimsQ: [...state.referenceDimsQ],
     baseSolidBits: state.stamps.length ? encodeMachiningSolid(state.baseSolid) : null,
     stamps: state.stamps.map(serializeForgeMachiningStamp),
+    ...(state.materialCellScale[0] !== state.materialCellScale[1]
+      ? { materialCellScale: [...state.materialCellScale] } : {}),
   };
 }
 
@@ -1079,8 +1081,10 @@ export function hammerForgeComponent(input, options = {}) {
   const spreadQ = options.spreadQ == null
     ? null
     : integerInRange(options.spreadQ, 0, 255, "hammer spread");
+  if (compressionBps === 10_000 && spreadQ == null) return component;
   if (component.dimsQ[axis] <= 4 && spreadQ == null && !machining.stamps.length) {
-    return hammerSmallForgeStock(component, footprint, machining, options.side != null);
+    const next = hammerSmallForgeStock(component, footprint, machining, options.side != null);
+    return next !== component ? next : hammerForgeStockCells(component, footprint, machining, options);
   }
   let targetAxisQ = Math.max(4, Math.floor((component.dimsQ[axis] * compressionBps + 5_000) / 10_000));
   const hasSide = options.side != null;
@@ -1149,7 +1153,9 @@ export function hammerForgeComponent(input, options = {}) {
       paintQuads: pruneForgePaintQuads(component.paintQuads, resolved.solid),
     };
   }
-  return component;
+  return spreadQ == null && !machining.stamps.length
+    ? hammerForgeStockCells(component, footprint, machining, options)
+    : component;
 }
 
 function hammerSmallForgeStock(component, footprint, machining, anchored) {
@@ -1182,6 +1188,95 @@ function hammerSmallForgeStock(component, footprint, machining, anchored) {
     return { ...next, machining: createForgeMachiningCheckpoint(next) };
   }
   return component;
+}
+
+// Placement dimensions stop at 1/64 metre, but the canonical solid mask has
+// 14x10x14 cells inside that envelope. Compress rectangular stock on this finer
+// grid when no integer envelope deformation is possible. Exact factor pairs
+// spread the other dimensions without changing occupied geometric volume.
+function hammerForgeStockCells(component, footprint, machining, options) {
+  const axis = footprint.axis;
+  const axes = tangentAxes(axis);
+  const spans = FORGE_GRID_SIZES.map((_, candidate) => occupiedAxisSpan(component.solid, candidate));
+  if (spans.some((span) => !span)
+    || spans.reduce((count, span) => count * span.length, 1) !== forgeSolidCellCount(component)) return component;
+  const span = spans[axis];
+  const oldA = component.dimsQ[axes[0]], oldB = component.dimsQ[axes[1]];
+  const product = oldA * oldB * span.length;
+  const compressionBps = options.compressionBps ?? 8_800;
+  let best = null;
+  for (let length = span.length - 1; length >= 1; length -= 1) {
+    if (product % length) continue;
+    const tangentProduct = product / length;
+    for (let a = oldA; a <= 255; a += 1) {
+      if (tangentProduct % a) continue;
+      const b = tangentProduct / a;
+      if (b < oldB || b > 255) continue;
+      const score = [
+        Math.abs(length * 10_000 - span.length * compressionBps),
+        Math.abs(a * oldB - b * oldA), a + b, a,
+      ];
+      if (!best || compareIntegerTuples(score, best.score) < 0) best = { length, a, b, score };
+    }
+  }
+  if (!best) return component;
+  const min = options.side != null
+    ? footprint.side ? span.min : span.max - best.length + 1
+    : span.min + Math.floor((span.length - best.length) / 2);
+  const solid = new Uint8Array(component.solid.length);
+  for (let index = 0; index < solid.length; index += 1) {
+    if (!component.solid[index]) continue;
+    const cell = forgeCellFromIndex(index);
+    if (cell[axis] >= min && cell[axis] < min + best.length) solid[index] = 1;
+  }
+  const dimsQ = [...component.dimsQ];
+  dimsQ[axes[0]] = best.a;
+  dimsQ[axes[1]] = best.b;
+  const offsetQ = [...component.offsetQ];
+  if (options.center != null) for (const tangent of axes) {
+    const deltaQ = dimsQ[tangent] - component.dimsQ[tangent];
+    const bias = forgeFootprintAxisBias(footprint, tangent);
+    if (bias && deltaQ % 2 === 0) offsetQ[tangent] = clampInteger(offsetQ[tangent] + bias * deltaQ / 2, -512, 511);
+  }
+  const next = {
+    ...component, dimsQ, offsetQ, solid,
+    grip: rescaledForgeGrip(component.grip, component.dimsQ, dimsQ),
+    paintQuads: compressedForgeStockPaint(component, solid, axis, span, min, best.length),
+  };
+  if (next.grip) {
+    const oldMinQ = component.dimsQ[axis] * (span.min / FORGE_GRID_SIZES[axis] - 0.5);
+    const nextMinQ = component.dimsQ[axis] * (min / FORGE_GRID_SIZES[axis] - 0.5);
+    next.grip.offsetQ[axis] = clampInteger(Math.round(nextMinQ
+      + (component.grip.offsetQ[axis] - oldMinQ) * best.length / span.length), -512, 511);
+  }
+  const materialCellScale = normalizeForgeMaterialCellScale([
+    machining.materialCellScale[0] * span.length,
+    machining.materialCellScale[1] * best.length,
+  ]);
+  return { ...next, machining: createForgeMachiningCheckpoint(next, materialCellScale) };
+}
+
+function compressedForgeStockPaint(component, solid, axis, span, min, length) {
+  if (!component.paintQuads?.length) return [];
+  const original = forgePaintCellMap(component.paintQuads);
+  const result = new Map();
+  for (let index = 0; index < solid.length; index += 1) {
+    if (!solid[index]) continue;
+    const cell = forgeCellFromIndex(index);
+    const source = [...cell];
+    source[axis] = span.min + Math.floor((2 * (cell[axis] - min) + 1) * span.length / (2 * length));
+    for (let faceAxis = 0; faceAxis < 3; faceAxis += 1) for (const side of [0, 1]) {
+      if (!isExposedForgeFace(solid, cell, faceAxis, side)) continue;
+      const tangents = tangentAxes(faceAxis);
+      const plane = cell[faceAxis] + side;
+      const sourcePlane = faceAxis === axis ? side ? span.max + 1 : span.min : plane;
+      const paint = original.get(paintFaceCellKey(faceAxis, side, sourcePlane, source[tangents[0]], source[tangents[1]]));
+      if (!paint) continue;
+      const u = cell[tangents[0]], v = cell[tangents[1]];
+      result.set(paintFaceCellKey(faceAxis, side, plane, u, v), { axis: faceAxis, side, plane, u, v, color444: paint.color444 });
+    }
+  }
+  return forgePaintQuadsFromCellMap(result);
 }
 
 export function normalizeForgeComponent(input, options = {}) {
@@ -1556,14 +1651,20 @@ function forgePhysicalAdvisory(analysis) {
   // 140 is divisible by 2*14 and 2*10, so every cell center is an exact
   // integer on this private lattice even though the component dimensions use
   // Q6 coordinates. Every occupied cell of one material receives the same
-  // volume*density weight; the common 1/1960 factor cancels from all ratios.
+  // volume*density weight, calibrated after sub-Q deformation. A common cell
+  // scale denominator and the common 1/1960 factor cancel from all ratios.
   const coordinateScale = 140n;
+  const cellScales = analysis.components.map((component) => component.machining
+    ? normalizeForgeMachiningState(component, component.machining).materialCellScale : [1, 1]);
+  const cellScaleDenominator = cellScales.reduce((product, scale) => product * BigInt(scale[1]), 1n);
   let totalMomentWeight = 0n;
   const centerMoment = [0n, 0n, 0n];
   const originInertiaMoment12 = [0n, 0n, 0n];
   for (let componentIndex = 0; componentIndex < analysis.components.length; componentIndex += 1) {
     const material = analysis.materials[componentIndex];
-    const cellWeight = BigInt(material.volumeMm3) * BigInt(material.profile.densityKgM3);
+    const cellScale = cellScales[componentIndex];
+    const cellWeight = BigInt(material.volumeMm3) * BigInt(material.profile.densityKgM3)
+      * BigInt(cellScale[0]) * (cellScaleDenominator / BigInt(cellScale[1]));
     const moments = forgeComponentMassMoments(analysis.components[componentIndex]);
     totalMomentWeight += cellWeight * BigInt(moments.solidCellCount);
     for (let axis = 0; axis < 3; axis += 1) {
@@ -1756,7 +1857,12 @@ function analyzeForgeWorkbench(input, materialInputs, options) {
     const componentSolidCells = forgeSolidCellCount(component.solid);
     componentSolidCellCounts[index] = componentSolidCells;
     solidCellCount += componentSolidCells;
-    const componentVolumeMm3 = Math.floor(material.volumeMm3 * componentSolidCells / FORGE_WORKBENCH_SOLID_CELL_COUNT);
+    const cellScale = component.machining
+      ? normalizeForgeMachiningState(component, component.machining).materialCellScale : [1, 1];
+    const componentVolumeMm3 = Math.min(material.volumeMm3, Number(
+      BigInt(material.volumeMm3) * BigInt(componentSolidCells) * BigInt(cellScale[0])
+      / (BigInt(FORGE_WORKBENCH_SOLID_CELL_COUNT) * BigInt(cellScale[1])),
+    ));
     componentVolumesMm3[index] = componentVolumeMm3;
     usedVolumeMm3 = checkedSafeAdd(usedVolumeMm3, componentVolumeMm3, "used forge material volume");
     // With integer kg/m3 and mm3 inputs, this product is an exact microgram
@@ -2298,11 +2404,12 @@ function forgeFootprintAxisBias(footprint, axis) {
   return signal < 0 ? -1 : 1;
 }
 
-function createForgeMachiningCheckpoint(component) {
+function createForgeMachiningCheckpoint(component, materialCellScale = component.machining?.materialCellScale) {
   return finalizeForgeMachiningState(
     [...component.dimsQ],
     new Uint8Array(component.solid),
     [],
+    materialCellScale,
   );
 }
 
@@ -2317,6 +2424,7 @@ function cloneForgeMachiningState(input, { copySolid = true } = {}) {
     [...state.referenceDimsQ],
     copySolid ? new Uint8Array(state.baseSolid) : state.baseSolid,
     state.stamps.map((stamp) => cloneForgeMachiningStamp(stamp)),
+    state.materialCellScale,
   );
 }
 
@@ -2337,6 +2445,7 @@ function normalizeForgeMachiningState(component, input) {
     referenceDimsQ,
     baseSolid,
     sourceStamps.map(normalizeForgeMachiningStamp),
+    normalizeForgeMaterialCellScale(input.materialCellScale),
   );
 }
 
@@ -2346,7 +2455,8 @@ function normalizeSerializedForgeMachiningState(component, record) {
   }
   assertSerializedMachiningKeys(
     record,
-    ["kind", "referenceDimsQ", "baseSolidBits", "stamps"],
+    ["kind", "referenceDimsQ", "baseSolidBits", "stamps",
+      ...(Object.hasOwn(record, "materialCellScale") ? ["materialCellScale"] : [])],
     "Forge machining draft state",
     "invalid-machining-state",
   );
@@ -2378,6 +2488,7 @@ function normalizeSerializedForgeMachiningState(component, record) {
     referenceDimsQ: record.referenceDimsQ,
     baseSolid,
     stamps,
+    materialCellScale: normalizeForgeMaterialCellScale(record.materialCellScale),
   });
 }
 
@@ -2471,12 +2582,31 @@ function serializedMachiningEnum(input, allowed, label) {
   return input;
 }
 
-function finalizeForgeMachiningState(referenceDimsQ, baseSolid, stamps) {
+// Per-cell material volume grows when a sub-Q hammer strike expands the
+// envelope and compresses the occupied mask. Keep the reduced exact ratio in
+// editable drafts, so hammering does not count as a cut. NCF1 stores the final
+// geometry and equipment mass directly and does not need this editor state.
+function normalizeForgeMaterialCellScale(input = [1, 1]) {
+  if (!Array.isArray(input) || input.length !== 2
+    || input.some((value) => !Number.isSafeInteger(value) || value < 1)) {
+    throw new Ncf1ValidationError("Forge material cell scale is invalid.", "invalid-machining-state");
+  }
+  let a = input[0], b = input[1];
+  while (b) [a, b] = [b, a % b];
+  const ratio = input.map((value) => value / a);
+  if (ratio.some((value) => value > 255 ** 3)) {
+    throw new Ncf1ValidationError("Forge material cell scale exceeds its bounds.", "invalid-machining-state");
+  }
+  return ratio;
+}
+
+function finalizeForgeMachiningState(referenceDimsQ, baseSolid, stamps, materialCellScale = [1, 1]) {
   const state = {
     kind: FORGE_MACHINING_STATE_KIND,
     referenceDimsQ: Object.freeze([...referenceDimsQ]),
     baseSolid,
     stamps: Object.freeze(stamps.map((stamp) => Object.freeze(cloneForgeMachiningStamp(stamp)))),
+    materialCellScale: Object.freeze(normalizeForgeMaterialCellScale(materialCellScale)),
   };
   Object.freeze(state);
   verifiedForgeMachiningStates.add(state);
@@ -2547,6 +2677,7 @@ function appendForgeMachiningStamp(component, stampInput) {
     current.referenceDimsQ,
     current.baseSolid,
     [...current.stamps, normalizeForgeMachiningStamp(stampInput)],
+    current.materialCellScale,
   );
 }
 
@@ -2915,7 +3046,7 @@ function forgeMachiningStateFollowingDeformation(previousComponent, transformedC
     );
     return { ...cloneForgeMachiningStamp(stamp), centerQ };
   });
-  return finalizeForgeMachiningState(state.referenceDimsQ, state.baseSolid, stamps);
+  return finalizeForgeMachiningState(state.referenceDimsQ, state.baseSolid, stamps, state.materialCellScale);
 }
 
 function roundSignedRatio(numerator, denominator) {
@@ -3279,6 +3410,7 @@ function rotateForgeMachiningState(component, stateInput, mapping) {
     referenceDimsQ,
     rotateForgeSolid(state.baseSolid, mapping),
     stamps,
+    state.materialCellScale,
   );
 }
 
@@ -3498,6 +3630,12 @@ function occupiedAxisSpan(solid, axis) {
     }
   }
   return max < min ? null : { min, max, length: max - min + 1 };
+}
+
+function forgeCellFromIndex(index) {
+  return [index % FORGE_COMPONENT_GRID.x,
+    Math.floor(index / FORGE_COMPONENT_GRID.x) % FORGE_COMPONENT_GRID.y,
+    Math.floor(index / (FORGE_COMPONENT_GRID.x * FORGE_COMPONENT_GRID.y))];
 }
 
 function clearSolidAxisRange(solid, axis, min, max) {

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Let fresh centimetre-scale forge materials deform below the placement grid using canonical occupied cells, preserving exact geometric volume, material mass, painted faces, and editable draft restoration. Keep those thin shapes at workbench precision in gameplay and item previews.
+
 ### Added
 
 - Terrain-aware batched foundation overlays with per-cell surface heights, stepped boundaries, bounded GPU buffers, and optional x-ray grid lines.

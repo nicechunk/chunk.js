@@ -1,4 +1,5 @@
 import {
+  FORGE_COMPONENT_GRID,
   FORGE_FIXED_SCALE,
   FORGE_RESOURCE_IDS,
   NCF1_MAX_RAW_BYTES,
@@ -11,7 +12,7 @@ import {
   forgeDesignBoundsQ,
   forgeDesignMaterialSummary,
 } from "./forge-core.js";
-import { buildForgeDesignMesh } from "./forge-mesher.js?v=c91d4ba0bd9785ae";
+import { buildForgeDesignMesh, FORGE_EDIT_POSITION_SCALE } from "./forge-mesher.js?v=c91d4ba0bd9785ae";
 
 export const FORGE_RUNTIME_CACHE_DEFAULT_ENTRIES = 24;
 export const FORGE_RUNTIME_CACHE_DEFAULT_BYTES = 8 * 1024 * 1024;
@@ -35,7 +36,7 @@ export function forgeRuntimeGripFromDesign(input) {
 // restore path below.
 export function createForgeRuntimeAsset(input, { componentMaterialLayers = [] } = {}) {
   const design = canonicalizeForgeDesign(input);
-  const mesh = buildForgeDesignMesh(design, { componentMaterialLayers });
+  const mesh = buildForgeDesignMesh(design, { ...forgeRuntimeMeshOptions(design), componentMaterialLayers });
   const mode = design.appearance ? "appearance" : "components";
   assertRuntimeConsistency(design, mesh, mode);
   const clothComponentIndexes = Object.freeze((design.components ?? [])
@@ -105,7 +106,7 @@ export class ForgeRuntimeCache {
     this.metrics.decodeCount += 1;
     const design = decodeNcf1(bytes, { requireCanonical });
     this.metrics.meshBuildCount += 1;
-    const mesh = buildForgeDesignMesh(design);
+    const mesh = buildForgeDesignMesh(design, forgeRuntimeMeshOptions(design));
     const mode = design.appearance ? "appearance" : "components";
     const clothComponentIndexes = Object.freeze((design.components ?? [])
       .map((component, index) => component.resourceId === "cloth" ? index : -1)
@@ -185,6 +186,15 @@ export class ForgeRuntimeCache {
       this.metrics.evictions += 1;
     }
   }
+}
+
+function forgeRuntimeMeshOptions(design) {
+  // Sub-Q hammering and cuts must retain their occupied cells in Play and item
+  // previews too. The normal 128/metre packing can collapse a tiny face; use
+  // the workbench's bounded Int16 precision for centimetre-scale components.
+  const sizes = [FORGE_COMPONENT_GRID.x, FORGE_COMPONENT_GRID.y, FORGE_COMPONENT_GRID.z];
+  return design.components?.some((component) => component.dimsQ.some((value, axis) => value < sizes[axis]))
+    ? { positionScale: FORGE_EDIT_POSITION_SCALE } : {};
 }
 
 function runtimeInputBytes(input) {
