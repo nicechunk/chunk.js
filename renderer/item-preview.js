@@ -170,13 +170,15 @@ export function createVoxelItemIconCanvas(item = {}, options = {}) {
   ctx.clearRect(0, 0, size, size);
   const equipmentModelId = equipmentModelIdForItem(item);
   if (equipmentModelId) {
-    const parts = createEquipmentModelParts(equipmentModelId, { designHash: item.designHash });
-    drawEquipmentModel(ctx, size, equipmentModelId, parts);
     canvas.dataset.equipmentModelId = equipmentModelId;
-    const forgeSource = forgedPreviewSource(item);
-    if (equipmentModelId === EQUIPMENT_MODEL_ID.forgedPickaxe && forgeSource) {
-      canvas.dataset.forgePreviewState = "loading";
-      void upgradeForgedItemPreview(canvas, ctx, size, forgeSource, item.designHash, options);
+    if (equipmentModelId === EQUIPMENT_MODEL_ID.forgedPickaxe) {
+      const forgeSource = forgedPreviewSource(item);
+      canvas.dataset.forgePreviewState = forgeSource ? "loading" : "unavailable";
+      drawPendingForgedPreview(ctx, size);
+      if (forgeSource) void upgradeForgedItemPreview(canvas, ctx, size, forgeSource, item.designHash, options);
+    } else {
+      const parts = createEquipmentModelParts(equipmentModelId, { designHash: item.designHash });
+      drawEquipmentModel(ctx, size, equipmentModelId, parts);
     }
     return canvas;
   }
@@ -316,8 +318,14 @@ async function upgradeForgedItemPreview(canvas, ctx, size, source, designHash, o
     canvas.dataset.forgePreviewState = "ready";
     canvas.dataset.forgeDesignHash = String(runtime.designHash >>> 0);
   } catch {
-    canvas.dataset.forgePreviewState = "fallback";
+    canvas.dataset.forgePreviewState = "unavailable";
   }
+}
+
+function drawPendingForgedPreview(ctx, size) {
+  ctx.strokeStyle = "rgba(160,180,195,0.55)";
+  ctx.lineWidth = Math.max(1, size / 28);
+  ctx.strokeRect(size * 0.3, size * 0.3, size * 0.4, size * 0.4);
 }
 
 function forgedPreviewSource(item) {

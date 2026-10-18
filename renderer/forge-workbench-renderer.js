@@ -33,7 +33,7 @@ import {
   activeForgeMaterialSurfaceSet,
   createForgeMaterialCatalog,
   createForgeMaterialTextureArray,
-} from "./forge-material-surfaces.js?v=ce222bb171b4af73";
+} from "./forge-material-surfaces.js?v=47c0599e165fb8b6";
 
 export {
   FORGE_TOOL_VISUAL_IDS,

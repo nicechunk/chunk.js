@@ -137,6 +137,16 @@ export function forgeMaterialBaseColor(materialOrId, options = {}) {
   ]);
 }
 
+// NCF1 stores the base color alongside each component. Persist the same
+// recipe palette that the workbench texture uses, rather than its generic
+// iron/tin/handle archetype; consumers without the editor catalog can restore it.
+export function forgeMaterialBaseColor444(materialOrId, options = {}) {
+  const color = forgeMaterialBaseColor(materialOrId, options);
+  if (!color) return null;
+  const channels = color.slice(0, 3).map((value) => Math.round(value * 15 / 255));
+  return (channels[0] << 8) | (channels[1] << 4) | channels[2];
+}
+
 export function activeForgeMaterialSurfaceSet(materialIds = [], options = {}) {
   const requestedRecipes = Array.from(materialIds ?? [], (materialOrId) => (
     resolveForgeMaterialRecipe(materialOrId, options.catalog)

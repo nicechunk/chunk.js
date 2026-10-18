@@ -25,6 +25,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Expose the recipe base color as RGB444 for persistent forged appearances,
+  and show a neutral placeholder while a forged item's model is unavailable.
 - Reconstruct contact joints between opposed material faces separated by less
   than one placement step after hammer deformation. Editor, saved NCF1 codes,
   previews, and equipped items derive the same joint without changing masks or
