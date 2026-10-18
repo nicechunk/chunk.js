@@ -949,13 +949,16 @@ assert.deepEqual(materialCapacity.vector, [5_000, 44, 45], "slot capacity should
 const exactCapacity = compareForgeMaterialCapacity(materialRequirements, materialCapacity);
 assert.equal(exactCapacity.ok, true, "three-field material capacity should accept exact coverage");
 const missingVolume = compareForgeMaterialCapacity(materialRequirements, [4_999, 44, 45]);
-assert.equal(missingVolume.ok, false, "material capacity must reject volume one unit below the requirement");
+assert.equal(missingVolume.ok, true, "shape-derived volume does not block forging");
+assert.equal(missingVolume.withinCapacity, false, "the advisory comparison still exposes a volume deficit");
 assert.equal(missingVolume.fields[0].deficit, 1, "volume comparison should expose the exact integer deficit");
 const missingDurability = compareForgeMaterialCapacity(materialRequirements, [5_000, 43, 45]);
-assert.equal(missingDurability.ok, false, "material capacity must reject effective durability one unit below the requirement");
+assert.equal(missingDurability.ok, true, "shape-derived durability does not block forging");
+assert.equal(missingDurability.withinCapacity, false);
 assert.equal(missingDurability.fields[1].deficit, 1, "durability comparison should expose the exact integer deficit");
 const missingMass = compareForgeMaterialCapacity(materialRequirements, [5_000, 44, 44]);
-assert.equal(missingMass.ok, false, "material capacity must reject mass one gram below the output");
+assert.equal(missingMass.ok, true, "shape-derived mass does not block forging");
+assert.equal(missingMass.withinCapacity, false);
 assert.equal(missingMass.fields[2].deficit, 1, "mass comparison should expose the exact integer deficit");
 assert.throws(
   () => compareForgeMaterialCapacity([0, 0, 0], [0, 0, 0]),

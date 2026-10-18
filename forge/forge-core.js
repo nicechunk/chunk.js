@@ -617,11 +617,11 @@ export function compareForgeMaterialCapacity(requirementsInput, capacityInput) {
     : forgeMaterialRequirements(requirementsInput).vector;
   const capacity = normalizeForgeMaterialCapacity(capacityInput);
   const deficit = new Array(requirements.length);
-  let ok = true;
+  let withinCapacity = true;
   const fields = [];
   for (let index = 0; index < requirements.length; index += 1) {
     deficit[index] = Math.max(0, requirements[index] - capacity.vector[index]);
-    if (deficit[index]) ok = false;
+    if (deficit[index]) withinCapacity = false;
     fields.push({
       key: FORGE_MATERIAL_REQUIREMENT_KEYS[index],
       capacityKey: FORGE_MATERIAL_CAPACITY_KEYS[index],
@@ -631,7 +631,10 @@ export function compareForgeMaterialCapacity(requirementsInput, capacityInput) {
       ok: deficit[index] === 0,
     });
   }
-  return { ok, requirements, capacity: capacity.vector, capacityTotals: capacity, deficit, fields };
+  // Shape-derived capacity is advisory. Valid material selections may forge
+  // any encodable design; ownership and actual inventory spending are checked
+  // at the transaction boundary, independently of these design statistics.
+  return { ok: true, enforced: false, withinCapacity, requirements, capacity: capacity.vector, capacityTotals: capacity, deficit, fields };
 }
 
 export function createForgeMaterialProof(input) {
@@ -656,9 +659,7 @@ export function verifyForgeMaterialProof(input, proof, capacityInput = null) {
     }
     if (capacityInput == null) return { ok: true, expected };
     const comparison = compareForgeMaterialCapacity(expected, capacityInput);
-    return comparison.ok
-      ? { ok: true, expected, comparison }
-      : { ok: false, reason: "insufficient-material-capacity", expected, comparison };
+    return { ok: true, expected, comparison };
   } catch (error) {
     return { ok: false, reason: error?.code || "invalid-proof", error };
   }

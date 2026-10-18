@@ -25,6 +25,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Made Forge shape capacity advisory: otherwise valid designs remain eligible
+  regardless of volume, durability, or mass deficits. Comparisons retain
+  `withinCapacity` and deficit details; proof integrity checks remain enforced.
 - Documented Node.js 20 as the minimum development runtime.
 - Separated the self-contained `npm test` contract from host-dependent `npm run test:integration` checks.
 - Replaced the package check's undeclared system `tar` dependency with an actual local npm installation of the generated artifact.

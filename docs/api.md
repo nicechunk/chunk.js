@@ -288,6 +288,8 @@ NCF1 v14 is a bounded fixed-point format with editable-component and baked-appea
 
 `decodeNcf1()` parsing and canonical acceptance are separate concerns. Chain/runtime consumers should require canonical input where identity, hashing, caching, or proofs depend on a unique byte encoding. Display attributes are not automatically chain-enforced material capacities.
 
+`compareForgeMaterialCapacity()` treats shape-derived capacity as advisory. For valid inputs it returns `ok: true` and `enforced: false`; `withinCapacity`, `deficit`, and per-field comparisons still describe the actual fit. `verifyForgeMaterialProof()` continues to reject changed design hashes, mismatched requirement vectors, and malformed proofs, but a material-capacity deficit alone does not reject an otherwise valid shape. Hosts remain responsible for verifying material ownership and spending actual selected inventory.
+
 All NCF1 conversion and decode paths enforce the 640-byte format ceiling before copying a BufferSource or decoding Base64URL. The largest canonical unpadded Base64URL body is 854 characters. `forgeCodeToBytes()` rejects cyclic wrappers, non-byte array values, unsupported input types, and invalid caller-supplied byte limits.
 
 Forge v1 keeps gameplay and physical density independent. `attributes.density` and `densityScore` are bounded `1..100` gameplay scores. A particular-smelt attribute wins the recipe/base attribute; an explicit `densityScore` wins both. Only when neither score source exists may physical density supply the lower-priority score conversion, followed by the archetype score.
