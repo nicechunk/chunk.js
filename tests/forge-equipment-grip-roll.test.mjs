@@ -74,17 +74,16 @@ function forgedComponentBounds(mesh) {
   const part = mesh.parts.find((candidate) => candidate.forgedTool);
   assert.ok(part?.geometry?.vertices);
   const vertices = part.geometry.vertices;
-  const componentVertexCount = vertices.length / AVATAR_VERTEX_STRIDE_FLOATS / runtime.componentCount;
-  assert.equal(componentVertexCount, 24);
-  return Array.from({ length: runtime.componentCount }, (_, componentIndex) => {
-    const bounds = emptyBounds();
-    const start = componentIndex * componentVertexCount;
-    for (let index = start; index < start + componentVertexCount; index += 1) {
-      const offset = index * AVATAR_VERTEX_STRIDE_FLOATS;
-      includePoint(bounds, [vertices[offset], vertices[offset + 1], vertices[offset + 2]]);
-    }
-    return bounds;
-  });
+  const bounds = Array.from({ length: runtime.componentCount }, emptyBounds);
+  const packed = new DataView(runtime.mesh.vertices.buffer, runtime.mesh.vertices.byteOffset, runtime.mesh.vertices.byteLength);
+  const count = vertices.length / AVATAR_VERTEX_STRIDE_FLOATS;
+  assert.equal(count, runtime.mesh.vertexCount);
+  for (let index = 0; index < count; index++) {
+    const componentIndex = packed.getUint16(index * runtime.mesh.vertexStrideBytes + 14, true);
+    const offset = index * AVATAR_VERTEX_STRIDE_FLOATS;
+    includePoint(bounds[componentIndex], [vertices[offset], vertices[offset + 1], vertices[offset + 2]]);
+  }
+  return bounds;
 }
 
 function axisSpan(boundsList, axis) {

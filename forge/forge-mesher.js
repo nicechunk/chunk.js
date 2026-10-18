@@ -8,6 +8,10 @@ import {
 } from "./forge-core.js";
 
 export const FORGE_RENDER_POSITION_SCALE = FORGE_FIXED_SCALE * 2;
+// Editing centimetre stock needs sub-millimetre faces. The default packing
+// remains unchanged for world consumers; this optional scale still fits every
+// NCF1 component envelope (offset +/-8 m, dimensions below 4 m) in Int16.
+export const FORGE_EDIT_POSITION_SCALE = FORGE_FIXED_SCALE * 32;
 export const FORGE_MESH_VERTEX_STRIDE_BYTES = 16;
 export const FORGE_MESH_MATERIAL_LAYER_OFFSET = 9;
 export const FORGE_MESH_MATERIAL_LAYER_NONE = 255;
@@ -36,41 +40,54 @@ export function buildForgeCuboidMesh(cuboids = []) {
   return finishMesh(builder, pickBounds);
 }
 
-export function buildForgeDesignMesh(input, { componentMaterialLayers = [] } = {}) {
+export function buildForgeDesignMesh(input, {
+  componentMaterialLayers = [],
+  positionScale = FORGE_RENDER_POSITION_SCALE,
+  stitchContacts = true,
+} = {}) {
   const design = canonicalizeForgeDesign(input);
-  const builder = createMeshBuilder();
+  const builder = createMeshBuilder(positionScale);
   const pickBounds = [];
   if (design.appearance) {
     const firstIndex = builder.indices.length;
     const firstVertex = builder.vertices.length;
     builder.componentIndex = 0;
     appendAppearance(builder, design.appearance);
-    const halfP = design.appearance.dimsQ;
+    const halfP = design.appearance.dimsQ.map((value) => value * positionScale / FORGE_RENDER_POSITION_SCALE);
     const bounds = appendedVertexBounds(builder.vertices, firstVertex, halfP.map((value) => -value), halfP);
     pickBounds.push({
       id: "appearance",
       index: 0,
-      min: bounds.minP.map((value) => value / FORGE_RENDER_POSITION_SCALE),
-      max: bounds.maxP.map((value) => value / FORGE_RENDER_POSITION_SCALE),
+      min: bounds.minP.map((value) => value / positionScale),
+      max: bounds.maxP.map((value) => value / positionScale),
       firstIndex,
       indexCount: builder.indices.length - firstIndex,
       userData: { kind: "appearance" },
     });
   } else {
+    const parts = design.components.map((component, index) => {
+      const part = createMeshBuilder(positionScale);
+      part.componentIndex = index;
+      appendComponent(part, component, normalizeMaterialLayer(componentMaterialLayers[index]));
+      return part;
+    });
+    if (stitchContacts) appendContactJoints(parts, builder.contactJoints);
     for (let index = 0; index < design.components.length; index += 1) {
       const component = design.components[index];
       const firstIndex = builder.indices.length;
       const firstVertex = builder.vertices.length;
       builder.componentIndex = index;
-      appendComponent(builder, component, normalizeMaterialLayer(componentMaterialLayers[index]));
-      const envelopeMinP = component.offsetQ.map((value, axis) => value * 2 - component.dimsQ[axis]);
-      const envelopeMaxP = component.offsetQ.map((value, axis) => value * 2 + component.dimsQ[axis]);
+      const part = parts[index];
+      builder.vertices.push(...part.vertices);
+      for (const vertex of part.indices) builder.indices.push(vertex + firstVertex);
+      const envelopeMinP = component.offsetQ.map((value, axis) => gridBoundaryP(value, component.dimsQ[axis], 1, 0, positionScale));
+      const envelopeMaxP = component.offsetQ.map((value, axis) => gridBoundaryP(value, component.dimsQ[axis], 1, 1, positionScale));
       const bounds = appendedVertexBounds(builder.vertices, firstVertex, envelopeMinP, envelopeMaxP);
       pickBounds.push({
         id: `component-${index}`,
         index,
-        min: bounds.minP.map((value) => value / FORGE_RENDER_POSITION_SCALE),
-        max: bounds.maxP.map((value) => value / FORGE_RENDER_POSITION_SCALE),
+        min: bounds.minP.map((value) => value / positionScale),
+        max: bounds.maxP.map((value) => value / positionScale),
         firstIndex,
         indexCount: builder.indices.length - firstIndex,
         userData: { kind: "component", resourceId: component.resourceId },
@@ -78,6 +95,59 @@ export function buildForgeDesignMesh(input, { componentMaterialLayers = [] } = {
     }
   }
   return finishMesh(builder, pickBounds);
+}
+
+// Integer-Q centres can leave less than one placement step between opposed
+// faces after hammering. Such faces already form a connected assembly in the
+// workbench. Reconstruct their joint from the encoded components so the same
+// seam is closed in the editor, saved codes, previews, and equipped items.
+function appendContactJoints(parts, joints) {
+  const faces = parts.map((part) => {
+    const result = [];
+    for (let index = 0; index < part.vertices.length; index += 4) {
+      const vertices = part.vertices.slice(index, index + 4);
+      const axis = vertices[0].normal.findIndex((value) => value !== 0);
+      const min = [0, 1, 2].map((a) => Math.min(...vertices.map((vertex) => vertex.point[a])));
+      const max = [0, 1, 2].map((a) => Math.max(...vertices.map((vertex) => vertex.point[a])));
+      if (tangentAxes(axis).some((a) => min[a] >= max[a])) continue;
+      result.push({ axis, side: vertices[0].normal[axis] > 0 ? 1 : 0, min, max,
+        color444: vertices[0].color444, materialLayer: vertices[0].materialLayer });
+    }
+    return result;
+  });
+  const bounds = parts.map((part) => appendedVertexBounds(part.vertices, 0, [0, 0, 0], [0, 0, 0]));
+  const step = parts[0]?.positionScale / FORGE_FIXED_SCALE;
+  for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
+    for (const axis of [0, 1, 2]) {
+      let left = i, right = j;
+      if (bounds[i].minP[axis] > bounds[j].minP[axis]) [left, right] = [j, i];
+      const low = bounds[left].maxP[axis], high = bounds[right].minP[axis];
+      const gap = high - low;
+      if (!(gap > 0 && gap < step)) continue;
+      const tangents = tangentAxes(axis);
+      if (tangents.some((a) => bounds[left].maxP[a] <= bounds[right].minP[a]
+        || bounds[right].maxP[a] <= bounds[left].minP[a])) continue;
+      const leftFaces = faces[left].filter((face) => face.axis === axis && face.side === 1 && face.max[axis] === low);
+      const rightFaces = faces[right].filter((face) => face.axis === axis && face.side === 0 && face.min[axis] === high);
+      for (const a of leftFaces) for (const b of rightFaces) {
+        const min = [0, 0, 0], max = [0, 0, 0];
+        min[axis] = low; max[axis] = high;
+        for (const tangent of tangents) {
+          min[tangent] = Math.max(a.min[tangent], b.min[tangent]);
+          max[tangent] = Math.min(a.max[tangent], b.max[tangent]);
+        }
+        if (tangents.some((tangent) => min[tangent] >= max[tangent])) continue;
+        // End caps already belong to the two encoded materials. Only the
+        // joint's exterior sides are needed; real holes have no facing area.
+        for (const tangent of tangents) for (const side of [0, 1]) {
+          appendAxisQuad(parts[left], tangent, side, min, max, a.color444, a.materialLayer);
+        }
+        joints.push({ axis, components: [left, right],
+          min: min.map((value) => value / parts[left].positionScale),
+          max: max.map((value) => value / parts[left].positionScale) });
+      }
+    }
+  }
 }
 
 export function forgeMeshColorRgba(color444, alpha = 255) {
@@ -169,11 +239,11 @@ function appendGridQuad(builder, {
   const axes = tangentAxes(axis);
   const min = [0, 0, 0];
   const max = [0, 0, 0];
-  min[axis] = max[axis] = gridBoundaryP(offsetQ[axis], dimsQ[axis], grid[axis], plane);
-  min[axes[0]] = gridBoundaryP(offsetQ[axes[0]], dimsQ[axes[0]], grid[axes[0]], u0);
-  max[axes[0]] = gridBoundaryP(offsetQ[axes[0]], dimsQ[axes[0]], grid[axes[0]], u1);
-  min[axes[1]] = gridBoundaryP(offsetQ[axes[1]], dimsQ[axes[1]], grid[axes[1]], v0);
-  max[axes[1]] = gridBoundaryP(offsetQ[axes[1]], dimsQ[axes[1]], grid[axes[1]], v1);
+  min[axis] = max[axis] = gridBoundaryP(offsetQ[axis], dimsQ[axis], grid[axis], plane, builder.positionScale);
+  min[axes[0]] = gridBoundaryP(offsetQ[axes[0]], dimsQ[axes[0]], grid[axes[0]], u0, builder.positionScale);
+  max[axes[0]] = gridBoundaryP(offsetQ[axes[0]], dimsQ[axes[0]], grid[axes[0]], u1, builder.positionScale);
+  min[axes[1]] = gridBoundaryP(offsetQ[axes[1]], dimsQ[axes[1]], grid[axes[1]], v0, builder.positionScale);
+  max[axes[1]] = gridBoundaryP(offsetQ[axes[1]], dimsQ[axes[1]], grid[axes[1]], v1, builder.positionScale);
   appendAxisQuad(builder, axis, side, min, max, color444, materialLayer);
 }
 
@@ -227,8 +297,12 @@ function appendedVertexBounds(vertices, firstVertex, fallbackMinP, fallbackMaxP)
   return { minP, maxP };
 }
 
-function createMeshBuilder() {
-  return { vertices: [], indices: [], componentIndex: 0 };
+function createMeshBuilder(positionScale = FORGE_RENDER_POSITION_SCALE) {
+  if (!Number.isInteger(positionScale) || positionScale < FORGE_RENDER_POSITION_SCALE
+    || positionScale > FORGE_EDIT_POSITION_SCALE || positionScale % FORGE_RENDER_POSITION_SCALE) {
+    throw new RangeError("Unsupported forge render position scale.");
+  }
+  return { vertices: [], indices: [], componentIndex: 0, positionScale, contactJoints: [] };
 }
 
 function finishMesh(builder, pickBounds) {
@@ -255,13 +329,14 @@ function finishMesh(builder, pickBounds) {
   return {
     vertices: data,
     indices,
-    positionScale: FORGE_RENDER_POSITION_SCALE,
+    positionScale: builder.positionScale,
     vertexStrideBytes: FORGE_MESH_VERTEX_STRIDE_BYTES,
     vertexCount: builder.vertices.length,
     indexCount: indices.length,
     triangleCount: indices.length / 3,
     byteLength: data.byteLength + indices.byteLength,
     pickBounds,
+    contactJoints: builder.contactJoints,
   };
 }
 
@@ -323,8 +398,9 @@ function greedyMask(mask, width, height, append, maxSpan = Number.POSITIVE_INFIN
   }
 }
 
-function gridBoundaryP(offsetQ, dimsQ, cells, coordinate) {
-  return offsetQ * 2 - dimsQ + Math.round(coordinate * dimsQ * 2 / cells);
+function gridBoundaryP(offsetQ, dimsQ, cells, coordinate, positionScale) {
+  return Math.round((offsetQ * 2 - dimsQ + coordinate * dimsQ * 2 / cells)
+    * positionScale / FORGE_RENDER_POSITION_SCALE);
 }
 
 function normalizeRenderColor(value) {

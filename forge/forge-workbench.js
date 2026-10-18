@@ -37,6 +37,10 @@ const verifiedForgeProfiles = new WeakSet();
 const verifiedForgeMaterials = new WeakSet();
 const verifiedForgeMachiningStates = new WeakSet();
 const forgeSpatialShapeCache = new WeakMap();
+// Match the editor mesh (2048 positions/metre). Q2 remains the public unit;
+// its fractional values are exact binary fractions on this finer lattice.
+const FORGE_SPATIAL_SUBDIVISIONS_Q2 = 16;
+const FORGE_CONTACT_MAX_GAP_Q2 = 2 - 1 / FORGE_SPATIAL_SUBDIVISIONS_Q2;
 const FORGE_GRID_SIZES = Object.freeze([
   FORGE_COMPONENT_GRID.x,
   FORGE_COMPONENT_GRID.y,
@@ -363,13 +367,47 @@ function comparePhysicalDimensionScores(left, right) {
 export function forgeWorkbenchComponentOffsetQ(index) {
   const position = integerInRange(index, 0, FORGE_WORKBENCH_MAX_COMPONENTS - 1, "forge component position");
   if (position === 0) return [0, 0, 0];
-  // Fill the remaining cells of a 5x5 plane while reserving its center for
-  // component zero. An 80-Q pitch keeps the standard material profiles from
-  // intersecting before gravity runs while still fitting all 24 on the flat
-  // work surface.
+  // Compact fallback for callers without scene bounds. The editor uses
+  // findForgeWorkbenchMaterialOffsetQ for actual sizes and available space.
   let cell = position - 1;
   if (cell >= 12) cell += 1;
-  return [(cell % 5 - 2) * 80, 0, (Math.floor(cell / 5) - 2) * 80];
+  return [(cell % 5 - 2) * 8, 0, (Math.floor(cell / 5) - 2) * 8];
+}
+
+export function findForgeWorkbenchMaterialOffsetQ(input, components, {
+  surfaceBounds,
+  preferredOffsetQ = [0, 0, 0],
+  gapQ = 1,
+} = {}) {
+  const component = assertComponent(input);
+  const preferred = normalizeOffsetQ(preferredOffsetQ);
+  if (!surfaceBounds?.min || !surfaceBounds?.max) return preferred;
+  const gap = Math.max(0, Math.trunc(Number(gapQ) || 0));
+  const ranges = [0, 2].map((axis) => {
+    const low = Math.max(-512, Math.ceil(surfaceBounds.min[axis] * FORGE_FIXED_SCALE + component.dimsQ[axis] / 2 + gap));
+    const high = Math.min(511, Math.floor(surfaceBounds.max[axis] * FORGE_FIXED_SCALE - component.dimsQ[axis] / 2 - gap));
+    // Stock larger than the deck stays centered, with visible overhang.
+    return low <= high ? [low, high] : [0, 0];
+  });
+  const peers = components.map(forgeComponentOccupiedBoundsQ2).filter(Boolean);
+  let best = null;
+  for (let x = ranges[0][0]; x <= ranges[0][1]; x += 1) {
+    for (let z = ranges[1][0]; z <= ranges[1][1]; z += 1) {
+      const offset = [x, 0, z];
+      let supportTop = 0;
+      for (const peer of peers) {
+        if ([0, 2].every((axis) => offset[axis] * 2 - component.dimsQ[axis] < peer.maxQ2[axis] + gap * 2
+          && offset[axis] * 2 + component.dimsQ[axis] > peer.minQ2[axis] - gap * 2)) {
+          supportTop = Math.max(supportTop, peer.maxQ2[1] + 1);
+        }
+      }
+      const distance = (x - preferred[0]) ** 2 + (z - preferred[2]) ** 2;
+      if (!best || supportTop < best.supportTop || supportTop === best.supportTop && distance < best.distance) {
+        best = { offset, supportTop, distance };
+      }
+    }
+  }
+  return best?.offset ?? preferred;
 }
 
 export function createForgeWorkbenchComponent(input = {}, options = {}) {
@@ -432,7 +470,8 @@ export function forgeComponentOccupiedBoundsQ2(input) {
   const boundaryQ2 = (axis, coordinate) => (
     component.offsetQ[axis] * 2
     - component.dimsQ[axis]
-    + Math.round(coordinate * component.dimsQ[axis] * 2 / sizes[axis])
+    + Math.round(coordinate * component.dimsQ[axis] * 2 / sizes[axis]
+      * FORGE_SPATIAL_SUBDIVISIONS_Q2) / FORGE_SPATIAL_SUBDIVISIONS_Q2
   );
   const minQ2 = minCell.map((coordinate, axis) => boundaryQ2(axis, coordinate));
   const maxQ2 = maxCell.map((coordinate, axis) => boundaryQ2(axis, coordinate + 1));
@@ -440,9 +479,8 @@ export function forgeComponentOccupiedBoundsQ2(input) {
 }
 
 // Returns one positive-volume box for every occupied lattice cell after the
-// same P (Q2, 1/128 world unit) boundary quantization used by the forge
-// mesher. Very small component dimensions can collapse a lattice cell to a
-// zero-width surface; those cells have no collision volume and are omitted.
+// same 1/2048 m boundary quantization used by the editor mesh. Results are
+// expressed in Q2 units; fractional Q2 coordinates must not be rounded again.
 export function forgeComponentSolidVoxelBoxesQ2(input, options = {}) {
   const component = assertComponent(input);
   const offsetQ = normalizeForgeSpatialOffsetQ(options?.offsetQ ?? component.offsetQ);
@@ -612,10 +650,85 @@ export function canTranslateForgeWorkbenchComponent(
   ).valid;
 }
 
+// Magnetic contact is an explicit editing operation, separate from collision
+// validation. Only one coordinate is adjusted, and the complete path must be
+// safe. Moving away from a neighbour always releases an automatic snap.
+export function snapForgeWorkbenchComponentTranslation(
+  componentsInput,
+  componentIndex,
+  requestedDeltaQ,
+  options = {},
+) {
+  const components = assertForgeSpatialComponents(componentsInput);
+  const validation = constrainForgeWorkbenchComponentTranslation(
+    components, componentIndex, requestedDeltaQ, options,
+  );
+  const component = components[componentIndex];
+  const base = validation.constrainedDeltaQ;
+  const radius = Math.max(0, Math.min(32, Math.trunc(Number(options.snapDistanceQ ?? 2))));
+  const automatic = options.automatic !== false;
+  const obstacles = components.map((peer, index) => index === componentIndex
+    ? null : forgeComponentVoxelShapeQ2(peer, peer.offsetQ));
+  let best = null;
+  const examined = new Set();
+  function consider(deltaQ, axis) {
+    const key = deltaQ.join(',');
+    if (examined.has(key)) return;
+    examined.add(key);
+    const offsetQ = component.offsetQ.map((value, a) => value + deltaQ[a]);
+    if (offsetQ.some((value) => value < -512 || value > 511)) return;
+    const shape = forgeComponentVoxelShapeQ2(component, offsetQ);
+    let contact = null;
+    for (let index = 0; index < obstacles.length; index += 1) {
+      const obstacle = obstacles[index];
+      if (!obstacle) continue;
+      const candidate = forgeVoxelShapesContactQ2(shape, obstacle, {
+        axis, direction: automatic ? requestedDeltaQ : null,
+      });
+      if (!candidate || axis != null && candidate.axis !== axis) continue;
+      if (automatic && requestedDeltaQ[candidate.axis] * candidate.sign <= 0) continue;
+      // A small drag beside an existing contact must not jump to the far
+      // side of a thin material or pull a piece back while it moves away.
+      if (automatic && deltaQ[candidate.axis] * candidate.sign <= 0) continue;
+      if (!contact || candidate.gapQ2 < contact.gapQ2
+        || candidate.gapQ2 === contact.gapQ2 && candidate.areaQ4 > contact.areaQ4) {
+        contact = { ...candidate, componentIndex: index };
+      }
+    }
+    if (!contact) return;
+    const distance2 = deltaQ.reduce((sum, value, a) => sum + (value - base[a]) ** 2, 0);
+    if (best && distance2 > best.distance2) return;
+    if (!forgeDirectTranslationValidation(components, componentIndex, deltaQ, options).valid) return;
+    if (!best || distance2 < best.distance2 || contact.gapQ2 < best.contact.gapQ2
+      || contact.gapQ2 === best.contact.gapQ2 && contact.areaQ4 > best.contact.areaQ4) {
+      best = { deltaQ, offsetQ, contact, distance2 };
+    }
+  }
+  consider([...base], null);
+  for (let distance = 1; distance <= radius; distance += 1) {
+    if (best && distance * distance > best.distance2) break;
+    for (let axis = 0; axis < 3; axis += 1) {
+      if (automatic && requestedDeltaQ[axis] === 0) continue;
+      for (const sign of [-1, 1]) {
+        const candidate = [...base];
+        candidate[axis] += sign * distance;
+        consider(candidate, axis);
+      }
+    }
+  }
+  return {
+    ...validation,
+    constrainedDeltaQ: best?.deltaQ ?? base,
+    constrainedOffsetQ: best?.offsetQ ?? validation.constrainedOffsetQ,
+    snapped: Boolean(best),
+    contact: best?.contact ?? null,
+  };
+}
+
 // Settling is authoritative integer geometry; animation can interpolate the
 // returned offset separately. Component centers remain integer Q, so a face
-// resting on an odd Q2 coordinate is rounded upward and has a harmless 1-Q2
-// air gap. Every other component field is structurally shared unchanged.
+// resting on a fractional-Q coordinate is rounded upward to the nearest
+// encodable centre. Every other field is structurally shared unchanged.
 export function settleForgeWorkbenchComponents(componentsInput, options = {}) {
   const components = assertForgeSpatialComponents(componentsInput);
   if (!components.length) return components;
@@ -714,9 +827,9 @@ export function settleForgeWorkbenchComponents(componentsInput, options = {}) {
 }
 
 // All components must be reachable through a positive-area shared face.
-// Because centers are encoded in integer Q, a non-negative face gap of one Q2
-// unit is the quantized equivalent of contact. Edge/corner proximity does not
-// create an assembly connection.
+// Integer-Q centres cannot express every voxel face contact. A gap of less
+// than one Q is connected only with positive face area: the next Q step would
+// penetrate the surface. Edge/corner proximity does not create a connection.
 export function forgeWorkbenchComponentsConnected(componentsInput) {
   const components = assertForgeSpatialComponents(componentsInput);
   if (!components.length) return false;
@@ -966,6 +1079,9 @@ export function hammerForgeComponent(input, options = {}) {
   const spreadQ = options.spreadQ == null
     ? null
     : integerInRange(options.spreadQ, 0, 255, "hammer spread");
+  if (component.dimsQ[axis] <= 4 && spreadQ == null && !machining.stamps.length) {
+    return hammerSmallForgeStock(component, footprint, machining, options.side != null);
+  }
   let targetAxisQ = Math.max(4, Math.floor((component.dimsQ[axis] * compressionBps + 5_000) / 10_000));
   const hasSide = options.side != null;
   const side = hasSide ? footprint.side : null;
@@ -974,7 +1090,7 @@ export function hammerForgeComponent(input, options = {}) {
     else if (targetAxisQ < component.dimsQ[axis]) targetAxisQ += 1;
   }
   const axes = tangentAxes(axis);
-  if (!forgeMachiningBaseSupportsDeformation(machining)) return component;
+  if (machining.stamps.length && !forgeMachiningBaseSupportsDeformation(machining)) return component;
   const axisStepQ = hasSide ? 2 : 1;
   const finalAxisQ = spreadQ == null
     ? component.dimsQ[axis] - axisStepQ
@@ -985,10 +1101,13 @@ export function hammerForgeComponent(input, options = {}) {
     dimsQ[axis] = candidateAxisQ;
     if (spreadQ == null) {
       const tangentDims = volumeConservingHammerTangents(component.dimsQ, axis, candidateAxisQ);
+      if (!tangentDims) continue;
       dimsQ[axes[0]] = tangentDims[0];
       dimsQ[axes[1]] = tangentDims[1];
     } else {
       for (const candidate of axes) dimsQ[candidate] = Math.min(255, dimsQ[candidate] + spreadQ);
+      if (dimsQ[0] * dimsQ[1] * dimsQ[2]
+        !== component.dimsQ[0] * component.dimsQ[1] * component.dimsQ[2]) continue;
     }
     const offsetQ = [...component.offsetQ];
     if (hasSide) {
@@ -1010,8 +1129,11 @@ export function hammerForgeComponent(input, options = {}) {
       { ...component, dimsQ, offsetQ },
       machining,
     );
-    const transformed = { ...component, dimsQ, offsetQ, machining: nextMachining };
-    if (!nextMachining.stamps.length) return transformed;
+    const transformed = {
+      ...component, dimsQ, offsetQ, machining: nextMachining,
+      grip: rescaledForgeGrip(component.grip, component.dimsQ, dimsQ),
+    };
+    if (!nextMachining.stamps.length) return { ...transformed, machining: createForgeMachiningCheckpoint(transformed) };
     const resolved = resolveForgeMachiningDeformation(
       component,
       transformed,
@@ -1030,29 +1152,56 @@ export function hammerForgeComponent(input, options = {}) {
   return component;
 }
 
+function hammerSmallForgeStock(component, footprint, machining, anchored) {
+  const axis = footprint.axis;
+  const axes = tangentAxes(axis);
+  const original = component.dimsQ;
+  const volumeQ3 = original[0] * original[1] * original[2];
+  // Small stock cannot satisfy the old 4Q minimum. Search exact integer
+  // factorizations, so a visible strike never creates or discards material.
+  for (let thickness = original[axis] - 1; thickness >= 1; thickness -= 1) {
+    if (volumeQ3 % thickness) continue;
+    const product = volumeQ3 / thickness;
+    let best = null;
+    for (let a = original[axes[0]]; a <= 255; a += 1) {
+      if (product % a) continue;
+      const b = product / a;
+      if (b < original[axes[1]] || b > 255) continue;
+      const score = Math.abs(a * original[axes[1]] - b * original[axes[0]]);
+      if (!best || score < best.score) best = { a, b, score };
+    }
+    if (!best) continue;
+    const dimsQ = [...original];
+    dimsQ[axis] = thickness;
+    dimsQ[axes[0]] = best.a;
+    dimsQ[axes[1]] = best.b;
+    const offsetQ = [...component.offsetQ];
+    if (anchored) offsetQ[axis] = clampInteger(offsetQ[axis]
+      + Math.round((thickness - original[axis]) / 2 * (footprint.side ? 1 : -1)), -512, 511);
+    const next = { ...component, dimsQ, offsetQ, grip: rescaledForgeGrip(component.grip, original, dimsQ) };
+    return { ...next, machining: createForgeMachiningCheckpoint(next) };
+  }
+  return component;
+}
+
 export function normalizeForgeComponent(input, options = {}) {
   const component = assertComponent(input);
   const strengthBps = integerInRange(options.strengthBps ?? 3_400, 1, 10_000, "forge normalize strength");
-  const averageQ = Math.round((component.dimsQ[0] + component.dimsQ[1] + component.dimsQ[2]) / 3);
-  const dimsQ = component.dimsQ.map((value) => clampInteger(
-    value + Math.round((averageQ - value) * strengthBps / 10_000),
-    4,
-    255,
-  ));
+  const dimsQ = volumeConservingNormalizeDimensions(component.dimsQ, strengthBps);
   if (dimsQ.every((value, axis) => value === component.dimsQ[axis])) return component;
   if (!component.machining) {
-    return forgeSolidCellCount(component.solid) === FORGE_WORKBENCH_SOLID_CELL_COUNT
-      ? { ...component, dimsQ }
-      : component;
+    return { ...component, dimsQ, grip: rescaledForgeGrip(component.grip, component.dimsQ, dimsQ) };
   }
   const machining = normalizeForgeMachiningState(component, component.machining);
+  const next = { ...component, dimsQ, grip: rescaledForgeGrip(component.grip, component.dimsQ, dimsQ) };
+  if (!machining.stamps.length) return checkpointUntrackedSolidMutation(component, next);
   if (!forgeMachiningBaseSupportsDeformation(machining)) return component;
   const nextMachining = forgeMachiningStateFollowingDeformation(
     component,
-    { ...component, dimsQ },
+    next,
     machining,
   );
-  const transformed = { ...component, dimsQ, machining: nextMachining };
+  const transformed = { ...next, machining: nextMachining };
   if (!nextMachining.stamps.length) return transformed;
   const resolved = resolveForgeMachiningDeformation(
     component,
@@ -1096,6 +1245,7 @@ export function sawForgeComponent(input, options = {}) {
 
 function sawForgeComponentAtHit(component, axis, options) {
   const footprint = resolveForgeToolFootprint(component, "saw", { ...options, axis });
+  if (needsVoxelScaleMachining(component)) return cutForgeVoxelFootprint(component, footprint);
   const machining = appendForgeMachiningStamp(
     component,
     createSawMachiningStamp(component, footprint, options),
@@ -1108,6 +1258,7 @@ function sawForgeComponentAtHit(component, axis, options) {
 export function drillForgeComponent(input, options = {}) {
   const component = assertComponent(input);
   const footprint = resolveForgeToolFootprint(component, "handDrill", options);
+  if (needsVoxelScaleMachining(component)) return cutForgeVoxelFootprint(component, footprint);
   const machining = appendForgeMachiningStamp(
     component,
     createDrillMachiningStamp(component, footprint, options),
@@ -1115,6 +1266,23 @@ export function drillForgeComponent(input, options = {}) {
   const solid = rasterizeForgeMachining(component, machining);
   if (equalSolid(component.solid, solid)) return component;
   return { ...component, machining, solid, paintQuads: pruneForgePaintQuads(component.paintQuads, solid) };
+}
+
+function needsVoxelScaleMachining(component) {
+  return component.dimsQ.some((value, axis) => value < FORGE_GRID_SIZES[axis]);
+}
+
+function cutForgeVoxelFootprint(component, footprint) {
+  // Integer-Q machining stamps are wider than a cell on small stock. The
+  // canonical solid mask can represent those cells directly, so commit the
+  // same footprint used to aim, retaining a checkpoint for draft restoration.
+  const solid = new Uint8Array(component.solid);
+  for (const cell of footprint.cells) solid[forgeVoxelIndex(...cell)] = 0;
+  preserveOneSolidCell(component.solid, solid);
+  if (equalSolid(component.solid, solid)) return component;
+  return checkpointUntrackedSolidMutation(component, {
+    ...component, solid, paintQuads: pruneForgePaintQuads(component.paintQuads, solid),
+  });
 }
 
 export function gripForgeComponent(input, options = {}) {
@@ -2050,34 +2218,62 @@ function volumeConservingHammerTangents(dimsQ, axis, nextAxisQ) {
   const oldA = dimsQ[axes[0]];
   const oldB = dimsQ[axes[1]];
   const targetProduct = dimsQ[axis] * oldA * oldB;
-  let best = [oldA, oldB];
+  if (targetProduct % nextAxisQ) return null;
+  const tangentProduct = targetProduct / nextAxisQ;
+  let best = null;
   let bestScore = null;
-  const firstA = oldA % 2 ? 5 : 4;
-  const firstB = oldB % 2 ? 5 : 4;
+  const firstA = oldA % 2 ? 1 : 2;
+  const firstB = oldB % 2 ? 1 : 2;
   for (let a = firstA; a <= 255; a += 2) {
-    for (let b = firstB; b <= 255; b += 2) {
-      const volumeError = Math.abs(nextAxisQ * a * b - targetProduct);
-      const volumeErrorBps = Math.floor(volumeError * 10_000 / Math.max(1, targetProduct));
-      const aspectCrossA = a * oldB;
-      const aspectCrossB = b * oldA;
-      const aspectError = Math.abs(aspectCrossA - aspectCrossB);
-      const aspectErrorBps = Math.floor(aspectError * 20_000 / Math.max(1, aspectCrossA + aspectCrossB));
-      const score = [
-        volumeErrorBps * 4 + aspectErrorBps,
-        volumeErrorBps,
-        aspectErrorBps,
-        volumeError,
-        Math.abs(a - oldA) + Math.abs(b - oldB),
-        a,
-        b,
-      ];
-      if (!bestScore || compareIntegerTuples(score, bestScore) < 0) {
-        best = [a, b];
-        bestScore = score;
-      }
+    if (tangentProduct % a) continue;
+    const b = tangentProduct / a;
+    if (b < firstB || b > 255 || b % 2 !== oldB % 2) continue;
+    const aspectCrossA = a * oldB;
+    const aspectCrossB = b * oldA;
+    const aspectError = Math.abs(aspectCrossA - aspectCrossB);
+    const aspectErrorBps = Math.floor(aspectError * 20_000 / Math.max(1, aspectCrossA + aspectCrossB));
+    const score = [aspectErrorBps, Math.abs(a - oldA) + Math.abs(b - oldB), a, b];
+    if (!bestScore || compareIntegerTuples(score, bestScore) < 0) {
+      best = [a, b];
+      bestScore = score;
     }
   }
   return best;
+}
+
+function volumeConservingNormalizeDimensions(original, strengthBps) {
+  const product = original[0] * original[1] * original[2];
+  const meanLog = Math.log(product) / 3;
+  const balance = (dims) => dims.reduce((sum, value) => sum + (Math.log(value) - meanLog) ** 2, 0);
+  const originalBalance = balance(original);
+  const idealLog = original.map((value) => Math.log(value) * (1 - strengthBps / 10_000)
+    + meanLog * strengthBps / 10_000);
+  let best = original;
+  let bestScore = Infinity;
+  for (let a = 1; a <= 255; a += 1) {
+    if (product % a) continue;
+    const remaining = product / a;
+    for (let b = 1; b <= 255; b += 1) {
+      if (remaining % b) continue;
+      const c = remaining / b;
+      if (c < 1 || c > 255) continue;
+      const dims = [a, b, c];
+      if (balance(dims) >= originalBalance - 1e-12) continue;
+      const score = dims.reduce((sum, value, axis) => sum + (Math.log(value) - idealLog[axis]) ** 2, 0);
+      if (score < bestScore - 1e-12) { best = dims; bestScore = score; }
+    }
+  }
+  return best;
+}
+
+function rescaledForgeGrip(grip, previousDimsQ, dimsQ) {
+  if (!grip) return null;
+  return {
+    ...grip,
+    offsetQ: grip.offsetQ.map((value, axis) => clampInteger(
+      roundSignedRatio(value * dimsQ[axis], previousDimsQ[axis]), -512, 511,
+    )),
+  };
 }
 
 function compareIntegerTuples(left, right) {
@@ -3421,12 +3617,32 @@ function rotateForgeGrip(grip, mapping) {
     offsetQ[entry.targetAxis] = clampInteger(grip.offsetQ[sourceAxis] * entry.sign, -512, 511);
   }
   const normal = mapping[grip.axis];
-  return {
+  const rotated = {
     offsetQ,
     axis: normal.targetAxis,
     sign: grip.sign * normal.sign,
-    rotation: grip.rotation,
+    rotation: 0,
   };
+  const sourceFront = forgeGripFrontVector(grip);
+  const front = [0, 0, 0];
+  for (let axis = 0; axis < 3; axis += 1) front[mapping[axis].targetAxis] = sourceFront[axis] * mapping[axis].sign;
+  for (let rotation = 0; rotation < 4; rotation += 1) {
+    const candidate = forgeGripFrontVector({ ...rotated, rotation });
+    if (candidate.every((value, axis) => value === front[axis])) return { ...rotated, rotation };
+  }
+  return rotated;
+}
+
+function forgeGripFrontVector(grip) {
+  const normal = [0, 0, 0];
+  normal[grip.axis] = grip.sign < 0 ? -1 : 1;
+  let front = grip.axis === 1 ? [0, 0, -normal[1]] : [0, 1, 0];
+  for (let turn = 0; turn < (Number(grip.rotation) & 3); turn += 1) {
+    front = [normal[1] * front[2] - normal[2] * front[1],
+      normal[2] * front[0] - normal[0] * front[2],
+      normal[0] * front[1] - normal[1] * front[0]];
+  }
+  return front;
 }
 
 function rotateForgePaint(component, targetSolid, mapping) {
@@ -3658,10 +3874,11 @@ function normalizeRequiredForgeFloorQ2(input) {
 
 function forgeComponentLocalBoundariesQ2(component) {
   return FORGE_GRID_SIZES.map((cells, axis) => {
-    const boundaries = new Int16Array(cells + 1);
+    const boundaries = new Float64Array(cells + 1);
     for (let coordinate = 0; coordinate <= cells; coordinate += 1) {
       boundaries[coordinate] = -component.dimsQ[axis]
-        + Math.round(coordinate * component.dimsQ[axis] * 2 / cells);
+        + Math.round(coordinate * component.dimsQ[axis] * 2 / cells
+          * FORGE_SPATIAL_SUBDIVISIONS_Q2) / FORGE_SPATIAL_SUBDIVISIONS_Q2;
     }
     return boundaries;
   });
@@ -3673,12 +3890,17 @@ function forgeComponentLocalBoundariesQ2(component) {
 function forgeComponentVoxelShapeQ2(component, offsetQInput) {
   const offsetQ = normalizeForgeSpatialOffsetQ(offsetQInput);
   const cacheable = offsetQ.every((value, axis) => value === component.offsetQ[axis]);
-  const cached = cacheable ? forgeSpatialShapeCache.get(component) : null;
+  const cached = forgeSpatialShapeCache.get(component);
   if (cached
     && cached.solid === component.solid
     && cached.offsetQ.every((value, axis) => value === component.offsetQ[axis])
     && cached.dimsQ.every((value, axis) => value === component.dimsQ[axis])) {
-    return cached.shape;
+    return cacheable ? cached.shape : forgeOffsetVoxelShapeQ2(cached.shape, offsetQ);
+  }
+  if (!cacheable) {
+    return forgeOffsetVoxelShapeQ2(
+      forgeComponentVoxelShapeQ2(component, component.offsetQ), offsetQ,
+    );
   }
   const boundaries = forgeComponentLocalBoundariesQ2(component);
   const columns = [];
@@ -3736,6 +3958,27 @@ function forgeComponentVoxelShapeQ2(component, offsetQInput) {
     });
   }
   return shape;
+}
+
+// A translation changes no voxel topology. Share the Y runs and shift their
+// X/Z columns instead of rebuilding the 1,960-cell shape on every pointer move.
+function forgeOffsetVoxelShapeQ2(shape, offsetQ) {
+  const deltaQ2 = offsetQ.map((value, axis) => (value - shape.offsetQ[axis]) * 2);
+  return {
+    ...shape,
+    offsetQ,
+    columns: shape.columns.map((column) => ({
+      ...column,
+      minXQ2: column.minXQ2 + deltaQ2[0],
+      maxXQ2: column.maxXQ2 + deltaQ2[0],
+      minZQ2: column.minZQ2 + deltaQ2[2],
+      maxZQ2: column.maxZQ2 + deltaQ2[2],
+    })),
+    bounds: shape.bounds ? {
+      minQ2: shape.bounds.minQ2.map((value, axis) => value + deltaQ2[axis]),
+      maxQ2: shape.bounds.maxQ2.map((value, axis) => value + deltaQ2[axis]),
+    } : null,
+  };
 }
 
 function forgeVoxelShapesOverlapQ2(left, right) {
@@ -4039,72 +4282,62 @@ function assertForgeSpatialShapesDoNotOverlap(shapes) {
 }
 
 function forgeVoxelShapesShareQuantizedFaceQ2(left, right) {
-  if (!left.columns.length || !right.columns.length) return false;
+  return Boolean(forgeVoxelShapesContactQ2(left, right));
+}
+
+function forgeVoxelShapesContactQ2(left, right, options = {}) {
+  if (!left.columns.length || !right.columns.length) return null;
   for (let axis = 0; axis < 3; axis += 1) {
     if (forgeIntervalSeparationQ2(
-      left.bounds.minQ2[axis],
-      left.bounds.maxQ2[axis],
-      right.bounds.minQ2[axis],
-      right.bounds.maxQ2[axis],
-    ) > 1) return false;
+      left.bounds.minQ2[axis], left.bounds.maxQ2[axis],
+      right.bounds.minQ2[axis], right.bounds.maxQ2[axis],
+    ) > FORGE_CONTACT_MAX_GAP_Q2) return null;
   }
-  if (left.full && right.full) return forgeBoundsShareQuantizedFaceQ2(left.bounds, right.bounds);
+  if (left.full && right.full) return forgeBoundsContactQ2(left.bounds, right.bounds, options);
+  let best = null;
   for (const leftColumn of left.columns) {
     for (const rightColumn of right.columns) {
-      const xGapQ2 = forgeIntervalSeparationQ2(
-        leftColumn.minXQ2,
-        leftColumn.maxXQ2,
-        rightColumn.minXQ2,
-        rightColumn.maxXQ2,
-      );
-      const zGapQ2 = forgeIntervalSeparationQ2(
-        leftColumn.minZQ2,
-        leftColumn.maxZQ2,
-        rightColumn.minZQ2,
-        rightColumn.maxZQ2,
-      );
-      const xOverlap = xGapQ2 < 0;
-      const zOverlap = zGapQ2 < 0;
+      if (forgeIntervalSeparationQ2(leftColumn.minXQ2, leftColumn.maxXQ2,
+        rightColumn.minXQ2, rightColumn.maxXQ2) > FORGE_CONTACT_MAX_GAP_Q2) continue;
+      if (forgeIntervalSeparationQ2(leftColumn.minZQ2, leftColumn.maxZQ2,
+        rightColumn.minZQ2, rightColumn.maxZQ2) > FORGE_CONTACT_MAX_GAP_Q2) continue;
       for (const leftY of leftColumn.intervalsY) {
-        const leftMinYQ2 = leftY.minQ2 + left.offsetQ[1] * 2;
-        const leftMaxYQ2 = leftY.maxQ2 + left.offsetQ[1] * 2;
+        const leftBox = {
+          minQ2: [leftColumn.minXQ2, leftY.minQ2 + left.offsetQ[1] * 2, leftColumn.minZQ2],
+          maxQ2: [leftColumn.maxXQ2, leftY.maxQ2 + left.offsetQ[1] * 2, leftColumn.maxZQ2],
+        };
         for (const rightY of rightColumn.intervalsY) {
-          const rightMinYQ2 = rightY.minQ2 + right.offsetQ[1] * 2;
-          const rightMaxYQ2 = rightY.maxQ2 + right.offsetQ[1] * 2;
-          const yGapQ2 = forgeIntervalSeparationQ2(
-            leftMinYQ2,
-            leftMaxYQ2,
-            rightMinYQ2,
-            rightMaxYQ2,
-          );
-          const yOverlap = yGapQ2 < 0;
-          if (xGapQ2 >= 0 && xGapQ2 <= 1 && yOverlap && zOverlap) return true;
-          if (yGapQ2 >= 0 && yGapQ2 <= 1 && xOverlap && zOverlap) return true;
-          if (zGapQ2 >= 0 && zGapQ2 <= 1 && xOverlap && yOverlap) return true;
+          const rightBox = {
+            minQ2: [rightColumn.minXQ2, rightY.minQ2 + right.offsetQ[1] * 2, rightColumn.minZQ2],
+            maxQ2: [rightColumn.maxXQ2, rightY.maxQ2 + right.offsetQ[1] * 2, rightColumn.maxZQ2],
+          };
+          const contact = forgeBoundsContactQ2(leftBox, rightBox, options);
+          if (contact && (!best || contact.gapQ2 < best.gapQ2
+            || contact.gapQ2 === best.gapQ2 && contact.areaQ4 > best.areaQ4)) best = contact;
         }
       }
     }
   }
-  return false;
+  return best;
 }
 
-function forgeBoundsShareQuantizedFaceQ2(left, right) {
+function forgeBoundsContactQ2(left, right, options = {}) {
+  let best = null;
   for (let axis = 0; axis < 3; axis += 1) {
-    const gapQ2 = forgeIntervalSeparationQ2(
-      left.minQ2[axis],
-      left.maxQ2[axis],
-      right.minQ2[axis],
-      right.maxQ2[axis],
-    );
-    if (gapQ2 < 0 || gapQ2 > 1) continue;
-    const axes = tangentAxes(axis);
-    if (forgeIntervalsOverlapPositiveQ2(
-      left.minQ2[axes[0]], left.maxQ2[axes[0]], right.minQ2[axes[0]], right.maxQ2[axes[0]],
-    ) && forgeIntervalsOverlapPositiveQ2(
-      left.minQ2[axes[1]], left.maxQ2[axes[1]], right.minQ2[axes[1]], right.maxQ2[axes[1]],
-    )) return true;
+    if (options.axis != null && options.axis !== axis) continue;
+    const sign = left.maxQ2[axis] <= right.minQ2[axis] ? 1 : -1;
+    if (options.direction && options.direction[axis] * sign <= 0) continue;
+    const gapQ2 = sign > 0 ? right.minQ2[axis] - left.maxQ2[axis]
+      : left.minQ2[axis] - right.maxQ2[axis];
+    if (gapQ2 < 0 || gapQ2 > FORGE_CONTACT_MAX_GAP_Q2) continue;
+    const [u, v] = tangentAxes(axis);
+    const overlapU = Math.min(left.maxQ2[u], right.maxQ2[u]) - Math.max(left.minQ2[u], right.minQ2[u]);
+    const overlapV = Math.min(left.maxQ2[v], right.maxQ2[v]) - Math.max(left.minQ2[v], right.minQ2[v]);
+    if (overlapU <= 0 || overlapV <= 0) continue;
+    const contact = { axis, sign, gapQ2, areaQ4: overlapU * overlapV };
+    if (!best || gapQ2 < best.gapQ2 || gapQ2 === best.gapQ2 && contact.areaQ4 > best.areaQ4) best = contact;
   }
-  return false;
+  return best;
 }
 
 function forgeIntervalSeparationQ2(leftMin, leftMax, rightMin, rightMax) {

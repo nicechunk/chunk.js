@@ -1,4 +1,4 @@
-import { FORGE_MESH_VERTEX_STRIDE_BYTES, FORGE_RENDER_POSITION_SCALE } from "../forge/forge-mesher.js";
+import { FORGE_MESH_VERTEX_STRIDE_BYTES, FORGE_RENDER_POSITION_SCALE } from "../forge/forge-mesher.js?v=7037b8c5287711e4";
 
 export const FORGE_TOOL_VISUAL_IDS = Object.freeze([
   "hammer",
@@ -108,15 +108,20 @@ export function sampleForgeToolVisualPose(value, input = {}) {
   if (toolId === "hammer") pose = sampleSwingTool(hit, camera, preview, progress, HAMMER_STRIKE_POINT, "hammer");
   else if (toolId === "axe") pose = sampleSwingTool(hit, camera, preview, progress, AXE_STRIKE_POINT, "axe");
   else if (toolId === "saw") pose = sampleSaw(hit, settings, elapsed);
-  else if (toolId === "handDrill") pose = sampleDrill(hit, elapsed);
+  else if (toolId === "handDrill") pose = sampleDrill(hit, elapsed, preview, progress);
   else if (toolId === "grip") pose = sampleGrip(hit, settings, preview, progress);
   else if (toolId === "paintBrush") pose = samplePaintBrush(hit, camera, preview, progress);
   if (!pose) return null;
+  const visualScale = clamp(Number(input.scale) || 1, 0.001, 2);
+  const basis = pose.basis ?? [...IDENTITY_BASIS];
+  const translation = pose.translation ?? [...hit.point];
   return {
     toolId,
-    basis: pose.basis ?? [...IDENTITY_BASIS],
-    translation: pose.translation ?? [...hit.point],
-    opacity: clamp(Number(pose.opacity ?? 1), 0, 1),
+    basis: basis.map((value) => value * visualScale),
+    translation: hit.point.map((value, axis) => value + (translation[axis] - value) * visualScale),
+    visualScale,
+    contactTarget: [...hit.point],
+    opacity: clamp(Number(pose.opacity ?? (preview ? 0.78 : 1)), 0, 1),
     unlit: clamp(Number(pose.unlit ?? 0), 0, 1),
     tint: finiteVector3(pose.tint) ?? [1, 1, 1],
     tintMix: clamp(Number(pose.tintMix ?? 0), 0, 1),
@@ -188,11 +193,7 @@ function sampleSwingTool(hit, cameraEye, preview, progress, strikePoint, toolId)
   const normal = hit.normal;
   const approach = scale(normal, -1);
   const base = basisFromUnitVectors([1, 0, 0], approach);
-  const viewDirection = normalize(subtract(cameraEye, hit.point));
-  let tangent = subtract(viewDirection, scale(normal, dot(viewDirection, normal)));
-  if (lengthSquared(tangent) < 1e-8) tangent = orthogonal(normal);
-  tangent = normalize(tangent);
-  const contactPoint = add(hit.point, scale(tangent, toolId === "hammer" ? 0.42 : 0.34));
+  const contactPoint = hit.point;
   const translation = subtract(contactPoint, transformBasis(base, strikePoint));
   let angle;
   if (preview) angle = -0.58;
@@ -211,17 +212,17 @@ function sampleSaw(hit, settings, elapsed) {
   const travel = Math.sin(elapsed * 28) * 0.24;
   return {
     basis: basisColumns(normalize(line), normalize(normal), side),
-    translation: add(add(hit.point, scale(normal, 0.18)), scale(line, travel)),
+    translation: add(add(hit.point, scale(normal, 0.1525)), scale(line, travel)),
   };
 }
 
-function sampleDrill(hit, elapsed) {
+function sampleDrill(hit, elapsed, preview, progress) {
   const approach = scale(hit.normal, -1);
   const basis = basisFromUnitVectors([1, 0, 0], approach);
-  const pulse = 0.06 + Math.sin(elapsed * 22) * 0.025;
+  const gap = preview ? 0.10 : -0.12 * Math.sin(progress * Math.PI);
   return {
     basis,
-    translation: add(add(hit.point, scale(hit.normal, 0.36)), scale(approach, pulse)),
+    translation: add(hit.point, scale(hit.normal, 0.66 + gap)),
     spinComponentIndex: 1,
     spinRadians: elapsed * 42,
   };
@@ -403,6 +404,7 @@ function finishBuilder(builder, toolId) {
   return {
     toolId,
     vertices: data,
+    positionScale: FORGE_RENDER_POSITION_SCALE,
     indices,
     vertexStrideBytes: FORGE_MESH_VERTEX_STRIDE_BYTES,
     vertexCount: builder.vertices.length,

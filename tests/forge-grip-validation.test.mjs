@@ -20,10 +20,10 @@ import {
   updateAvatarMeshVertices,
 } from "../renderer/avatar-mesh.js";
 
-const handleGrip = { offsetQ: [8, 0, 0], axis: 0, sign: 1, rotation: 0 };
+const handleGrip = { offsetQ: [2, 0, 0], axis: 0, sign: 1, rotation: 0 };
 const handle = createForgeComponent({
   resourceId: "handle",
-  dimsQ: [16, 64, 16],
+  dimsQ: [4, 32, 4],
   offsetQ: [0, 0, 0],
   grip: handleGrip,
 });
@@ -37,14 +37,16 @@ const oversizedValidation = validateForgeGripSurface(oversized, oversizedGrip);
 assert.equal(oversizedValidation.valid, false, "a full block cross-section must not fit in the hand");
 assert.equal(oversizedValidation.reason, "grip-too-large");
 
-const tinyGrip = { offsetQ: [4, 0, 0], axis: 0, sign: 1, rotation: 0 };
-const tiny = createForgeComponent({ dimsQ: [8, 8, 8], grip: tinyGrip });
+const tinyGrip = { offsetQ: [0, 0, 0], axis: 0, sign: 1, rotation: 0 };
+const tinySolid = new Uint8Array(1960);
+tinySolid[6 + 14 * (5 + 10 * 7)] = 1;
+const tiny = createForgeComponent({ dimsQ: [1, 1, 1], solid: tinySolid, grip: tinyGrip });
 const tinyValidation = validateForgeGripSurface(tiny, tinyGrip);
 assert.equal(tinyValidation.valid, false, "a tiny isolated surface must not provide enough palm contact");
 assert.equal(tinyValidation.reason, "contact-too-small");
 
-const penetratingGrip = { offsetQ: [0, 0, 8], axis: 2, sign: 1, rotation: 0 };
-const penetratingBar = createForgeComponent({ dimsQ: [255, 16, 16], grip: penetratingGrip });
+const penetratingGrip = { offsetQ: [0, 0, 2], axis: 2, sign: 1, rotation: 0 };
+const penetratingBar = createForgeComponent({ dimsQ: [255, 4, 4], grip: penetratingGrip });
 const penetratingValidation = validateForgeGripPlacement([penetratingBar], 0, penetratingGrip);
 assert.equal(penetratingValidation.valid, false, "a model crossing the avatar must be rejected");
 assert.equal(penetratingValidation.reason, "avatar-collision");
@@ -63,17 +65,17 @@ assert.equal(
 
 const shifted = createForgeComponent({
   resourceId: "handle",
-  dimsQ: [16, 64, 16],
+  dimsQ: [4, 32, 4],
   offsetQ: [80, 24, -40],
   grip: handleGrip,
 });
 const design = createForgeDesign({ components: [shifted] });
 assert.deepEqual(
   forgeRuntimeGripFromDesign(design).offsetQ,
-  [88, 24, -40],
+  [82, 24, -40],
   "runtime grip coordinates must include the owning component offset",
 );
-assert.deepEqual(createForgeRuntimeAsset(design).grip.offsetQ, [88, 24, -40]);
+assert.deepEqual(createForgeRuntimeAsset(design).grip.offsetQ, [82, 24, -40]);
 
 const equippedRuntime = createForgeRuntimeAsset(createForgeDesign({ components: [handle] }));
 const equippedAvatar = createAvatarMeshFromNcm(DEFAULT_PEASANT_GUY_NCM, {
@@ -92,7 +94,7 @@ assert.ok(toolBounds.max[1] >= handBounds.min[1], "the grip must touch or slight
 assert.ok(overlap(toolBounds.min[0], toolBounds.max[0], handBounds.min[0], handBounds.max[0]) > 0);
 assert.ok(overlap(toolBounds.min[2], toolBounds.max[2], handBounds.min[2], handBounds.max[2]) > 0);
 
-const alternate = createForgeComponent({ dimsQ: [16, 64, 16], offsetQ: [64, 0, 0], grip: handleGrip });
+const alternate = createForgeComponent({ dimsQ: [4, 32, 4], offsetQ: [64, 0, 0], grip: handleGrip });
 const unique = forgeComponentsWithSingleGrip([handle, alternate], 1, handleGrip);
 assert.equal(unique[0].grip, null, "setting a grip must remove every previous grip from the design");
 assert.deepEqual(unique[1].grip, handleGrip);

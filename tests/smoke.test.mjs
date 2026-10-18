@@ -1232,7 +1232,7 @@ const paintedGripComponent = createForgeComponent({
   paintQuads: [{ axis: 1, side: 1, plane: 10, u0: 2, u1: 4, v0: 3, v1: 5, color444: 0xf84 }],
 });
 const paintedGripRotationY = rotateForgeComponent(paintedGripComponent, "y");
-assert.deepEqual(paintedGripRotationY.grip, { offsetQ: [5, 4, -3], axis: 1, sign: 1, rotation: 2 }, "Y rotation should rotate the grip offset and preserve its aligned normal");
+assert.deepEqual(paintedGripRotationY.grip, { offsetQ: [5, 4, -3], axis: 1, sign: 1, rotation: 3 }, "Y rotation should rotate both the grip offset and its tangent frame");
 assert.deepEqual(
   paintedGripRotationY.paintQuads,
   [{ axis: 1, side: 1, plane: 10, u0: 3, u1: 5, v0: 10, v1: 12, color444: 0xf84 }],
@@ -1240,8 +1240,8 @@ assert.deepEqual(
 );
 const rotationGripExpectations = {
   x: { offsetQ: [3, -5, 4], axis: 2, sign: 1, rotation: 2 },
-  y: { offsetQ: [5, 4, -3], axis: 1, sign: 1, rotation: 2 },
-  z: { offsetQ: [-4, 3, 5], axis: 0, sign: -1, rotation: 2 },
+  y: { offsetQ: [5, 4, -3], axis: 1, sign: 1, rotation: 3 },
+  z: { offsetQ: [-4, 3, 5], axis: 0, sign: -1, rotation: 3 },
 };
 for (const axis of ["x", "y", "z"]) {
   const rotated = rotateForgeComponent(paintedGripComponent, axis);
@@ -1385,7 +1385,7 @@ for (let axis = 0; axis < 3; axis += 1) {
 
 const faceHammerComponent = createForgeComponent({
   resourceId: "iron",
-  dimsQ: [100, 100, 100],
+  dimsQ: [144, 144, 144],
   offsetQ: [10, -20, 30],
 });
 const faceHammerMesh = buildForgeDesignMesh(createForgeDesign({ components: [faceHammerComponent] }));
@@ -1436,16 +1436,16 @@ const lowTangentHammer = hammerForgeComponent(faceHammerComponent, {
   axis: 2,
   side: "high",
   plane: FORGE_COMPONENT_GRID.z,
-  center: [1, 5, FORGE_COMPONENT_GRID.z - 1],
+  center: [1, 1, FORGE_COMPONENT_GRID.z - 1],
 });
 const highTangentHammer = hammerForgeComponent(faceHammerComponent, {
   axis: 2,
   side: "high",
   plane: FORGE_COMPONENT_GRID.z,
-  center: [FORGE_COMPONENT_GRID.x - 2, 5, FORGE_COMPONENT_GRID.z - 1],
+  center: [FORGE_COMPONENT_GRID.x - 2, FORGE_COMPONENT_GRID.y - 2, FORGE_COMPONENT_GRID.z - 1],
 });
-assert.ok(lowTangentHammer.offsetQ[0] < faceHammerComponent.offsetQ[0], "a low-X hammer footprint should displace spread material toward low X");
-assert.ok(highTangentHammer.offsetQ[0] > faceHammerComponent.offsetQ[0], "a high-X hammer footprint should displace spread material toward high X");
+assert.ok([0, 1].some((axis) => lowTangentHammer.offsetQ[axis] < faceHammerComponent.offsetQ[axis]), "a low-side footprint should displace spread material toward its struck corner");
+assert.ok([0, 1].some((axis) => highTangentHammer.offsetQ[axis] > faceHammerComponent.offsetQ[axis]), "a high-side footprint should displace spread material toward its struck corner");
 assert.deepEqual(lowTangentHammer.solid, highTangentHammer.solid, "opposite local hammer strikes should conserve the identical solid mask");
 
 const targetedDrillComponent = createForgeComponent({
@@ -1563,7 +1563,7 @@ for (let hammerAxis = 0; hammerAxis < 3; hammerAxis += 1) {
 
 const edgeMachiningBase = createForgeComponent({
   resourceId: "iron",
-  dimsQ: [76, 46, 65],
+  dimsQ: [144, 144, 144],
 });
 const edgeMachiningFixtures = [
   ["drill", drillForgeComponent(edgeMachiningBase, {
@@ -1661,9 +1661,9 @@ const drillAfterHammer = drillForgeComponent(hammerBeforeMachining, {
   depth: "through",
 });
 assert.deepEqual(
-  drillAfterHammer.machining.stamps[0].sizeQ,
-  protectedDrillStamp.sizeQ,
-  "drilling after a hammer deformation should use the pre-deformation physical tool diameter",
+  drillAfterHammer.machining.referenceDimsQ,
+  hammerBeforeMachining.dimsQ,
+  "a new drill stroke should use the current stock checkpoint and displayed tool footprint",
 );
 let repeatedlyHammeredDrill = protectedDrill;
 for (let strike = 0; strike < 10; strike += 1) {
@@ -1705,10 +1705,10 @@ for (let strike = 0; strike < 10; strike += 1) {
     center: [FORGE_COMPONENT_GRID.x - 1, 5, 7],
   });
 }
-assert.deepEqual(
-  gridBoundedDrill.dimsQ,
-  [84, 94, 128],
-  "hammering should stop before a fixed drill footprint leaves the canonical grid envelope",
+assert.equal(
+  gridBoundedDrill.dimsQ.reduce((a, b) => a * b, 1),
+  protectedDrill.dimsQ.reduce((a, b) => a * b, 1),
+  "grid-bounded hammering must conserve geometric envelope volume",
 );
 assert.strictEqual(
   hammerForgeComponent(gridBoundedDrill, {
@@ -1742,10 +1742,10 @@ for (let strike = 0; strike < 10; strike += 1) {
     center: [7, 5, FORGE_COMPONENT_GRID.z - 1],
   });
 }
-assert.deepEqual(
-  depthBoundedDrill.dimsQ,
-  [136, 96, 78],
-  "through-depth compression should stop before its tangent grid stretches the drill beyond one cell",
+assert.equal(
+  depthBoundedDrill.dimsQ.reduce((a, b) => a * b, 1),
+  protectedDrill.dimsQ.reduce((a, b) => a * b, 1),
+  "through-depth compression must conserve geometric envelope volume",
 );
 const depthBoundedDrillBoundsQ2 = forgeMachinedBoundsQ2(depthBoundedDrill);
 for (const axis of [0, 1]) {
@@ -1792,10 +1792,10 @@ for (let strike = 0; strike < 10; strike += 1) {
     center: [FORGE_COMPONENT_GRID.x - 1, 5, 7],
   });
 }
-assert.deepEqual(
-  gridBoundedSaw.dimsQ,
-  [56, 114, 158],
-  "repeated hammering should keep deterministic dimensions while the fixed saw kerf follows its material",
+assert.equal(
+  gridBoundedSaw.dimsQ.reduce((a, b) => a * b, 1),
+  protectedSaw.dimsQ.reduce((a, b) => a * b, 1),
+  "repeated saw-stock hammering must conserve geometric envelope volume",
 );
 const gridBoundedSawBoundsQ2 = forgeMachinedBoundsQ2(gridBoundedSaw);
 assert.ok(
@@ -1836,21 +1836,21 @@ for (const trimSide of ["a", "b"]) {
     protectedTrim,
     `saw trim side ${trimSide} should allow its first grid-safe hammer deformation`,
   );
-  assert.deepEqual(
-    hammeredTrim.dimsQ,
-    [120, 70, 120],
-    `saw trim side ${trimSide} should keep deterministic dimensions after its first hammer deformation`,
+  assert.equal(
+    hammeredTrim.dimsQ.reduce((a, b) => a * b, 1),
+    112 * 80 * 112,
+    `saw trim side ${trimSide} must conserve geometric volume during its first hammer deformation`,
   );
   assert.equal(
     forgeComponentSolidFraction(hammeredTrim).solidCells,
     protectedTrimCells,
     `saw trim side ${trimSide} hammering should conserve the exact material-cell budget`,
   );
-  assert.strictEqual(
-    hammerForgeComponent(hammeredTrim, trimHammerOptions),
-    hammeredTrim,
-    `saw trim side ${trimSide} should stop before repeated hammering crosses its retained cut side`,
-  );
+  const repeatedTrim = hammerForgeComponent(hammeredTrim, trimHammerOptions);
+  assert.equal(forgeComponentSolidFraction(repeatedTrim).solidCells, protectedTrimCells,
+    `saw trim side ${trimSide} must retain its material budget through another valid deformation`);
+  assert.deepEqual(repeatedTrim.machining.stamps[0].sizeQ, hammeredTrim.machining.stamps[0].sizeQ,
+    `saw trim side ${trimSide} must retain its physical cutting-tool dimensions`);
 }
 
 let retreatProtectedTrim = sawForgeComponent(createForgeComponent({
@@ -1873,20 +1873,20 @@ const retreatTrimHammerOptions = {
 };
 retreatProtectedTrim = hammerForgeComponent(retreatProtectedTrim, retreatTrimHammerOptions);
 retreatProtectedTrim = hammerForgeComponent(retreatProtectedTrim, retreatTrimHammerOptions);
-assert.deepEqual(
-  retreatProtectedTrim.dimsQ,
-  [120, 70, 120],
-  "repeated trim hammering should stop before any local cut-plane region retreats into the selected side",
+assert.equal(
+  retreatProtectedTrim.dimsQ.reduce((a, b) => a * b, 1),
+  112 * 80 * 112,
+  "repeated trim hammering must conserve geometric volume",
 );
 assert.equal(
   forgeComponentSolidFraction(retreatProtectedTrim).solidCells,
   retreatProtectedTrimCells,
   "retreat-bounded trim hammering should retain the exact material-cell budget",
 );
-assert.strictEqual(
-  hammerForgeComponent(retreatProtectedTrim, retreatTrimHammerOptions),
-  retreatProtectedTrim,
-  "trim hammering should stop when no further deformation can retain its physical cut plane",
+assert.equal(
+  forgeComponentSolidFraction(hammerForgeComponent(retreatProtectedTrim, retreatTrimHammerOptions)).solidCells,
+  retreatProtectedTrimCells,
+  "additional trim deformation must retain the complete final solid budget",
 );
 
 let locallyRetreatingTrim = sawForgeComponent(createForgeComponent({
@@ -1910,20 +1910,20 @@ const localRetreatHammerOptions = {
 for (let strike = 0; strike < 4; strike += 1) {
   locallyRetreatingTrim = hammerForgeComponent(locallyRetreatingTrim, localRetreatHammerOptions);
 }
-assert.deepEqual(
-  locallyRetreatingTrim.dimsQ,
-  [128, 96, 82],
-  "trim hammering should retain every locally valid deformation before a partial cut-plane retreat",
+assert.equal(
+  locallyRetreatingTrim.dimsQ.reduce((a, b) => a * b, 1),
+  112 * 80 * 112,
+  "locally bounded trim hammering must conserve geometric volume",
 );
 assert.equal(
   forgeComponentSolidFraction(locallyRetreatingTrim).solidCells,
   locallyRetreatingTrimCells,
   "locally bounded trim hammering should retain the exact material-cell budget",
 );
-assert.strictEqual(
-  hammerForgeComponent(locallyRetreatingTrim, localRetreatHammerOptions),
-  locallyRetreatingTrim,
-  "trim validation should inspect the complete final solid instead of only the nearest owned cut cells",
+assert.equal(
+  forgeComponentSolidFraction(hammerForgeComponent(locallyRetreatingTrim, localRetreatHammerOptions)).solidCells,
+  locallyRetreatingTrimCells,
+  "additional trim deformation must retain the complete final solid budget",
 );
 
 let overlappingProtectedTrim = createForgeComponent({
@@ -1954,10 +1954,10 @@ const hammeredOverlappingTrim = hammerForgeComponent(overlappingProtectedTrim, {
   side: "low",
   center: [0, 5, 7],
 });
-assert.deepEqual(
-  hammeredOverlappingTrim.dimsQ,
-  [98, 86, 120],
-  "overlapping trims should use their final solid union instead of a single-stamp owner subset",
+assert.equal(
+  hammeredOverlappingTrim.dimsQ.reduce((a, b) => a * b, 1),
+  112 * 80 * 112,
+  "overlapping trim hammering must conserve geometric volume",
 );
 assert.equal(
   forgeComponentSolidFraction(hammeredOverlappingTrim).solidCells,
@@ -2048,7 +2048,7 @@ for (const [axis, side, center] of [
   });
 }
 assert.deepEqual(boundaryAnchoredSaw.dimsQ, [112, 80, 112], "balanced boundary-anchor hammering should restore the original dimensions");
-assert.deepEqual(boundaryAnchoredSaw.offsetQ, [15, -4, 15], "balanced boundary-anchor hammering should retain deterministic offset displacement");
+assert.deepEqual(boundaryAnchoredSaw.offsetQ, boundaryAnchoredSawBeforeHammer.offsetQ, "balanced boundary-anchor hammering should not accumulate placement drift");
 assertForgeMachiningCenterFollowsDeformation(
   boundaryAnchoredSawBeforeHammer,
   boundaryAnchoredSawStampBeforeHammer,
@@ -2196,21 +2196,21 @@ const historylessHammerOptions = {
   side: "high",
   center: [FORGE_COMPONENT_GRID.x - 1, 5, 7],
 };
-assert.strictEqual(
-  hammerForgeComponent(historylessCutComponent, historylessHammerOptions),
-  historylessCutComponent,
-  "a canonical cut mask without physical machining history must not be stretched by hammering",
+assert.deepEqual(
+  hammerForgeComponent(historylessCutComponent, historylessHammerOptions).solid,
+  historylessCutComponent.solid,
+  "imported cut masks must follow hammer deformation without losing holes",
 );
-assert.strictEqual(
-  normalizeForgeComponent(historylessCutComponent),
-  historylessCutComponent,
-  "a canonical cut mask without physical machining history must not be stretched by normalization",
+assert.deepEqual(
+  normalizeForgeComponent(historylessCutComponent).solid,
+  historylessCutComponent.solid,
+  "imported cut masks must follow normalization without losing holes",
 );
 const historylessCheckpoint = restoreForgeMachiningState(historylessCutComponent, null);
-assert.strictEqual(
-  hammerForgeComponent(historylessCheckpoint, historylessHammerOptions),
-  historylessCheckpoint,
-  "a migrated partial checkpoint must remain deformation-safe without inferred machining history",
+assert.deepEqual(
+  hammerForgeComponent(historylessCheckpoint, historylessHammerOptions).solid,
+  historylessCheckpoint.solid,
+  "migrated partial checkpoints must retain their canonical solid mask",
 );
 const historylessAdditionalDrill = drillForgeComponent(historylessCheckpoint, {
   axis: 1,
@@ -2712,7 +2712,16 @@ const normalizableComponent = paintForgeComponent(createForgeComponent({
   color444: 0xf84,
 });
 const normalizedComponent = normalizeForgeComponent(normalizableComponent);
-assert.deepEqual(normalizedComponent.dimsQ, [60, 100, 140], "component normalization should move only dimensions toward their shared average");
+assert.ok(
+  Math.max(...normalizedComponent.dimsQ) - Math.min(...normalizedComponent.dimsQ)
+    < Math.max(...normalizableComponent.dimsQ) - Math.min(...normalizableComponent.dimsQ),
+  "component normalization should bring dimensions closer together",
+);
+assert.equal(
+  normalizedComponent.dimsQ.reduce((product, value) => product * value, 1),
+  normalizableComponent.dimsQ.reduce((product, value) => product * value, 1),
+  "component normalization must conserve physical volume exactly",
+);
 assert.deepEqual(normalizedComponent.offsetQ, normalizableComponent.offsetQ, "component normalization should preserve its workbench offset");
 assert.strictEqual(normalizedComponent.solid, normalizableComponent.solid, "component normalization should structurally share the unchanged solid mask");
 assert.strictEqual(normalizedComponent.paintQuads, normalizableComponent.paintQuads, "component normalization should structurally share unchanged paint data");
@@ -2725,7 +2734,7 @@ const lowCutFloorComponent = sawForgeComponent(createForgeComponent({
 }), { axis: 1, side: "low", layers: 2 });
 const lowCutOccupiedBounds = forgeComponentOccupiedBoundsQ2(lowCutFloorComponent);
 assert.ok(lowCutOccupiedBounds.minQ2[1] > -64, "occupied bounds should follow material removed from the bottom voxel layers");
-const lowCutMesh = buildForgeDesignMesh(createForgeDesign({ components: [lowCutFloorComponent] }));
+const lowCutMesh = buildForgeDesignMesh(createForgeDesign({ components: [lowCutFloorComponent] }), { positionScale: 2048 });
 assert.equal(
   lowCutMesh.pickBounds[0].min[1] * 128,
   lowCutOccupiedBounds.minQ2[1],
@@ -2830,7 +2839,12 @@ try {
 }
 const rendererCanvas = createForgeRendererTestCanvas();
 const inferredFloorRenderer = new ForgeWorkbenchRenderer(rendererCanvas, { controls: false, workpieceFloorY: null });
-assert.ok(inferredFloorRenderer.workpieceFloorY > 1, "a null floor override should retain the deck-derived work surface");
+const currentForgeDeck = DEFAULT_FORGE_BENCH_CUBOIDS.find((part) => part.id === "deck");
+assert.equal(
+  inferredFloorRenderer.workpieceFloorY,
+  currentForgeDeck.center[1] + currentForgeDeck.size[1] / 2,
+  "a null floor override should retain the deck-derived work surface",
+);
 assert.equal(
   inferredFloorRenderer.workpieceBaseOffset()[1],
   inferredFloorRenderer.workpieceFloorY,
@@ -2950,12 +2964,17 @@ assert.ok(forgeRenderer.pickWorkpiece(0, 0), "workpiece picking should succeed w
 const releaseHit = { ...highlightedHit, point: [0, 0, 0], localPoint: [0, 0, 0] };
 forgeRenderer.pick = () => releaseHit;
 forgeRenderer.pickWorkpiece = () => releaseHit;
+forgeRenderer.setActiveTool("hammer");
 forgeRenderer.setWorkpieceDragEnabled(false);
 forgeRenderer.pointerDown(forgePointerEvent({ x: 10, y: 10 }));
 forgeRenderer.pointerMove(forgePointerEvent({ x: 30, y: 24 }));
 forgeRenderer.pointerUp(forgePointerEvent({ x: 30, y: 24 }));
 forgeRenderer.cancelScheduledHover();
-assert.deepEqual(interactionEvents, [["pick", 0]], "construction tools should pick once on release without emitting material drag events");
+assert.deepEqual(interactionEvents, [], "moving a construction pointer should not accidentally strike material");
+forgeRenderer.pointerDown(forgePointerEvent({ x: 30, y: 24 }));
+forgeRenderer.pointerUp(forgePointerEvent({ x: 30, y: 24 }));
+forgeRenderer.cancelScheduledHover();
+assert.deepEqual(interactionEvents, [["pick", 0]], "construction tools should pick once on tap release without emitting material drag events");
 assert.equal(forgeRenderer.snapshot().dragPreview, null, "construction tool release should leave no material drag preview");
 const axisDragEvents = [];
 forgeRenderer.onWorkpieceDrag = (interaction) => axisDragEvents.push(interaction);

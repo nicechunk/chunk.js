@@ -25,6 +25,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Reconstruct contact joints between opposed material faces separated by less
+  than one placement step after hammer deformation. Editor, saved NCF1 codes,
+  previews, and equipped items derive the same joint without changing masks or
+  material statistics; drilled openings and larger gaps remain open.
+- Preserve the native forge editor's exact-volume hammering and normalization,
+  finer rendering precision, physical grip validation, and tool controls while
+  retaining transactional renderer initialization and GPU resource cleanup.
 - Made Forge shape capacity advisory: otherwise valid designs remain eligible
   regardless of volume, durability, or mass deficits. Comparisons retain
   `withinCapacity` and deficit details; proof integrity checks remain enforced.

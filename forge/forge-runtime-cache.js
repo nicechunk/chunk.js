@@ -11,7 +11,7 @@ import {
   forgeDesignBoundsQ,
   forgeDesignMaterialSummary,
 } from "./forge-core.js";
-import { buildForgeDesignMesh } from "./forge-mesher.js";
+import { buildForgeDesignMesh } from "./forge-mesher.js?v=c91d4ba0bd9785ae";
 
 export const FORGE_RUNTIME_CACHE_DEFAULT_ENTRIES = 24;
 export const FORGE_RUNTIME_CACHE_DEFAULT_BYTES = 8 * 1024 * 1024;

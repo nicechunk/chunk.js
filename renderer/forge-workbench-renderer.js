@@ -13,11 +13,12 @@ import {
 import {
   buildForgeCuboidMesh,
   buildForgeDesignMesh,
+  FORGE_EDIT_POSITION_SCALE,
   FORGE_MESH_MATERIAL_LAYER_OFFSET,
   FORGE_MESH_MATERIAL_LAYER_NONE,
   FORGE_MESH_VERTEX_STRIDE_BYTES,
   FORGE_RENDER_POSITION_SCALE,
-} from "../forge/forge-mesher.js";
+} from "../forge/forge-mesher.js?v=c91d4ba0bd9785ae";
 import {
   FORGE_TOOL_VISUAL_IDS,
   createForgeToolVisualMesh,
@@ -26,14 +27,13 @@ import {
   normalizeForgeToolVisualId,
   sameForgeToolVisualHit,
   sampleForgeToolVisualPose,
-} from "./forge-tool-visuals.js";
+} from "./forge-tool-visuals.js?v=203fbbd86b79fd12";
 import {
   FORGE_MATERIAL_SURFACE_TILE_SIZE,
   activeForgeMaterialSurfaceSet,
   createForgeMaterialCatalog,
   createForgeMaterialTextureArray,
-} from "./forge-material-surfaces.js";
-import { createProgram } from "./shader-manager.js";
+} from "./forge-material-surfaces.js?v=ce222bb171b4af73";
 
 export {
   FORGE_TOOL_VISUAL_IDS,
@@ -42,12 +42,41 @@ export {
   normalizeForgeToolVisualHit,
   normalizeForgeToolVisualId,
   sampleForgeToolVisualPose,
-} from "./forge-tool-visuals.js";
+} from "./forge-tool-visuals.js?v=203fbbd86b79fd12";
+
+import { createProgram } from "./shader-manager.js";
 
 const IDENTITY_BASIS_3 = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 export const FORGE_MAX_COMPONENT_VISUAL_OFFSETS = 24;
 const FORGE_DRAG_COMPONENT_NONE = -1;
 const FORGE_DRAG_ALL_COMPONENTS = -2;
+const FORGE_CAMERA_MIN_DISTANCE = 0.04;
+const FORGE_CAMERA_MAX_DISTANCE = 18;
+
+export function computeForgeWorkbenchCameraFrame(bound, {
+  offset = [0, 0, 0],
+  width = 1,
+  height = 1,
+  fov = 46,
+  padding = 1.35,
+} = {}) {
+  if (!bound?.min || !bound?.max) return null;
+  const halfSize = bound.min.map((value, axis) => (bound.max[axis] - value) * 0.5);
+  const radius = Math.hypot(...halfSize);
+  if (!Number.isFinite(radius) || radius <= 0) return null;
+  const aspect = Math.max(0.01, finite(width, 1) / Math.max(1, finite(height, 1)));
+  const verticalHalfFov = clamp(finite(fov, 46), 20, 90) * Math.PI / 360;
+  const halfFov = Math.min(verticalHalfFov, Math.atan(Math.tan(verticalHalfFov) * aspect));
+  const distance = clamp(
+    radius * Math.max(1, finite(padding, 1.35)) / Math.sin(halfFov),
+    FORGE_CAMERA_MIN_DISTANCE,
+    FORGE_CAMERA_MAX_DISTANCE,
+  );
+  return {
+    target: bound.min.map((value, axis) => (value + bound.max[axis]) * 0.5 + (Number(offset[axis]) || 0)),
+    distance,
+  };
+}
 
 const VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -60,6 +89,7 @@ layout(location = 3) in uint aComponentIndex;
 layout(location = 4) in uint aMaterialLayer;
 
 uniform mat4 uViewProjection;
+uniform float uPositionScale;
 uniform vec3 uOffset;
 uniform mat3 uObjectBasis;
 uniform int uComponentVisualOffsetsEnabled;
@@ -114,7 +144,7 @@ void applyClothWind(inout vec3 position) {
 }
 
 void main() {
-  vec3 position = vec3(aPosition) / ${FORGE_RENDER_POSITION_SCALE.toFixed(1)};
+  vec3 position = vec3(aPosition) / uPositionScale;
   vec3 normal = normalize(aNormal);
   vec3 absoluteNormal = abs(normal);
   if (absoluteNormal.x >= absoluteNormal.y && absoluteNormal.x >= absoluteNormal.z) {
@@ -221,14 +251,11 @@ void main() {
 `;
 
 export const DEFAULT_FORGE_BENCH_CUBOIDS = Object.freeze([
-  cuboid("base", [0, 0.12, 0], [3.45, 0.28, 3.45], 0x222),
-  cuboid("back", [0, 0.72, -1.34], [3.08, 1.12, 0.40], 0x333),
-  cuboid("left", [-1.34, 0.72, 0], [0.40, 1.12, 3.08], 0x333),
-  cuboid("right", [1.34, 0.72, 0], [0.40, 1.12, 3.08], 0x333),
-  cuboid("front-left", [-1.02, 0.72, 1.34], [1.04, 1.12, 0.40], 0x333),
-  cuboid("front-right", [1.02, 0.72, 1.34], [1.04, 1.12, 0.40], 0x333),
-  cuboid("front-sill", [0, 0.28, 1.34], [1.10, 0.24, 0.40], 0x222),
-  cuboid("deck", [0, 1.38, 0], [6.40, 0.22, 6.40], 0x666),
+  cuboid("ground", [0, -0.03125, 0], [4, 0.0625, 3.5], 0x556),
+  cuboid("base", [0, 0.078125, 0], [0.65625, 0.15625, 0.5], 0x332),
+  cuboid("pedestal", [0, 0.4375, 0], [0.4375, 0.5625, 0.375], 0x443),
+  cuboid("anvil-body", [0, 0.765625, 0], [0.59375, 0.09375, 0.4375], 0x555),
+  cuboid("deck", [0, 0.859375, 0], [0.875, 0.09375, 0.625], 0x334),
 ]);
 
 const FORGE_TRANSFORM_GIZMO_MESH = createForgeTransformGizmoMesh();
@@ -237,8 +264,8 @@ const FORGE_TRANSFORM_SNAP = FORGE_RENDER_POSITION_SCALE / 2;
 const FORGE_GIZMO_TARGET_PIXELS = 82;
 const FORGE_RETICLE_TARGET_PIXELS = 34;
 export const FORGE_SCENE_UNITS_PER_METER = 1;
-const DEFAULT_FORGE_AVATAR_POSITION = Object.freeze([-2.62, 1.5, 0.92]);
-const DEFAULT_FORGE_AVATAR_YAW = -0.18;
+const DEFAULT_FORGE_AVATAR_POSITION = Object.freeze([0, 0, 0.9375]);
+const DEFAULT_FORGE_AVATAR_YAW = 0;
 
 export class ForgeWorkbenchRenderer {
   constructor(canvas, options = {}) {
@@ -280,16 +307,20 @@ export class ForgeWorkbenchRenderer {
         finite(options.forgeMetersToWorldUnits, FORGE_SCENE_UNITS_PER_METER),
       ),
       workpieceOffset: vector3(options.workpieceOffset ?? [0, workpieceFloorY ?? 0, 0]),
+      autoFrameWorkpiece: options.autoFrameWorkpiece !== false,
     };
     this.camera = {
-      target: vector3(options.target ?? [-0.35, 1.15, -0.25]),
+      target: vector3(options.target ?? [0, 0.85, 0.3]),
       yaw: finite(options.yaw, -0.72),
-      pitch: clamp(finite(options.pitch, 0.38), -0.15, 1.08),
-      distance: clamp(finite(options.distance, 9.2), 4.5, 18),
+      pitch: clamp(finite(options.pitch, 0.55), -0.15, 1.08),
+      distance: clamp(finite(options.distance, 3.6), FORGE_CAMERA_MIN_DISTANCE, FORGE_CAMERA_MAX_DISTANCE),
       fov: clamp(finite(options.fov, 46), 20, 90),
       near: Math.max(0.01, finite(options.near, 0.08)),
       far: Math.max(20, finite(options.far, 80)),
     };
+    this.cameraBaseNear = this.camera.near;
+    this.cameraMode = "overview";
+    this.updateCameraNear();
     this.gl = null;
     this.program = null;
     this.uniforms = null;
@@ -421,7 +452,11 @@ export class ForgeWorkbenchRenderer {
     this._onPointerCancel = (event) => this.pointerCancel(event);
     this._onPointerLeave = (event) => this.pointerLeave(event);
     this._onWheel = (event) => this.wheel(event);
-    this._onResize = () => this.invalidate();
+    this._onResize = () => {
+      if (this.cameraMode === "workpiece") this.focusWorkpiece();
+      else if (this.cameraMode === "overview") this.viewWorkbench();
+      this.invalidate();
+    };
     this._onVisibilityChange = () => {
       if (!globalThis.document?.hidden && (this.clothComponentMask || this.avatar.clothAnimated)) this.invalidate();
     };
@@ -447,6 +482,7 @@ export class ForgeWorkbenchRenderer {
       this.program = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
       this.uniforms = {
         viewProjection: gl.getUniformLocation(this.program, "uViewProjection"),
+        positionScale: gl.getUniformLocation(this.program, "uPositionScale"),
         offset: gl.getUniformLocation(this.program, "uOffset"),
         objectBasis: gl.getUniformLocation(this.program, "uObjectBasis"),
         componentVisualOffsetsEnabled: gl.getUniformLocation(this.program, "uComponentVisualOffsetsEnabled"),
@@ -637,9 +673,10 @@ export class ForgeWorkbenchRenderer {
     this.setMaterialSurfaceSet(activeForgeMaterialSurfaceSet([], {
       catalog: this.forgeMaterialCatalog,
     }));
+    const previousOffset = this.dynamicOffset;
     this.dynamicOffset = vector3(offset);
     this.setClothComponents(null, null);
-    this.replaceDynamicMesh(buildForgeCuboidMesh(cuboids ?? []));
+    this.replaceDynamicMesh(buildForgeCuboidMesh(cuboids ?? []), { previousOffset });
     return this;
   }
 
@@ -666,13 +703,15 @@ export class ForgeWorkbenchRenderer {
     );
     const mesh = buildForgeDesignMesh(design, {
       componentMaterialLayers: materialSurfaceSet.componentLayers,
+      positionScale: FORGE_EDIT_POSITION_SCALE,
     });
     this.setClothComponents(design, mesh);
     this.setMaterialSurfaceSet(materialSurfaceSet);
+    const previousOffset = this.dynamicOffset;
     this.dynamicOffset = constrainToFloor
       ? floorConstrainedWorkpieceOffset(mesh, vector3(offset), this.workpieceFloorY)
       : vector3(offset);
-    this.replaceDynamicMesh(mesh);
+    this.replaceDynamicMesh(mesh, { previousOffset });
     return this;
   }
 
@@ -724,7 +763,13 @@ export class ForgeWorkbenchRenderer {
     return true;
   }
 
-  replaceDynamicMesh(mesh) {
+  replaceDynamicMesh(mesh, { previousOffset = this.dynamicOffset } = {}) {
+    const previousComponentCount = this.dynamicComponentPickBounds.length;
+    const previousBound = this.groupedWorkpieceBound();
+    const previouslyFocused = previousBound && this.camera.target.every((value, axis) => (
+      value >= previousBound.min[axis] + previousOffset[axis] - 1e-6
+      && value <= previousBound.max[axis] + previousOffset[axis] + 1e-6
+    ));
     this.dynamicMesh = mesh;
     this.dynamicComponentPickBounds = Array.isArray(mesh.pickBounds) ? mesh.pickBounds : [];
     this.updateWorkpiecePickBounds();
@@ -739,6 +784,24 @@ export class ForgeWorkbenchRenderer {
     this.constructionPreview = null;
     this.hoveredGizmoAxis = null;
     if (!mesh.pickBounds?.some((bound) => bound.index === this.transformTargetIndex)) this.transformTargetIndex = -1;
+    if (this.options.autoFrameWorkpiece) {
+      const componentCount = this.dynamicComponentPickBounds.length;
+      const bound = this.groupedWorkpieceBound();
+      // Entering a surface tool may settle floating stock onto the floor.
+      // Keep that stock visible when it moves completely out of its old bounds.
+      const movedOutOfFocus = previouslyFocused && bound && bound.min.some((value, axis) => (
+        value + this.dynamicOffset[axis] > previousBound.max[axis] + previousOffset[axis] + 1e-6
+        || bound.max[axis] + this.dynamicOffset[axis] < previousBound.min[axis] + previousOffset[axis] - 1e-6
+      ));
+      const expanded = previouslyFocused && bound && previousBound
+        && Math.hypot(...bound.min.map((value, axis) => bound.max[axis] - value))
+          > Math.hypot(...previousBound.min.map((value, axis) => previousBound.max[axis] - value)) * 1.05;
+      if (componentCount && (!previousComponentCount || componentCount > previousComponentCount || movedOutOfFocus || expanded)) {
+        this.focusWorkpiece();
+      } else if (!componentCount && previousComponentCount) {
+        this.resetCamera();
+      }
+    }
     this.invalidate();
   }
 
@@ -817,8 +880,9 @@ export class ForgeWorkbenchRenderer {
     if (options.target != null) this.camera.target = vector3(options.target);
     if (Number.isFinite(options.yaw)) this.camera.yaw = Number(options.yaw);
     if (Number.isFinite(options.pitch)) this.camera.pitch = clamp(Number(options.pitch), -0.15, 1.08);
-    if (Number.isFinite(options.distance)) this.camera.distance = clamp(Number(options.distance), 4.5, 18);
+    if (Number.isFinite(options.distance)) this.camera.distance = clamp(Number(options.distance), FORGE_CAMERA_MIN_DISTANCE, FORGE_CAMERA_MAX_DISTANCE);
     if (Number.isFinite(options.fov)) this.camera.fov = clamp(Number(options.fov), 20, 90);
+    this.updateCameraNear();
     this.invalidate();
     return this;
   }
@@ -836,7 +900,9 @@ export class ForgeWorkbenchRenderer {
     this.cancelScheduledHover();
     this.setHoveredFace(null);
     const amount = Number(delta) || 0;
-    this.camera.distance = clamp(this.camera.distance * Math.exp(amount), 4.5, 18);
+    this.camera.distance = clamp(this.camera.distance * Math.exp(amount), FORGE_CAMERA_MIN_DISTANCE, FORGE_CAMERA_MAX_DISTANCE);
+    this.cameraMode = "custom";
+    this.updateCameraNear();
     this.invalidate();
     return this;
   }
@@ -844,11 +910,53 @@ export class ForgeWorkbenchRenderer {
   resetCamera() {
     this.cancelScheduledHover();
     this.setHoveredFace(null);
-    this.camera.target = [-0.35, 1.15, -0.25];
     this.camera.yaw = -0.72;
-    this.camera.pitch = 0.38;
-    this.camera.distance = 9.2;
+    this.camera.pitch = 0.55;
+    if (this.options.autoFrameWorkpiece && this.groupedWorkpieceBound()) this.focusWorkpiece();
+    else this.viewWorkbench();
     this.invalidate();
+    return this;
+  }
+
+  updateCameraNear() {
+    // Small, physically sized stock needs a close view without the original
+    // eight-centimetre near plane clipping away the workpiece.
+    this.camera.near = Math.min(this.cameraBaseNear, Math.max(0.0005, this.camera.distance / 20));
+  }
+
+  focusWorkpiece(componentIndex = null) {
+    const bound = Number.isInteger(componentIndex)
+      ? this.dynamicComponentPickBounds.find((candidate) => candidate.index === componentIndex)
+      : this.groupedWorkpieceBound();
+    const rect = this.canvas.getBoundingClientRect?.() ?? {};
+    const frame = computeForgeWorkbenchCameraFrame(bound, {
+      offset: this.dynamicOffset,
+      width: rect.width || this.canvas.clientWidth || 1,
+      height: rect.height || this.canvas.clientHeight || 1,
+      fov: this.camera.fov,
+    });
+    if (frame) {
+      this.setCamera(frame);
+      this.cameraMode = "workpiece";
+    }
+    return this;
+  }
+
+  viewWorkbench() {
+    const bounds = this.staticMesh.pickBounds.filter((bound) => bound.id !== "ground");
+    const height = this.avatar.mesh?.bounds?.height ?? 1.75;
+    const halfWidth = Math.max(0.22, (this.avatar.mesh?.bounds?.width ?? 0.6) / 2);
+    const position = this.avatar.position;
+    const bound = mergeForgePickBounds([...bounds, {
+      min: [position[0] - halfWidth, position[1], position[2] - halfWidth],
+      max: [position[0] + halfWidth, position[1] + height, position[2] + halfWidth],
+    }]);
+    const rect = this.canvas.getBoundingClientRect?.() ?? {};
+    const frame = computeForgeWorkbenchCameraFrame(bound, {
+      width: rect.width || 1, height: rect.height || 1, fov: this.camera.fov, padding: 1.18,
+    });
+    if (frame) this.setCamera({ ...frame, yaw: -0.72, pitch: 0.38 });
+    this.cameraMode = "overview";
     return this;
   }
 
@@ -919,7 +1027,7 @@ export class ForgeWorkbenchRenderer {
     return {
       index: bound.index,
       center,
-      scale: this.worldScaleForPixels(center, FORGE_GIZMO_TARGET_PIXELS, 0.44, 2.4),
+      scale: this.worldScaleForPixels(center, FORGE_GIZMO_TARGET_PIXELS, 0.004, 2.4),
     };
   }
 
@@ -976,6 +1084,19 @@ export class ForgeWorkbenchRenderer {
   workpieceFloorLocalY(offset = this.dynamicOffset) {
     const workpieceOffset = vector3(offset);
     return Number.isFinite(this.workpieceFloorY) ? this.workpieceFloorY - workpieceOffset[1] : null;
+  }
+
+  workpieceSurfaceLocalBounds(offset = this.workpieceBaseOffset()) {
+    const bounds = this.staticMesh.pickBounds.filter((bound) => (
+      (bound.id === "deck" || bound.userData?.workSurface === true)
+      && Math.abs(bound.max[1] - this.workpieceFloorY) < 1e-6
+    ));
+    const surface = mergeForgePickBounds(bounds);
+    if (!surface) return null;
+    return {
+      min: surface.min.map((value, axis) => value - offset[axis]),
+      max: surface.max.map((value, axis) => value - offset[axis]),
+    };
   }
 
   constrainWorkpieceDragDelta(index, deltaWorld) {
@@ -1096,6 +1217,7 @@ export class ForgeWorkbenchRenderer {
       cameraEye: cameraEye(this.camera),
       startTime: nowMilliseconds(),
       duration,
+      visualScale: this.toolScaleAt(target.point),
     };
     this.invalidate();
     return id;
@@ -1125,6 +1247,7 @@ export class ForgeWorkbenchRenderer {
         cameraEye: action.cameraEye,
         elapsedSeconds: elapsed,
         durationSeconds: action.duration,
+        scale: action.visualScale,
       });
     }
     if (!this.toolPreview || this.activeTool === "gloves") return null;
@@ -1135,7 +1258,18 @@ export class ForgeWorkbenchRenderer {
       elapsedSeconds: 0,
       durationSeconds: forgeToolActionDuration(this.activeTool, this.activeToolSettings),
       preview: true,
+      scale: this.toolScaleAt(this.toolPreview.point),
     });
+  }
+
+  toolScaleAt(point) {
+    const rect = this.canvas.getBoundingClientRect?.() ?? {};
+    const pixels = clamp(Math.min(rect.width || 800, rect.height || 600) * 0.24, 64, 150);
+    // The palm is much smaller in its authored mesh than a hammer or saw.
+    // Give this editor guide its own reference span so its fingers stay
+    // readable; physical grip contact is validated separately in metres.
+    const referenceSpan = this.activeTool === "grip" ? 0.5 : 1.6;
+    return this.worldScaleForPixels(point, pixels, 0.006, 0.3) / referenceSpan;
   }
 
   constructionVisualState() {
@@ -1147,14 +1281,14 @@ export class ForgeWorkbenchRenderer {
     const tangentB = [0, 0, 0];
     tangentA[tangentAxes[0]] = 1;
     tangentB[tangentAxes[1]] = preview.side ? 1 : -1;
-    const scale = this.worldScaleForPixels(preview.point, FORGE_RETICLE_TARGET_PIXELS, 0.12, 0.72);
+    const scale = this.worldScaleForPixels(preview.point, FORGE_RETICLE_TARGET_PIXELS, 0.002, 0.72);
     return {
       basis: basisColumns(
         tangentA.map((value) => value * scale),
         tangentB.map((value) => value * scale),
         normal.map((value) => value * scale),
       ),
-      translation: preview.point.map((value, axis) => value + normal[axis] * Math.max(0.008, scale * 0.025)),
+      translation: preview.point.map((value, axis) => value + normal[axis] * Math.max(0.00005, scale * 0.025)),
       opacity: 0.96,
       unlit: 1,
       ...(preview.toolId === "grip" && preview.valid != null ? {
@@ -1292,7 +1426,7 @@ export class ForgeWorkbenchRenderer {
     gl.uniform1i(this.uniforms.dragComponentIndex, FORGE_DRAG_COMPONENT_NONE);
     gl.uniform3f(this.uniforms.dragOffset, 0, 0, 0);
     setUniformUint(gl, this.uniforms.clothComponentMask, 0);
-    if (drawHandle(gl, this.uniforms.offset, this.staticHandle, [0, 0, 0])) {
+    if (drawHandle(gl, this.uniforms, this.staticHandle, [0, 0, 0])) {
       drawCalls += 1;
       triangles += this.staticHandle.triangleCount;
     }
@@ -1300,7 +1434,7 @@ export class ForgeWorkbenchRenderer {
     if (this.avatarHandle?.indexCount) {
       setObjectVisualUniforms(gl, this.uniforms, { basis: avatarYawBasis(this.avatar.yaw) });
       gl.disable(gl.CULL_FACE);
-      if (drawHandle(gl, this.uniforms.offset, this.avatarHandle, this.avatar.position)) {
+      if (drawHandle(gl, this.uniforms, this.avatarHandle, this.avatar.position)) {
         drawCalls += 1;
         triangles += this.avatarHandle.triangleCount;
       }
@@ -1323,7 +1457,7 @@ export class ForgeWorkbenchRenderer {
       gl.uniform3fv(this.uniforms.clothComponentMax, this.clothComponentMax);
     }
     setUniformUint(gl, this.uniforms.clothComponentMask, this.clothComponentMask);
-    if (drawHandle(gl, this.uniforms.offset, this.dynamicHandle, this.dynamicOffset)) {
+    if (drawHandle(gl, this.uniforms, this.dynamicHandle, this.dynamicOffset)) {
       drawCalls += 1;
       triangles += this.dynamicHandle.triangleCount;
     }
@@ -1361,7 +1495,7 @@ export class ForgeWorkbenchRenderer {
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       for (const pass of overlayPasses) {
         setObjectVisualUniforms(gl, this.uniforms, pass.visual);
-        if (drawHandle(gl, this.uniforms.offset, pass.handle, pass.visual.translation)) {
+        if (drawHandle(gl, this.uniforms, pass.handle, pass.visual.translation)) {
           drawCalls += 1;
           triangles += pass.handle.triangleCount;
         }
@@ -1602,7 +1736,7 @@ export class ForgeWorkbenchRenderer {
       const coarse = event.pointerType === "touch" || (globalThis.matchMedia?.("(pointer: coarse)")?.matches ?? false);
       this.drag.moved ||= Math.hypot(next.x - this.drag.startX, next.y - this.drag.startY) > (coarse ? 8 : 4);
     }
-    if (this.drag && !this.drag.workpieceDragEnabled && this.activeTool !== "gloves") {
+    if (this.drag?.hit && !this.drag.workpieceDragEnabled && this.activeTool !== "gloves") {
       const aimHit = this.pickWorkpiece(next.x, next.y);
       this.setHoveredFace(aimHit, { immediate: true });
       return;
@@ -1657,8 +1791,16 @@ export class ForgeWorkbenchRenderer {
       try {
         if (drag.workpieceDragEnabled) {
           if (drag.hit && !drag.cancelled && drag.moved) this.notifyWorkpieceDrag("end", drag, event);
-          else if (!drag.cancelled && !drag.moved) this.onPick?.(drag.hit, event);
-        } else if (!drag.cancelled) {
+          else if (!drag.cancelled && !drag.moved) {
+            if (drag.hit) this.notifyWorkpieceDrag("cancel", drag, event);
+            // A visible neighbour can lie under the selected object's axes,
+            // especially on touch screens. Taps select the actual surface;
+            // a moved axis drag continues to manipulate its original target.
+            const releaseHit = this.pickWorkpiece(event.clientX, event.clientY) ?? drag.hit;
+            this.setSelectedFace(releaseHit);
+            this.onPick?.(releaseHit, event);
+          }
+        } else if (!drag.cancelled && !drag.moved) {
           const releaseHit = this.pickWorkpiece(event.clientX, event.clientY);
           this.setSelectedFace(releaseHit);
           this.setHoveredFace(releaseHit, { immediate: true });
@@ -1843,6 +1985,11 @@ export class ForgeWorkbenchRenderer {
     return {
       ...this.lastStats,
       camera: { ...this.camera, target: [...this.camera.target] },
+      cameraMode: this.cameraMode,
+      workpieceBounds: this.groupedWorkpieceBound(),
+      renderPositionScale: this.dynamicMesh.positionScale,
+      toolVisual: this.toolVisualState(),
+      benchBounds: mergeForgePickBounds(this.staticMesh.pickBounds.filter((bound) => bound.id !== "ground")),
       workpieceOffset: [...this.dynamicOffset],
       workpieceBaseOffset: this.workpieceBaseOffset(),
       workpieceFloorY: this.workpieceFloorY,
@@ -2030,6 +2177,7 @@ export function pickForgeMeshRay(mesh, ray, {
         origin,
         direction,
         boundOffset,
+        mesh.positionScale,
       );
       if (distance == null || best && distance >= best.distance) continue;
       const normal = packedVertexNormal(view, firstVertex);
@@ -2132,6 +2280,7 @@ function uploadMesh(gl, mesh, usage) {
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, usage);
     gl.bindVertexArray(null);
     return {
+      positionScale: mesh.positionScale ?? FORGE_RENDER_POSITION_SCALE,
       vao,
       vbo,
       ibo,
@@ -2257,9 +2406,10 @@ function sumHandleBytes(handles) {
   return bytes;
 }
 
-function drawHandle(gl, offsetUniform, handle, offset) {
+function drawHandle(gl, uniforms, handle, offset) {
   if (!handle?.indexCount) return false;
-  gl.uniform3f(offsetUniform, offset[0], offset[1], offset[2]);
+  gl.uniform3f(uniforms.offset, offset[0], offset[1], offset[2]);
+  gl.uniform1f(uniforms.positionScale, handle.positionScale);
   gl.bindVertexArray(handle.vao);
   gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
   return true;
@@ -2272,6 +2422,8 @@ function disposeHandle(gl, handle) {
   try { if (handle.vao) gl.deleteVertexArray(handle.vao); } catch { /* Best-effort cleanup. */ }
 }
 
+
+
 function cameraEye(camera) {
   const cp = Math.cos(camera.pitch);
   return [
@@ -2281,19 +2433,19 @@ function cameraEye(camera) {
   ];
 }
 
-function packedTriangleDistance(view, ia, ib, ic, origin, direction, offset) {
+function packedTriangleDistance(view, ia, ib, ic, origin, direction, offset, positionScale = FORGE_RENDER_POSITION_SCALE) {
   const aCursor = ia * FORGE_MESH_VERTEX_STRIDE_BYTES;
   const bCursor = ib * FORGE_MESH_VERTEX_STRIDE_BYTES;
   const cCursor = ic * FORGE_MESH_VERTEX_STRIDE_BYTES;
-  const ax = view.getInt16(aCursor, true) / FORGE_RENDER_POSITION_SCALE + offset[0];
-  const ay = view.getInt16(aCursor + 2, true) / FORGE_RENDER_POSITION_SCALE + offset[1];
-  const az = view.getInt16(aCursor + 4, true) / FORGE_RENDER_POSITION_SCALE + offset[2];
-  const bx = view.getInt16(bCursor, true) / FORGE_RENDER_POSITION_SCALE + offset[0];
-  const by = view.getInt16(bCursor + 2, true) / FORGE_RENDER_POSITION_SCALE + offset[1];
-  const bz = view.getInt16(bCursor + 4, true) / FORGE_RENDER_POSITION_SCALE + offset[2];
-  const cx = view.getInt16(cCursor, true) / FORGE_RENDER_POSITION_SCALE + offset[0];
-  const cy = view.getInt16(cCursor + 2, true) / FORGE_RENDER_POSITION_SCALE + offset[1];
-  const cz = view.getInt16(cCursor + 4, true) / FORGE_RENDER_POSITION_SCALE + offset[2];
+  const ax = view.getInt16(aCursor, true) / positionScale + offset[0];
+  const ay = view.getInt16(aCursor + 2, true) / positionScale + offset[1];
+  const az = view.getInt16(aCursor + 4, true) / positionScale + offset[2];
+  const bx = view.getInt16(bCursor, true) / positionScale + offset[0];
+  const by = view.getInt16(bCursor + 2, true) / positionScale + offset[1];
+  const bz = view.getInt16(bCursor + 4, true) / positionScale + offset[2];
+  const cx = view.getInt16(cCursor, true) / positionScale + offset[0];
+  const cy = view.getInt16(cCursor + 2, true) / positionScale + offset[1];
+  const cz = view.getInt16(cCursor + 4, true) / positionScale + offset[2];
   const edge1x = bx - ax;
   const edge1y = by - ay;
   const edge1z = bz - az;

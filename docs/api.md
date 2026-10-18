@@ -290,6 +290,20 @@ NCF1 v14 is a bounded fixed-point format with editable-component and baked-appea
 
 `compareForgeMaterialCapacity()` treats shape-derived capacity as advisory. For valid inputs it returns `ok: true` and `enforced: false`; `withinCapacity`, `deficit`, and per-field comparisons still describe the actual fit. `verifyForgeMaterialProof()` continues to reject changed design hashes, mismatched requirement vectors, and malformed proofs, but a material-capacity deficit alone does not reject an otherwise valid shape. Hosts remain responsible for verifying material ownership and spending actual selected inventory.
 
+`buildForgeDesignMesh()` reconstructs exterior joints between opposed solid faces
+whose positive separation is smaller than one placement Q (1/64 metre), matching
+the workbench contact tolerance after hammering. It returns `contactJoints` and
+includes joint triangles in component pick ranges. Corner proximity, larger gaps,
+and drilled openings do not create joints. The reconstruction leaves encoded
+components, masks, material statistics, and design identity unchanged. Pass
+`stitchContacts: false` to inspect raw component geometry.
+
+The mesher defaults to `positionScale: 128`; the native workbench uses 2048 to
+resolve small stock and cut faces. Mesh consumers must use the returned
+`positionScale` when unpacking vertices. Hammering and normalization retain exact
+geometric material volume, including tiny components; a strike may be unchanged
+when no valid integer dimensions conserve that volume.
+
 All NCF1 conversion and decode paths enforce the 640-byte format ceiling before copying a BufferSource or decoding Base64URL. The largest canonical unpadded Base64URL body is 854 characters. `forgeCodeToBytes()` rejects cyclic wrappers, non-byte array values, unsupported input types, and invalid caller-supplied byte limits.
 
 Forge v1 keeps gameplay and physical density independent. `attributes.density` and `densityScore` are bounded `1..100` gameplay scores. A particular-smelt attribute wins the recipe/base attribute; an explicit `densityScore` wins both. Only when neither score source exists may physical density supply the lower-priority score conversion, followed by the archetype score.
