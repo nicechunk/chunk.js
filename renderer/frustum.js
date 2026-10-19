@@ -45,8 +45,8 @@ export function chunkIntersectsCameraFrustum(chunk, cameraState, prepared = null
   return !cameraState || boundsIntersectPreparedFrustum(chunkWorldBounds(chunk), prepared ?? prepareCameraFrustum(cameraState));
 }
 
-export function aabbIntersectsCameraFrustum(bounds, cameraState) {
-  return !cameraState || boundsIntersectPreparedFrustum(bounds, prepareCameraFrustum(cameraState));
+export function aabbIntersectsCameraFrustum(bounds, cameraState, prepared = null) {
+  return !cameraState || boundsIntersectPreparedFrustum(bounds, prepared ?? prepareCameraFrustum(cameraState));
 }
 
 export function prepareCameraFrustum(cameraState) {

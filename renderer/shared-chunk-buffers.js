@@ -65,7 +65,7 @@ export class SharedChunkBuffers {
       }
       const drawRanges = Object.fromEntries(Object.entries(mesh.drawRanges).map(([pass, range]) => [pass, { offset: range.offset + indexStart, count: range.count, sortOffset: range.offset }]));
       const blendUnits = mesh.blendUnits.map(unit => ({ ...unit, offset: unit.offset + indexStart, sortOffset: unit.offset }));
-      const handle = { vao: page.vao, vbo: page.vbo, ibo: page.ibo, sharedPage: page,
+      const handle = { vao: page.vao, vbo: page.vbo, ibo: page.ibo, sharedPage: page, drawIndices: indices, drawVertices: mesh.vertices,
         vertexStart, vertexCount: vertices, indexStart, indexCount: indices.length,
         indexType: this.gl.UNSIGNED_SHORT, indexBytes: 2, triangleCount: mesh.triangleCount,
         byteLength: mesh.vertices.byteLength + offsets.byteLength + indices.byteLength,

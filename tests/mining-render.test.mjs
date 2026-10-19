@@ -531,12 +531,13 @@ function waitForWorkerMessage(worker, predicate) {
 }
 
 function assertRegionBufferRevisionHandoff() {
-  const canvas = { addEventListener() {}, removeEventListener() {} };
+  const canvas = { width: 1, height: 1, clientWidth: 640, clientHeight: 360, addEventListener() {}, removeEventListener() {} };
   const renderer = new WebGL2VoxelRenderer(canvas, { useRegionBatching: true, regionChunkSize: 4 });
   const events = [];
   let handleSerial = 0;
   renderer.initialized = true;
-  renderer.gl = {};
+  const viewports = [];
+  renderer.gl = { viewport: (...rectangle) => viewports.push(rectangle) };
   renderer.bufferManager = {
     createChunkBuffers(mesh) {
       const handle = {
@@ -564,6 +565,9 @@ function assertRegionBufferRevisionHandoff() {
   });
   chunk.setMeshes(testQuadMesh(1), null);
   assert.equal(renderer.prepareChunksForRender([chunk], { maxUploads: 1 }).uploaded, 1, "the first committed mesh should upload once");
+  assert.deepEqual(viewports, [[0, 0, 640, 360]], "prepare should establish the actual backing viewport before visibility");
+  assert.equal(canvas.width, 640);
+  assert.equal(canvas.height, 360);
   const firstRegion = renderer.regionBuffers.get("0,0");
 
   chunk.markDirty();
@@ -595,12 +599,12 @@ function assertRegionBufferRevisionHandoff() {
 }
 
 function assertBuildingUploadsDoNotInvalidateTerrainRegions() {
-  const canvas = { addEventListener() {}, removeEventListener() {} };
+  const canvas = { width: 1, height: 1, clientWidth: 640, clientHeight: 360, addEventListener() {}, removeEventListener() {} };
   const renderer = new WebGL2VoxelRenderer(canvas, { useRegionBatching: true, regionChunkSize: 4 });
   const disposed = [];
   let handleSerial = 0;
   renderer.initialized = true;
-  renderer.gl = {};
+  renderer.gl = { viewport() {} };
   renderer.bufferManager = {
     createChunkBuffers(mesh) {
       return {

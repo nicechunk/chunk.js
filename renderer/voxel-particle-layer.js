@@ -361,12 +361,33 @@ export class VoxelParticleLayer {
   }
 
   render({ viewProjection, origin, lighting, textureArray = null, particles = this.particles }) {
-    if (!particles.length) return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength };
-    if (!this.program) this.init();
-    const gl = this.gl;
-    const count = this.writeInstanceData(particles,origin);
-    if (!count) return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength };
+    const count = this.prepareInstances(particles, origin);
+    return this.renderPrepared({ viewProjection, origin, lighting, textureArray, start: 0, count });
+  }
 
+  // The global blend queue writes one ordered instance stream, then selects
+  // disjoint contiguous intervals without overwriting any other segment.
+  prepareInstances(particles = this.particles, origin = { worldX: 0, worldY: 0, worldZ: 0 }) {
+    this.preparedCount = 0;
+    if (!particles.length) return 0;
+    if (!this.program) this.init();
+    const count = this.writeInstanceData(particles, origin);
+    if (!count) return 0;
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceVbo);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instanceData, 0, count * PARTICLE_INSTANCE_FLOATS);
+    this.preparedCount = count;
+    return count;
+  }
+
+  renderPrepared({ viewProjection, lighting, textureArray = null, start = 0, count = this.preparedCount,
+    bindUniforms = true } = {}) {
+    const available = this.preparedCount ?? 0;
+    start = Math.max(0, Math.trunc(start));
+    count = Math.max(0, Math.min(Math.trunc(count ?? 0), available - start));
+    if (!this.program || !count) return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength };
+    const gl = this.gl;
+    if (bindUniforms) {
     gl.useProgram(this.program);
     gl.uniformMatrix4fv(this.uniforms.uViewProjection, false, viewProjection);
     gl.uniform3f(this.uniforms.uWorldOrigin,0,0,0);
@@ -387,10 +408,18 @@ export class VoxelParticleLayer {
     gl.uniform4f(this.uniforms.uLightParams, lightParams[0], lightParams[1], lightParams[2], lightParams[3]);
     textureArray?.bind?.(0);
     gl.uniform1i(this.uniforms.uTextureArray, 0);
-
+    }
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceVbo);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instanceData.subarray(0, count * PARTICLE_INSTANCE_FLOATS));
+    // WebGL2 has no core base-instance draw. Rebase every per-instance
+    // attribute, retaining the geometry attributes and the immutable cube EBO.
+    const base = start * PARTICLE_INSTANCE_FLOATS * 4, stride = PARTICLE_INSTANCE_FLOATS * 4;
+    instanceAttribute(gl, 2, 3, stride, base);
+    instanceAttribute(gl, 3, 3, stride, base + 12);
+    instanceAttribute(gl, 4, 4, stride, base + 24);
+    instanceAttribute(gl, 5, 3, stride, base + 40);
+    instanceAttribute(gl, 6, 3, stride, base + 52);
+    instanceAttribute(gl, 7, 4, stride, base + 64);
     gl.drawElementsInstanced(gl.TRIANGLES, CUBE_INDICES.length, gl.UNSIGNED_SHORT, 0, count);
     gl.bindVertexArray(null);
     return { drawCalls: 1, triangles: count * CUBE_INDICES.length / 3, bufferMemory: this.byteLength };
@@ -448,6 +477,7 @@ export class VoxelParticleLayer {
     this.geometryVbo = null;
     this.instanceVbo = null;
     this.ibo = null;
+    this.preparedCount = 0;
     this.particles.length = 0;
     this.freeParticles.length = 0;
   }

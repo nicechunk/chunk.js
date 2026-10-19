@@ -4,6 +4,9 @@ import { cameraForward, cameraOrigin, cameraViewProjection } from "./camera.js";
 import { filterChunksByCameraFrustum, cameraRenderCenterChunk, prepareCameraFrustum, chunkIntersectsCameraFrustum } from "./frustum.js";
 import { avatarHoldsTransparentBlock, updateAvatarMeshVertices } from "./avatar-mesh.js";
 import { BufferManager } from "./buffer-manager.js";
+import { SortedIndexStream, configureAvatarVertexArray } from "./sorted-index-stream.js";
+import { selectVisibleAvatars } from "./avatar-visibility.js";
+import { RenderFrameInputs } from "./render-frame-inputs.js";
 import { AsyncGpuTimer, GpuResourceLedger, instrumentGl, assertGpuUpload } from "./gpu-diagnostics.js";
 import { waterPrecisionUniforms } from "./water-precision.js";
 import { RenderStageStats } from "../debug/stats.js";
@@ -176,12 +179,21 @@ export class WebGL2VoxelRenderer {
     this.cachedCpuMeshBytes=0;
     this.uploadDiagnostics = { failed: 0, bytes: 0, cpuMs: 0, oldestPendingMs: 0 };
     this.pendingUploadSince = new Map();
+    this.uploadWaitFrames = new Map();
     this.pendingMeshSources = new Map();
     this.prefetchQueueVersion = 0;
     this.prefetchQueueCache = null;
     this.observedChunkCommits = new WeakMap();
     this.lastPrefetchAt = -Infinity;
     this.avatarFrameStates = new Map();
+    this.avatarInstances = new Map();
+    this.visibleAvatars = [];
+    this.sortedIndexStream = null;
+    this.transparentQueue = [];
+    this.transparentItemPool = [];
+    this.transparentSegments = [];
+    this.transparentSegmentPool = [];
+    this.orderedParticles = [];
     this.cloudLayer = null;
     this.skyGradient = null;
     this.sunDisc = null;
@@ -195,6 +207,12 @@ export class WebGL2VoxelRenderer {
     this.renderFrameId = 0;
     this.regionGroupCache = new Map();
     this.frustumFilterCache = null;
+    this.renderFrameInputs = new RenderFrameInputs();
+    this.viewportRevision = 0;
+    this.observedCanvasSize = null;
+    this.canvasResizeObserver = null;
+    this.canvasResizeDirty = true;
+    this.avatarRestorePrepared = false;
     this.underwaterBlend = 0;
     this.lastUnderwaterFrameAt = null;
     this._contextListenersAttached = false;
@@ -226,14 +244,19 @@ export class WebGL2VoxelRenderer {
     this.contextGeneration += 1;
     this.gpuTimer?.dispose({ lost: true });
     this.gpuTimer = null;
+    this.releaseAvatarInstances(null, { lost: true });
+    this.sortedIndexStream?.dispose({ lost: true }); this.sortedIndexStream = null;
+    this.clearFramePools();
     this.bufferManager?.dispose?.({lost:true});
     this.resourceLedger.reset(this.contextGeneration);
     this.chunkBuffers.clear(); this.visualChunkBuffers.clear();
     this.regionBuffers.clear(); this.visualRegionBuffers.clear(); this.avatarBuffers.clear();
     this.regionGroupCache.clear(); this.frustumFilterCache = null;
+    this.preparedRenderFrame = null;
+    this.renderFrameInputs.clear();
     this.avatarResourceCache = new WeakMap();
     this.retryUploads.clear(); this.uploadStaging.clear();
-    this.pendingMeshSources.clear(); this.pendingUploadSince.clear();
+    this.pendingMeshSources.clear(); this.pendingUploadSince.clear(); this.uploadWaitFrames.clear();
     this.prefetchQueueCache = null;
     this.observedChunkCommits = new WeakMap();
     this.uploadValidationFence = null;
@@ -350,19 +373,50 @@ export class WebGL2VoxelRenderer {
     const explicitSize = Number.isFinite(width) && Number.isFinite(height);
     const rect = explicitSize
       ? null
-      : this.canvas.getBoundingClientRect?.() ?? {
+      : (this.canvasResizeObserver && this.observedCanvasSize ? this.observedCanvasSize : this.canvas.getBoundingClientRect?.()) ?? {
           width: this.canvas.clientWidth || 1,
           height: this.canvas.clientHeight || 1,
         };
     const cssWidth = Math.max(1, Math.floor(width ?? rect.width ?? 1));
     const cssHeight = Math.max(1, Math.floor(height ?? rect.height ?? 1));
+    this.observedCanvasSize = { width: cssWidth, height: cssHeight };
+    this.canvasResizeDirty = false;
     const pixelRatio = this.clampedDpr(dpr);
     const { width: targetWidth, height: targetHeight } = renderResolution(cssWidth, cssHeight, pixelRatio, this.options.maxRenderPixels);
     if (this.canvas.width === targetWidth && this.canvas.height === targetHeight) return false;
     this.canvas.width = targetWidth;
     this.canvas.height = targetHeight;
     gl.viewport(0, 0, targetWidth, targetHeight);
+    this.viewportRevision = (this.viewportRevision ?? 0) + 1;
     return true;
+  }
+
+  observeCanvasResize() {
+    if (this.canvasResizeObserver || !this.options.autoResizeEachFrame || typeof globalThis.ResizeObserver !== 'function') return;
+    let observer;
+    try {
+      observer = new globalThis.ResizeObserver(entries => {
+        const rect = entries.find(entry => entry.target === this.canvas)?.contentRect;
+        if (!rect || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)) return;
+        if (rect.width === this.observedCanvasSize?.width && rect.height === this.observedCanvasSize?.height) return;
+        this.observedCanvasSize = { width: rect.width, height: rect.height };
+        this.canvasResizeDirty = true;
+      });
+      observer.observe(this.canvas);
+      this.canvasResizeObserver = observer;
+    } catch { observer?.disconnect(); }
+  }
+
+  prepareViewport(cameraState, prepared = null) {
+    this.observeCanvasResize();
+    const pixelRatio = this.clampedDpr();
+    const unchanged = prepared && !this.canvasResizeDirty && prepared.viewportRevision === this.viewportRevision
+      && prepared.width === this.canvas.width && prepared.height === this.canvas.height && prepared.pixelRatio === pixelRatio;
+    // Without ResizeObserver, preparation owns the single layout read for this
+    // frame. Explicit resize, observed changes and DPR changes still invalidate it.
+    if (this.options.autoResizeEachFrame && !unchanged) this.resize(null, null, pixelRatio);
+    if (cameraState) cameraState.aspect = Math.max(1, this.canvas.width) / Math.max(1, this.canvas.height);
+    return { viewportRevision: this.viewportRevision, width: this.canvas.width, height: this.canvas.height, pixelRatio };
   }
 
   clampedDpr(dpr = null) {
@@ -378,16 +432,16 @@ export class WebGL2VoxelRenderer {
   }
   diagnostics({maxEntries=64}={}) {
     const arrays=new Set(),meshes=new Set(),entries=[];let cpuMeshBytes=0,pendingUploadBytes=0;
-    const addMesh=(mesh)=>{if(!mesh||meshes.has(mesh))return;meshes.add(mesh);for(const a of [mesh.vertices,mesh.indices,...meshDrawRangeArrays(mesh)])if(a?.buffer&&!arrays.has(a.buffer)){arrays.add(a.buffer);cpuMeshBytes+=a.buffer.byteLength;}};
+    const addMesh=(mesh)=>{if(!mesh||meshes.has(mesh))return;meshes.add(mesh);for(const a of [mesh.vertices,mesh.runtimeVertices,mesh.indices,...meshDrawRangeArrays(mesh)])if(a?.buffer&&!arrays.has(a.buffer)){arrays.add(a.buffer);cpuMeshBytes+=a.buffer.byteLength;}};
     for(const mesh of this.avatarMeshes.values())addMesh(mesh);
-    for(const snapshot of this.avatarFrameStates.values())if(snapshot.vertices?.buffer&&!arrays.has(snapshot.vertices.buffer)){arrays.add(snapshot.vertices.buffer);cpuMeshBytes+=snapshot.vertices.buffer.byteLength;}
+    for(const snapshot of this.avatarInstances.values())for(const data of [snapshot.vertices,snapshot.pendingVertices,snapshot.committedVertices])if(data?.buffer&&!arrays.has(data.buffer)){arrays.add(data.buffer);cpuMeshBytes+=data.buffer.byteLength;}
     for(const {chunk,visual}of this.pendingMeshSources.values())addMesh(chunk?.[visual?"visualMesh":"mesh"]);
     for(const groups of this.regionGroupCache.values())for(const group of groups)for(const chunk of group.chunks)addMesh(chunk?.[group.meshField??"mesh"]);
-    const addEntry=entry=>{addMesh(entry.mesh);if(entries.length<maxEntries)entries.push({id:entry.id,instanceGeneration:entry.instanceGeneration,worldRevision:entry.source?.version,dataRevision:entry.source?.dataRevision,meshRevision:entry.version,haloRevision:entry.source?.haloRevision,lightRevision:entry.source?.lightRevision,gpuToken:entry.token,contextGeneration:entry.generation});};
+    const addEntry=entry=>{addMesh(entry.mesh);if(entries.length<maxEntries)entries.push({id:entry.id,instanceGeneration:entry.instanceGeneration,worldRevision:entry.source?.version,dataRevision:entry.source?.dataRevision,meshRevision:entry.version,haloRevision:entry.source?.haloRevision,lightRevision:entry.source?.lightRevision,gpuToken:entry.token,contextGeneration:entry.generation,meshReadyAt:entry.meshReadyAt,gpuReadyAt:entry.gpuReadyAt,firstDrawAt:entry.firstDrawAt});};
     for(const map of [this.chunkBuffers,this.visualChunkBuffers])for(const e of map.values())addEntry(e);
     for(const map of [this.regionBuffers,this.visualRegionBuffers])for(const region of map.values())for(const e of region.members?.values()??[])addEntry(e);
-    for(const stage of this.uploadStaging.values()){const t=stage.transaction;addMesh(stage.source?.mesh);pendingUploadBytes+=t.vertices.byteLength+t.indices.byteLength-t.uploadedBytes;}
-    return {...this.resourceLedger.snapshot(),...this.gpuTimer?.snapshot(),...this.bufferManager?.shared?.snapshot(),cpuStages:this.stageStats.snapshot(),cpuTextureTileCache:materialTileCacheStats(),cpuMeshBytes,pendingUploadBytes,regionCacheEntries:this.regionGroupCache.size,pendingUploads:this.pendingUploadSince.size,uploadStaging:this.uploadStaging.size,upload:{...this.uploadDiagnostics},entries};
+    for(const stage of this.uploadStaging.values()){const t=stage.transaction;addMesh(stage.mesh);pendingUploadBytes+=t.vertices.byteLength-t.vertexOffset+t.indices.byteLength-t.indexOffset+(t.origins?t.origins.byteLength-t.originOffset:0);}
+    return {...this.resourceLedger.snapshot(),...this.gpuTimer?.snapshot(),...this.bufferManager?.shared?.snapshot(),cpuStages:this.stageStats.snapshot(),cpuTextureTileCache:materialTileCacheStats(),cpuMeshBytes,cpuSortedIndexBytes:this.sortedIndexStream?.capacityBytes??0,sortedIndices:this.sortedIndexStream?.snapshot()??null,pendingUploadBytes,regionCacheEntries:this.regionGroupCache.size,pendingUploads:this.pendingUploadSince.size,uploadStaging:this.uploadStaging.size,upload:{...this.uploadDiagnostics},entries};
   }
 
   setRenderLogger(logger) {
@@ -396,6 +450,12 @@ export class WebGL2VoxelRenderer {
 
   logRenderEvent(type, data = {}) {
     this.renderLogger?.record?.(type, data);
+  }
+
+  clearFramePools() {
+    for (const name of ['transparentQueue','transparentItemPool','transparentSegments','transparentSegmentPool',
+      'orderedParticles','visibleAvatars','pendingFirstDrawEntries']) if (this[name]) this[name].length = 0;
+    this.transparentKeyCache = new WeakMap();
   }
 
   getRegionGroups(chunks, meshField = "mesh") {
@@ -538,7 +598,9 @@ export class WebGL2VoxelRenderer {
     const entry = { id: chunk.id, source: chunk, mesh, token: meshIdentity(chunk, visual),
       version: committedMeshVersion(chunk, visual), instanceGeneration: chunk.generation ?? 0, generation,
       chunkX: chunk.chunkX, chunkZ: chunk.chunkZ, originY: mesh.originY ?? chunk.originY ?? 0,
-      parentId: chunk.parentId ?? chunk.parentChunkId ?? chunk.id, handle };
+      parentId: chunk.parentId ?? chunk.parentChunkId ?? chunk.id, handle, visual,
+      meshReadyAt: chunk[visual ? 'visualMeshReadyAt' : 'meshReadyAt'] ?? null,
+      gpuReadyAt: performance.now(), firstDrawAt: null, firstDrawQueuedTo: null };
     buffers.set(chunk.id, entry);
     if (region) regions.set(region.id, { ...region, members: buffers,
       chunkIds: new Set(buffers.keys()), chunkVersions: new Map([...buffers].map(([id, member]) => [id, member.version])),
@@ -549,9 +611,22 @@ export class WebGL2VoxelRenderer {
     chunk[visual ? "visualGpuUploaded" : "gpuUploaded"] = true;
     this.retryUploads.delete(key);
     this.pendingUploadSince.delete(key);
+    this.uploadWaitFrames.delete(key);
     this.pendingMeshSources.delete(key);
     this.uploadDiagnostics.bytes += handle.byteLength;
+    if (this.renderLogger?.enabled) this.logRenderEvent('mesh-gpu-ready', {chunkId:entry.id,visual,token:entry.token,
+      meshReadyAt:entry.meshReadyAt,gpuReadyAt:entry.gpuReadyAt,
+      cpuToGpuMs:entry.meshReadyAt == null ? null : Math.max(0,entry.gpuReadyAt-entry.meshReadyAt)});
     return entry;
+  }
+
+  noteEntryFirstDraw(entry) {
+    if (entry.firstDrawAt != null) return;
+    entry.firstDrawAt = performance.now();
+    if (this.renderLogger?.enabled) this.logRenderEvent('mesh-first-draw', {chunkId:entry.id,visual:entry.visual,
+      token:entry.token,meshReadyAt:entry.meshReadyAt,gpuReadyAt:entry.gpuReadyAt,firstDrawAt:entry.firstDrawAt,
+      cpuToFirstDrawMs:entry.meshReadyAt == null ? null : Math.max(0,entry.firstDrawAt-entry.meshReadyAt),
+      gpuToFirstDrawMs:Math.max(0,entry.firstDrawAt-entry.gpuReadyAt)});
   }
 
   uploadChannel(chunk, visual = false, target = null, maxBytes = Infinity, region = null) {
@@ -608,6 +683,7 @@ export class WebGL2VoxelRenderer {
     this.observedChunkCommits = new WeakMap();
     this.prefetchQueueCache = null;
     this.preparedRenderFrame = null;
+    this.renderFrameInputs?.clear();
     for (const buffers of [this.chunkBuffers, this.visualChunkBuffers]) {
       for (const [id, entry] of buffers) if (id === chunkId || entry.parentId === chunkId) {
         this.bufferManager?.disposeChunkBuffers(entry.handle); buffers.delete(id);
@@ -622,7 +698,7 @@ export class WebGL2VoxelRenderer {
     for (const [key, groups] of this.regionGroupCache) if (groups.some(group => group.chunks.some(c => c.id === chunkId || c.parentId === chunkId))) this.regionGroupCache.delete(key);
     for (const key of this.retryUploads.keys()) if (key.endsWith(`:${chunkId}`) || key.includes(`:${chunkId}@`)) this.retryUploads.delete(key);
     for(const [key,staging]of this.uploadStaging)if(staging.source.id===chunkId||staging.source.parentId===chunkId){this.bufferManager?.disposeChunkBuffers(staging.transaction.handle);this.uploadStaging.delete(key);}
-    for(const key of this.pendingUploadSince.keys())if(key.endsWith(`:${chunkId}`)||key.includes(`:${chunkId}@`)){this.pendingUploadSince.delete(key);this.pendingMeshSources.delete(key);}
+    for(const key of this.pendingUploadSince.keys())if(key.endsWith(`:${chunkId}`)||key.includes(`:${chunkId}@`)){this.pendingUploadSince.delete(key);this.pendingMeshSources.delete(key);this.uploadWaitFrames?.delete(key);}
     this.frustumFilterCache = null;
   }
   pruneChunks(liveChunkIds) {
@@ -661,9 +737,12 @@ export class WebGL2VoxelRenderer {
     }
   }
 
-  prepareChunksForRender(visibleChunks = [], { maxUploads = this.options.maxChunkUploadsPerFrame, cameraState = null, residencyChunks = [], allowBackgroundUploads = true, backgroundUploadBudget = null, prefetchFocus = null } = {}) {
+  prepareChunksForRender(visibleChunks = [], { maxUploads = this.options.maxChunkUploadsPerFrame, cameraState = null, residencyChunks = [], allowBackgroundUploads = true, backgroundUploadBudget = null, prefetchFocus = null, deadline = Infinity } = {}) {
     this.preparedRenderFrame = null;
+    this.avatarRestorePrepared = true;
+    this.uploadWaitFrames ??= new Map();
     if (!this.gpuReady()) return { uploaded: 0, pendingUploads: 0, paused: true };
+    const viewport = this.prepareViewport(cameraState);
     const settlement = this.settleDeferredUploads();
     if(settlement.waiting) return { uploaded: settlement.uploaded,
       pendingUploads: this.pendingUploadSince.size, uploadedBytes: 0, validationPending: settlement.waiting };
@@ -671,15 +750,20 @@ export class WebGL2VoxelRenderer {
       this.pollFrameCompletion();
       if(this.frameCompletionFences.length>=2)return {uploaded:0,pendingUploads:this.pendingUploadSince.size,uploadedBytes:0,frameDeferred:true};
     }
-    this.restoreAvatarUploads();
     const startedAt = performance.now(), limit = Math.max(0, Math.trunc(maxUploads ?? 0));
+    const externalDeadline = Number.isFinite(deadline) ? deadline : Infinity;
+    const uploadDeadline = Math.min(startedAt + this.options.maxUploadCpuMs, externalDeadline);
+    if (performance.now() < uploadDeadline) this.restoreAvatarUploads({deadline:uploadDeadline});
     this.bufferManager.reclaimSharedChunks?.();
     const visibleSet = new Set(visibleChunks), residentSet = new Set(residencyChunks);
     this.observeChunkCommits(visibleSet);
     this.observeChunkCommits(residentSet);
+    const visibilityStartedAt = performance.now();
     const chunks = this.filterChunksForCamera(filterChunksByRenderRadius(flattenRenderSections(visibleChunks,{includeEmpty:false}),cameraState,this.options.viewDistance),cameraState);
+    this.stageStats?.record('section-visibility-cpu',performance.now()-visibilityStartedAt);
     const visibleSections = new Map(chunks.map((chunk,index)=>[chunk,index]));
-    this.preparedRenderFrame = {input:visibleChunks,camera:captureFrustumCamera(cameraState),chunks,viewDistance:this.options.viewDistance};
+    (this.renderFrameInputs ??= new RenderFrameInputs()).capture(visibleChunks);
+    this.preparedRenderFrame = {input:visibleChunks,camera:captureFrustumCamera(cameraState),chunks,viewDistance:this.options.viewDistance,...viewport};
     const candidates = [];
     const center = cameraState ? cameraRenderCenterChunk(cameraState) : null;
     const backgroundLimit = Math.min(limit, Math.max(0, Math.trunc(backgroundUploadBudget?.maxUploads ?? this.options.maxPrefetchUploadsPerFrame)));
@@ -700,6 +784,18 @@ export class WebGL2VoxelRenderer {
       const key = `${visual ? 'visual' : 'opaque'}:${chunk.id}`;
       if (this.pendingMeshSources.get(key)?.chunk === chunk) candidates.push({key,chunk,visual,visible:true});
     }
+    // Input order supplies screen/distance priority. Accumulated frame debt
+    // gives waiting visual and large staged channels real completion turns,
+    // including a low-Hz host where wall-clock-only heuristics are too coarse.
+    const now = performance.now();
+    for (const candidate of candidates) {
+      const debt = this.uploadWaitFrames.get(candidate.key) ?? 0;
+      const age = now - (this.pendingUploadSince.get(candidate.key) ?? now);
+      candidate.priority = (visibleSections.get(candidate.chunk) ?? 0) * 2 + (candidate.visual ? 1 : 0)
+        - debt * 4 - age / 16;
+      this.uploadWaitFrames.set(candidate.key,debt+1);
+    }
+    candidates.sort((a,b)=>a.priority-b.priority);
     if (allowPrefetch && this.resourceLedger.bufferBytes < this.options.maxPrefetchGpuBytes) {
       let cache=this.prefetchQueueCache;
       if (!cache || cache.version!==this.prefetchQueueVersion || cache.x!==center?.chunkX || cache.z!==center?.chunkZ
@@ -742,7 +838,9 @@ export class WebGL2VoxelRenderer {
       const mesh=chunk?.[visual?'visualMesh':'mesh']; if(!mesh?.indexCount)continue;
       const existing=this.entryForChunk(chunk,visual);
       if(existing?.token===meshIdentity(chunk,visual) && chunk[visual?'visualGpuUploaded':'gpuUploaded'])continue;
-      const overBudget=attempts>=limit || bytes>=this.options.maxUploadBytesPerFrame || (attempts>0 && performance.now()-startedAt>=this.options.maxUploadCpuMs);
+      if ((this.retryUploads.get(key) ?? 0) > performance.now()) { if (visible) pendingUploads++; continue; }
+      const overBudget=attempts>=limit || bytes>=this.options.maxUploadBytesPerFrame
+        || (performance.now()>=uploadDeadline && (attempts>0 || externalDeadline<Infinity));
       if(overBudget) {if(!visible)break;pendingUploads++;oldestPendingMs=Math.max(oldestPendingMs,performance.now()-this.pendingUploadSince.get(key));continue;}
       if (!visible && (prefetchUploads >= backgroundLimit || prefetchBytes >= backgroundBytes
         || (backgroundStartedAt !== null && performance.now()-backgroundStartedAt >= backgroundCpuMs))) break;
@@ -752,6 +850,10 @@ export class WebGL2VoxelRenderer {
       const remainingBytes=Math.max(1,Math.min(this.options.maxUploadBytesPerFrame-bytes, visible ? Infinity : backgroundBytes-prefetchBytes));
       const result=region?this.uploadRegion(region,undefined,{visual,maxBytes:remainingBytes}):this.uploadChannel(chunk,visual,null,remainingBytes);
       attempts++;bytes+=this.lastUploadAttemptBytes;
+      if (visible && this.lastUploadAttemptBytes > 0) {
+        if (this.pendingMeshSources.has(key)) this.uploadWaitFrames.set(key,0);
+        else this.uploadWaitFrames.delete(key);
+      }
       if (!visible) {prefetchUploads++;prefetchBytes+=this.lastUploadAttemptBytes;}
       if(result)uploaded++;else {if(visible)pendingUploads++;oldestPendingMs=Math.max(oldestPendingMs,performance.now()-(this.pendingUploadSince.get(key)??performance.now()));}
     }
@@ -804,21 +906,22 @@ export class WebGL2VoxelRenderer {
       if(handle?.generation===generation && handle.avatarRefs>0){handle.avatarRefs+=1;}else{handle=this.createAvatarBuffers(mesh);handle.generation=generation;handle.avatarRefs=1;this.avatarResourceCache.set(mesh,handle);}
       if(this.contextLost || this.disposed || generation!==this.contextGeneration){this.disposeAvatarBuffers(handle);return null;}
       const entry={id:key,mesh,handle,generation};this.avatarBuffers.set(key,entry);
-      if(existing)this.disposeAvatarBuffers(existing.handle);
+      if(existing){this.releaseAvatarInstances(key);this.disposeAvatarBuffers(existing.handle);}
       this.retryUploads.delete(retryKey);this.lastUploadError=null;return entry;
     } catch(error) {this.lastUploadError=error;this.uploadDiagnostics.failed++;this.retryUploads.set(retryKey,performance.now()+this.options.uploadRetryMs);return null;}
   }
-  restoreAvatarUploads() {
+  restoreAvatarUploads({deadline=Infinity}={}) {
     if(this.contextLost||this.disposed||!this.initialized)return;
     if(this.uploadValidationFence || this.hasUnvalidatedUploads())return;
     let attempted=0,bytes=0;
     for(const [id,mesh]of this.avatarMeshes){const entry=this.avatarBuffers.get(id);if(entry?.mesh===mesh&&entry.generation===this.contextGeneration)continue;
+      if(performance.now()>=deadline)break;
       if((this.retryUploads.get(`avatar:${id}`)??0)>performance.now())continue;
       if(attempted>=2 || (attempted>0&&bytes+mesh.vertices.byteLength+mesh.indices.byteLength>this.options.maxUploadBytesPerFrame))break;
       this.uploadAvatarMesh(id,mesh);attempted++;bytes+=mesh.vertices.byteLength+mesh.indices.byteLength;
     }
   }
-  removeAvatarMesh(id) {this.cpuMeshBytesDirty=true;const key=String(id);this.avatarMeshes.delete(key);const old=this.avatarBuffers.get(key);if(old)this.disposeAvatarBuffers(old.handle);this.avatarBuffers.delete(key);this.retryUploads.delete(`avatar:${key}`);}
+  removeAvatarMesh(id) {this.cpuMeshBytesDirty=true;const key=String(id);this.releaseAvatarInstances(key);this.avatarMeshes.delete(key);const old=this.avatarBuffers.get(key);if(old)this.disposeAvatarBuffers(old.handle);this.avatarBuffers.delete(key);this.retryUploads.delete(`avatar:${key}`);}
 
   emitVoxelParticles(kind, options = {}) {
     if (!this.gpuReady()) return false;
@@ -849,15 +952,17 @@ export class WebGL2VoxelRenderer {
     if(this.deferredUploadsSupported())this.pollFrameCompletion();
     if(this.uploadValidationFence) return { ...this.stats, renderDeferred: true, cpuDrawSubmitMs: 0 };
     if(this.frameCompletionFences.length>=2)return { ...this.stats, renderDeferred:true, cpuDrawSubmitMs:0 };
-    this.restoreAvatarUploads();
+    if (!this.avatarRestorePrepared) this.restoreAvatarUploads({deadline:performance.now()+this.options.maxUploadCpuMs});
+    this.avatarRestorePrepared = false;
     const drawSubmitStartedAt=performance.now();
     this.gpuTimer?.begin();
     const gl = this.gl;
-    if (this.options.autoResizeEachFrame) this.resize();
-    cameraState.aspect = Math.max(1, this.canvas.width) / Math.max(1, this.canvas.height);
     const prepared = this.preparedRenderFrame;
+    const viewport = this.prepareViewport(cameraState, prepared);
     this.preparedRenderFrame = null;
-    const renderChunks = prepared?.input === visibleChunks && prepared.viewDistance === this.options.viewDistance && sameFrustumCamera(prepared.camera,cameraState) ? prepared.chunks : this.filterChunksForCamera(
+    const renderChunks = prepared?.input === visibleChunks && prepared.viewDistance === this.options.viewDistance
+      && prepared.width === viewport.width && prepared.height === viewport.height
+      && this.renderFrameInputs.matches(visibleChunks) && sameFrustumCamera(prepared.camera,cameraState) ? prepared.chunks : this.filterChunksForCamera(
       filterChunksByRenderRadius(flattenRenderSections(visibleChunks, { includeEmpty: false }), cameraState, this.options.viewDistance),
       cameraState,
     );
@@ -871,6 +976,9 @@ export class WebGL2VoxelRenderer {
     this.avatarFrameStates.clear();
     const viewProjection = cameraViewProjection(cameraState);
     const origin = cameraOrigin(cameraState);
+    const visibleAvatars = selectVisibleAvatars(avatars,cameraState,
+      avatar=>this.avatarBuffers.get(String(avatar.meshId||avatar.id)),this.visibleAvatars);
+    this.releaseAvatarInstances(null,{live:new Set(visibleAvatars.map(avatar=>this.avatarInstanceKey(avatar)))});
     const frameTime = performance.now();
     const underwater = cameraIsInsideFluid(cameraState, visibleChunks);
     if (this.lastUnderwaterFrameAt === null) {
@@ -944,7 +1052,7 @@ export class WebGL2VoxelRenderer {
     drawCalls+=terrainStats.drawCalls;triangles+=terrainStats.triangles;
     const visualStats=this.renderMeshPass(worldChunks,origin,['opaque','cutout'],true);
     drawCalls+=visualStats.drawCalls;triangles+=visualStats.triangles;
-    const avatarStats=this.renderAvatars(cameraState,avatars,viewProjection,origin,lighting,{opaqueOnly:true});
+    const avatarStats=this.renderAvatars(cameraState,visibleAvatars,viewProjection,origin,lighting,{opaqueOnly:true});
     drawCalls+=avatarStats.drawCalls;triangles+=avatarStats.triangles;
     if(typeof gl.blendFunc === "function")gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
     gl.enable(gl.BLEND);gl.depthMask(false);
@@ -952,9 +1060,9 @@ export class WebGL2VoxelRenderer {
       for(const visual of [false,true]){const shadowStats=this.renderMeshPass(worldChunks,origin,['shadow'],visual);drawCalls+=shadowStats.drawCalls;triangles+=shadowStats.triangles;}
     }
     gl.disable(gl.BLEND);gl.depthMask(true);
-    const projectedShadowStats=this.renderProjectedShadows(avatars,viewProjection,origin,lighting);
+    const projectedShadowStats=this.renderProjectedShadows(avatars,viewProjection,origin,lighting,cameraState);
     drawCalls+=projectedShadowStats.drawCalls;triangles+=projectedShadowStats.triangles;
-    const blendStats=this.renderTransparentScene(cameraState,worldChunks,avatars,viewProjection,origin,lighting,previewChunks);
+    const blendStats=this.renderTransparentScene(cameraState,worldChunks,visibleAvatars,viewProjection,origin,lighting,previewChunks);
     drawCalls+=blendStats.drawCalls;triangles+=blendStats.triangles;
 
     const overlayStats = this.renderVoxelOverlays(viewProjection, origin, overlays);
@@ -976,6 +1084,7 @@ export class WebGL2VoxelRenderer {
       cpuDrawSubmitMs: performance.now()-drawSubmitStartedAt,
       uploadDiagnostics: {...this.uploadDiagnostics},
       cpuMeshBytes:this.residentCpuMeshBytes(),
+      cpuSortedIndexBytes:this.sortedIndexStream?.capacityBytes??0,
       ...this.bufferManager?.shared?.snapshot(),
       gpuChunks: this.regionBuffers.size + this.visualRegionBuffers.size + this.chunkBuffers.size + this.visualChunkBuffers.size,
       width: this.canvas.width,
@@ -1057,6 +1166,7 @@ export class WebGL2VoxelRenderer {
     const uniforms=this.solidUniforms??this.uniforms;
     gl.useProgram(this.solidProgram??this.program);gl.uniform1f(uniforms.uOpacity,1);this.textureArray?.bind(0);
     let drawCalls=0,triangles=0,pendingPage=null,runs=0;
+    const firstDrawEntries = this.pendingFirstDrawEntries ??= []; firstDrawEntries.length = 0;
     const combined = passes.length===2 && passes[0]==='opaque' && passes[1]==='cutout';
     const flush=()=>{
       if(!runs)return;
@@ -1067,6 +1177,8 @@ export class WebGL2VoxelRenderer {
       if(runs>1 && typeof this.multiDraw?.multiDrawElementsWEBGL==='function'){
         this.multiDraw.multiDrawElementsWEBGL(gl.TRIANGLES,this.multiDrawCounts,0,pendingPage.indexType,this.multiDrawOffsets,0,runs);drawCalls++;
       }else for(let i=0;i<runs;i++){gl.drawElements(gl.TRIANGLES,this.multiDrawCounts[i],pendingPage.indexType,this.multiDrawOffsets[i]);drawCalls++;}
+      for (const entry of firstDrawEntries) this.noteEntryFirstDraw(entry);
+      firstDrawEntries.length = 0;
       runs=0;pendingPage=null;
     };
     for(const chunk of chunks){const entry=this.entryForChunk(chunk,visual);if(!entry?.handle)continue;
@@ -1077,6 +1189,7 @@ export class WebGL2VoxelRenderer {
       if(handle.sharedPage && combined){
         if(pendingPage && pendingPage!==handle.sharedPage)flush();
         pendingPage=handle.sharedPage;
+        if (entry.firstDrawAt == null) firstDrawEntries.push(entry);
         for(const pass of passes){const range=handle.drawRanges[pass];if(!range?.count)continue;
           const offset=range.offset*pendingPage.indexBytes;
           if(runs && this.multiDrawOffsets[runs-1]+this.multiDrawCounts[runs-1]*pendingPage.indexBytes===offset)this.multiDrawCounts[runs-1]+=range.count;
@@ -1092,106 +1205,194 @@ export class WebGL2VoxelRenderer {
       for(const pass of passes){const range=handle.drawRanges?.[pass] ?? (pass==='opaque'?{offset:0,count:handle.indexCount}:null);if(!range?.count)continue;
         if(uniforms.uSurfacePass)gl.uniform1f(uniforms.uSurfacePass,pass==='cutout'?1:0);
         gl.drawElements(gl.TRIANGLES,range.count,handle.indexType,range.offset*(handle.indexBytes??2));drawCalls++;triangles+=range.count/3;}
+      this.noteEntryFirstDraw(entry);
     }flush();gl.bindVertexArray(null);return {drawCalls,triangles,bufferMemory:0};
   }
   renderVisualChunks(chunks, origin) {return this.renderMeshPass(chunks,origin,['opaque','cutout'],true);}
 
-  renderTransparentScene(camera, chunks, avatars, vp, origin, lighting, previews=[]) {
-    if(this.contextLost||this.disposed||!this.gl||this.gl.isContextLost?.())return {drawCalls:0,triangles:0,bufferMemory:0};
-    const gl=this.gl,queue=[];const forward=cameraForward(camera);
-    const eye=[camera.localOffsetX||0,camera.localOffsetY||0,camera.localOffsetZ||0];
-    const add=(item,center)=>{item.key=`${item.kind}:${item.entry?.id??item.avatar?.id??item.particle?.id??""}:${item.unit?.sortOffset??item.unit?.offset??item.range?.offset??0}`;item.depth=(center[0]-eye[0])*forward[0]+(center[1]-eye[1])*forward[1]+(center[2]-eye[2])*forward[2];item.order=queue.length;queue.push(item);};
-    for(const chunk of [...chunks,...previews])for(const visual of [false,true]){const entry=this.entryForChunk(chunk,visual);if(!entry?.handle)continue;
-      const offset=[chunk.chunkX*chunk.chunkSize-origin.worldX,entry.originY-origin.worldY,chunk.chunkZ*chunk.chunkSize-origin.worldZ];
-      const preview=chunk.buildingPreview===true,drawOffset=shaderChunkOffset(entry.handle,origin,offset);
-      for(const unit of entry.handle.blendUnits??[]){if(unit.pass!=="blend")continue;add({kind:'terrain',entry,unit,offset:drawOffset,opacity:preview?0.46:1},unit.center.map((v,k)=>v+offset[k]));}
-      if(preview)for(const pass of ['opaque','cutout']){const range=entry.handle.drawRanges?.[pass];if(range?.count)add({kind:'terrain',entry,unit:range,offset:drawOffset,opacity:0.46},offset);}
-    }
-    for(const avatar of avatars){const entry=this.avatarBuffers.get(String(avatar.meshId||avatar.id));if(!entry?.handle)continue;
-      const opacity=Math.max(0,Math.min(1,Number(avatar.opacity??1)||0));
-      if(opacity<=0.001)continue;
-      const snapshot=this.avatarFrameState(avatar,entry);
-      const offset=[(avatar.worldX||0)+(avatar.localOffsetX||0)-origin.worldX,(avatar.worldY||0)+(avatar.localOffsetY||0)-origin.worldY,(avatar.worldZ||0)+(avatar.localOffsetZ||0)-origin.worldZ];
-      const yaw=avatar.yaw||0,c=Math.cos(yaw),s=Math.sin(yaw);
-      const vertices=snapshot.vertices,indices=entry.mesh.indices,stride=(entry.mesh.vertexStrideBytes||40)/4;
-      for(let i=0;i<indices.length;i+=3){
-        const a=indices[i]*stride,b=indices[i+1]*stride,d=indices[i+2]*stride;
-        // Hidden equipment is collapsed with zero alpha. It has no pixels and
-        // must not become one transparent draw per invisible triangle.
-        if(vertices[a+9]===0 && vertices[b+9]===0 && vertices[d+9]===0
-          && (stride<13 || vertices[a+12]<0 && vertices[b+12]<0 && vertices[d+12]<0))continue;
-        if(opacity>=0.999 && !(vertices[a+9]<0.999 || vertices[b+9]<0.999 || vertices[d+9]<0.999
-          || stride>=14 && (vertices[a+13]>0.5 || vertices[b+13]>0.5 || vertices[d+13]>0.5)))continue;
-        const center=[0,0,0];
-        for(let v=0;v<3;v++){const o=indices[i+v]*stride;center[0]+=(c*vertices[o]+s*vertices[o+2])/3;center[1]+=vertices[o+1]/3;center[2]+=(-s*vertices[o]+c*vertices[o+2])/3;}
-        add({kind:'avatar',avatar,snapshot,range:{offset:i,count:3}},center.map((v,k)=>v+offset[k]));
+  renderTransparentScene(camera, chunks, avatars, vp, origin, lighting, previews = []) {
+    if (this.contextLost || this.disposed || !this.gl || this.gl.isContextLost?.()) return { drawCalls: 0, triangles: 0, bufferMemory: 0 };
+    const gl = this.gl, queue = this.transparentQueue ??= [], pool = this.transparentItemPool ??= [];
+    const queueStartedAt = performance.now();
+    const forward = cameraForward(camera), eyeX = camera.localOffsetX || 0,
+      eyeY = camera.localOffsetY || 0, eyeZ = camera.localOffsetZ || 0;
+    queue.length = 0;
+    this.transparentKeyCache ??= new WeakMap();
+    const keyFor = (owner, kind, id, offset) => {
+      let keys = this.transparentKeyCache.get(owner);
+      if (!keys) { keys = new Map(); this.transparentKeyCache.set(owner, keys); }
+      let key = keys.get(offset);
+      if (key == null) { key = `${kind}:${id ?? ""}:${offset}`; keys.set(offset, key); }
+      return key;
+    };
+    const add = (kind, owner, id, offset, x, y, z) => {
+      const order = queue.length, item = pool[order] ?? (pool[order] = {});
+      item.kind = kind; item.key = keyFor(owner, kind, id, offset); item.order = order;
+      item.depth = (x - eyeX) * forward[0] + (y - eyeY) * forward[1] + (z - eyeZ) * forward[2];
+      item.entry = item.avatar = item.snapshot = item.particle = null;
+      queue.push(item); return item;
+    };
+    const terrain = list => {
+      for (const chunk of list) for (const visual of [false, true]) {
+        const entry = this.entryForChunk(chunk, visual); if (!entry?.handle) continue;
+        const handle = entry.handle, x = chunk.chunkX * chunk.chunkSize - origin.worldX,
+          y = entry.originY - origin.worldY, z = chunk.chunkZ * chunk.chunkSize - origin.worldZ;
+        const offset = shaderChunkOffset(handle, origin, [x, y, z]), preview = chunk.buildingPreview === true;
+        const units = preview ? previewSortUnits(entry) : handle.blendUnits ?? [];
+        for (const unit of units) {
+          if (unit.pass !== 'blend' && !preview) continue;
+          const item = add('terrain', entry, entry.id, unit.sortOffset ?? unit.offset,
+            unit.center[0] + x, unit.center[1] + y, unit.center[2] + z);
+          item.entry = entry; item.handle = handle; item.unit = unit; item.offset = offset; item.opacity = preview ? .46 : 1;
+        }
+      }
+    };
+    terrain(chunks); terrain(previews);
+    for (const avatar of avatars) {
+      const entry = this.avatarBuffers.get(String(avatar.meshId || avatar.id)); if (!entry?.handle) continue;
+      const opacity = Math.max(0, Math.min(1, Number(avatar.opacity ?? 1) || 0)); if (opacity <= .001) continue;
+      const snapshot = this.avatarFrameState(avatar, entry), handle = this.avatarRenderHandle(avatar, entry, snapshot);
+      const vertices = snapshot.vertices, indices = handle.drawIndices ?? entry.mesh.indices,
+        stride = (entry.mesh.vertexStrideBytes || 40) / 4;
+      const x = (avatar.worldX || 0) + (avatar.localOffsetX || 0) - origin.worldX,
+        y = (avatar.worldY || 0) + (avatar.localOffsetY || 0) - origin.worldY,
+        z = (avatar.worldZ || 0) + (avatar.localOffsetZ || 0) - origin.worldZ;
+      const yaw = avatar.yaw || 0, c = Math.cos(yaw), sin = Math.sin(yaw);
+      const drawState = snapshot.drawState, ranged = drawState?.valid;
+      const ranges = opacity >= .999 ? drawState?.blend : drawState?.visible;
+      const rangeCount = ranged ? (opacity >= .999 ? drawState.blendCount : drawState.visibleCount) : 1;
+      for (let rangeIndex = 0; rangeIndex < rangeCount; rangeIndex++) {
+        const rangeStart = ranged ? ranges[rangeIndex].offset : 0;
+        const rangeEnd = ranged ? rangeStart + ranges[rangeIndex].count : indices.length;
+        for (let i = rangeStart; i < rangeEnd; i += 3) {
+        const a = indices[i] * stride, b = indices[i + 1] * stride, d = indices[i + 2] * stride;
+        // A texture replaces surface alpha in the shader. Only the untextured
+        // path can prove zero vertex alpha to be invisible (including tools).
+        if (vertices[a + 9] === 0 && vertices[b + 9] === 0 && vertices[d + 9] === 0
+          && (stride < 13 || vertices[a + 12] < 0 && vertices[b + 12] < 0 && vertices[d + 12] < 0)) continue;
+        if (opacity >= .999 && !(vertices[a + 9] < .999 || vertices[b + 9] < .999 || vertices[d + 9] < .999
+          || stride >= 14 && (vertices[a + 13] > .5 || vertices[b + 13] > .5 || vertices[d + 13] > .5))) continue;
+        // Keep the historical per-vertex arithmetic order as well as the stable
+        // key: tiny rounding differences can otherwise reorder coplanar faces.
+        let cx = 0, cy = 0, cz = 0;
+        for (let vertex = 0; vertex < 3; vertex++) {
+          const at = indices[i + vertex] * stride;
+          cx += (c * vertices[at] + sin * vertices[at + 2]) / 3;
+          cy += vertices[at + 1] / 3;
+          cz += (-sin * vertices[at] + c * vertices[at + 2]) / 3;
+        }
+        const item = add('avatar', snapshot, avatar.id, i, cx + x, cy + y, cz + z);
+        item.avatar = avatar; item.snapshot = snapshot; item.handle = handle; item.opacity = opacity;
+        item.unit = item.avatarRange ?? (item.avatarRange = {}); item.unit.offset = i; item.unit.count = 3;
+        }
       }
     }
-    for(const particle of this.voxelParticles?.particles??[])add({kind:'particle',particle},[particle.x-origin.worldX,particle.y-origin.worldY,particle.z-origin.worldZ]);
-    if(!queue.length)return {drawCalls:0,triangles:0,bufferMemory:0};
-    queue.sort((a,b)=>b.depth-a.depth||a.key.localeCompare(b.key)||a.order-b.order);
-    gl.enable(gl.DEPTH_TEST);gl.depthMask(false);gl.enable(gl.CULL_FACE);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
-    let drawCalls=0,triangles=0;
-    let terrainActive = false, boundHandle = null, boundOffset = null, boundOpacity = null,boundShared=null;
+    const particles = this.voxelParticles?.particles ?? [];
+    for (let i = 0; i < Math.min(particles.length, this.voxelParticles?.maxParticles ?? particles.length); i++) {
+      const particle = particles[i], item = add('particle', particle, particle.id, 0,
+        particle.x - origin.worldX, particle.y - origin.worldY, particle.z - origin.worldZ);
+      item.particle = particle;
+    }
+    queue.sort((a, b) => b.depth - a.depth || a.key.localeCompare(b.key) || a.order - b.order);
+    this.stageStats?.record('transparent-queue-sort-cpu',performance.now()-queueStartedAt);
+    const streamStartedAt = performance.now();
+    const stream = this.sortedIndexStream ?? (this.sortedIndexStream = new SortedIndexStream(gl));
+    stream.beginFrame();
+    const segments = this.transparentSegments ??= [], segmentPool = this.transparentSegmentPool ??= [],
+      orderedParticles = this.orderedParticles ??= [];
+    segments.length = 0; orderedParticles.length = 0;
     const sameOffset = (a, b) => a && b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
-    for (let index = 0; index < queue.length; index++) {
-      const item = queue[index];
-      if (item.kind === 'terrain') {
-        const { entry, unit, offset, opacity } = item;
-        // Only merge adjacent ranges in the already sorted queue. Never reorder
-        // triangles or cross an intervening avatar, particle, preview or origin.
-        let count = unit.count, runs = 0, rangeOffset = unit.offset;
-        const saveRange=()=>{
-          if(runs>=this.multiDrawCounts.length) {
-            const counts=new Int32Array(this.multiDrawCounts.length*2),offsets=new Int32Array(counts.length);
-            counts.set(this.multiDrawCounts);offsets.set(this.multiDrawOffsets);
-            this.multiDrawCounts=counts;this.multiDrawOffsets=offsets;
-          }
-          this.multiDrawCounts[runs]=count;
-          this.multiDrawOffsets[runs++]=rangeOffset*(entry.handle.indexBytes??2);
-        };
-        while (index + 1 < queue.length) {
-          const next = queue[index + 1];
-          if (next.kind !== 'terrain' || (next.entry.handle.sharedPage??next.entry.handle) !== (entry.handle.sharedPage??entry.handle) || next.opacity !== opacity
-            || !sameOffset(next.offset, offset)) break;
-          if(next.unit.offset===rangeOffset+count)count+=next.unit.count;
-          else {saveRange();rangeOffset=next.unit.offset;count=next.unit.count;}
-          index++;
-        }
-        saveRange();
-        if (!terrainActive) {
-          gl.useProgram(this.program);
-          gl.uniformMatrix4fv(this.uniforms.uViewProjection, false, vp);
-          applyLightingUniforms(gl, this.uniforms, lighting);
-          gl.uniform1f(this.uniforms.uSurfacePass, 0);
-          this.textureArray?.bind(0);
-          terrainActive = true; boundHandle = null; boundOffset = null; boundOpacity = null;boundShared=null;
-        }
-        if (boundOpacity !== opacity) { gl.uniform1f(this.uniforms.uOpacity, opacity); boundOpacity = opacity; }
-        if (!sameOffset(boundOffset, offset)) { gl.uniform3f(this.uniforms.uChunkOrigin, ...offset); boundOffset = offset; }
-        const shared=Boolean(entry.handle.sharedPage);
-        if(boundShared!==shared){if(this.uniforms.uUseChunkOffset)gl.uniform1i(this.uniforms.uUseChunkOffset,shared?1:0);boundShared=shared;}
-        if (boundHandle !== entry.handle.vao) { gl.bindVertexArray(entry.handle.vao); boundHandle = entry.handle.vao; }
-        // WEBGL_multi_draw executes these index ranges in their existing sorted
-        // order with identical state. Keep the ordinary path when unavailable.
-        if(runs>1&&typeof this.multiDraw?.multiDrawElementsWEBGL==='function') {
-          this.multiDraw.multiDrawElementsWEBGL(gl.TRIANGLES,this.multiDrawCounts,0,entry.handle.indexType,this.multiDrawOffsets,0,runs);
-          drawCalls++;
-        } else for(let range=0;range<runs;range++) {
-          gl.drawElements(gl.TRIANGLES,this.multiDrawCounts[range],entry.handle.indexType,this.multiDrawOffsets[range]);drawCalls++;
-        }
-        for(let range=0;range<runs;range++)triangles+=this.multiDrawCounts[range]/3;
-      } else {
-        const stats = item.kind === 'avatar'
-          ? this.renderAvatars(camera, [item.avatar], vp, origin, lighting, { transparentOnly: true, drawRange: item.range, vertexSnapshot: item.snapshot })
-          : this.voxelParticles.render({ viewProjection: vp, origin, lighting, textureArray: this.textureArray, particles: [item.particle] });
-        drawCalls += stats.drawCalls; triangles += stats.triangles;
-        terrainActive = false;
-        // Auxiliary helpers restore their own state; the queue owns blending.
-        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+    for (let i = 0; i < queue.length; i++) {
+      const item = queue[i], owner = item.handle?.sharedPage ?? item.handle;
+      let segment = segments[segments.length - 1];
+      const compatible = segment?.kind === item.kind && (item.kind === 'particle'
+        || item.kind === 'terrain' && segment.owner === owner && segment.opacity === item.opacity && sameOffset(segment.offset, item.offset)
+        || item.kind === 'avatar' && segment.avatar === item.avatar && segment.handle === item.handle && segment.opacity === item.opacity);
+      if (!compatible) {
+        segment = segmentPool[segments.length] ?? (segmentPool[segments.length] = {});
+        segment.kind = item.kind; segment.owner = owner; segment.handle = item.handle; segment.offset = item.offset;
+        segment.avatar = item.avatar; segment.opacity = item.opacity; segment.first = i; segment.last = i;
+        segment.count = 0; segment.sorted = null; segment.sortedFailed = false; segment.particleStart = orderedParticles.length;
+        (segment.firstDrawEntries ??= []).length = 0;
+        segments.push(segment);
       }
+      segment.last = i;
+      if (item.entry?.firstDrawAt == null && item.entry && item.entry.firstDrawQueuedTo !== segment) {
+        segment.firstDrawEntries.push(item.entry); item.entry.firstDrawQueuedTo = segment;
+      }
+      if (item.kind === 'particle') { orderedParticles.push(item.particle); segment.count++; continue; }
+      const count = item.unit.count, sourceOffset = item.unit.offset - (item.handle.indexStart ?? 0);
+      if (!segment.sortedFailed) {
+        const appended = stream.append(item.handle, item.kind === 'avatar' ? 'avatar' : 'terrain', sourceOffset, count);
+        if (appended) { if (!segment.sorted) { segment.sorted = appended; segment.sortedOffset = appended.appendOffset; } }
+        else { segment.sorted = null; segment.sortedFailed = true; }
+      }
+      segment.count += count;
     }
-    gl.bindVertexArray(null);gl.depthMask(true);gl.disable(gl.BLEND);gl.enable(gl.CULL_FACE);return {drawCalls,triangles,bufferMemory:0};
+    stream.upload();
+    this.voxelParticles?.prepareInstances(orderedParticles, origin);
+    this.stageStats?.record('transparent-stream-upload-cpu',performance.now()-streamStartedAt);
+    if (stream.lastError) this.lastSortedIndexError = stream.lastError;
+    gl.enable(gl.DEPTH_TEST); gl.depthMask(false); gl.enable(gl.CULL_FACE); gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    let drawCalls = 0, triangles = 0, active = null, boundVao = null, boundOffset = null,
+      boundOpacity = null, boundShared = null, boundAvatar = null;
+    for (const segment of segments) {
+      if (segment.kind === 'particle') {
+        const stats = this.voxelParticles.renderPrepared({ viewProjection: vp, lighting, textureArray: this.textureArray,
+          start: segment.particleStart, count: segment.count, bindUniforms: active !== 'particle' });
+        drawCalls += stats.drawCalls; triangles += stats.triangles;
+        active = 'particle'; boundVao = null; continue;
+      }
+      const avatarPass = segment.kind === 'avatar';
+      if (active !== segment.kind) {
+        const program = avatarPass ? this.avatarProgram : this.program,
+          uniforms = avatarPass ? this.avatarUniforms : this.uniforms;
+        gl.useProgram(program); gl.uniformMatrix4fv(uniforms.uViewProjection, false, vp);
+        applyLightingUniforms(gl, uniforms, lighting); this.textureArray?.bind(0);
+        if (avatarPass) gl.uniform1i(uniforms.uTextureArray, 0); else gl.uniform1f(uniforms.uSurfacePass, 0);
+        active = segment.kind; boundVao = null; boundOffset = null; boundOpacity = null; boundShared = null; boundAvatar = null;
+      }
+      const handle = segment.handle;
+      if (avatarPass) {
+        if (boundAvatar !== segment.avatar) {
+          const avatar = segment.avatar;
+          gl.uniform3f(this.avatarUniforms.uAvatarOrigin, Math.trunc(avatar.worldX || 0) + (avatar.localOffsetX || 0) - origin.worldX,
+            Math.trunc(avatar.worldY || 0) + (avatar.localOffsetY || 0) - origin.worldY, Math.trunc(avatar.worldZ || 0) + (avatar.localOffsetZ || 0) - origin.worldZ);
+          gl.uniform1f(this.avatarUniforms.uAvatarYaw, avatar.yaw || 0);
+          gl.uniform1f(this.avatarUniforms.uAvatarOpacity, segment.opacity);
+          gl.uniform1f(this.avatarUniforms.uAvatarSurfacePass, segment.opacity < .999 ? 0 : 2);
+          boundAvatar = segment.avatar;
+        }
+      } else {
+        if (boundOpacity !== segment.opacity) { gl.uniform1f(this.uniforms.uOpacity, segment.opacity); boundOpacity = segment.opacity; }
+        if (!sameOffset(boundOffset, segment.offset)) { gl.uniform3f(this.uniforms.uChunkOrigin, ...segment.offset); boundOffset = segment.offset; }
+        const shared = Boolean(handle.sharedPage);
+        if (boundShared !== shared) { if (this.uniforms.uUseChunkOffset) gl.uniform1i(this.uniforms.uUseChunkOffset, shared ? 1 : 0); boundShared = shared; }
+      }
+      gl.enable(gl.CULL_FACE);
+      if (segment.sorted?.ready) {
+        if (boundVao !== segment.sorted.vao) { gl.bindVertexArray(segment.sorted.vao); boundVao = segment.sorted.vao; }
+        gl.drawElements(gl.TRIANGLES, segment.count, segment.sorted.indexType, segment.sortedOffset * segment.sorted.indexBytes);
+        drawCalls++; triangles += segment.count / 3;
+      } else {
+        if (boundVao !== handle.vao) { gl.bindVertexArray(handle.vao); boundVao = handle.vao; }
+        for (let i = segment.first; i <= segment.last; i++) {
+          const unit = queue[i].unit;
+          gl.drawElements(gl.TRIANGLES, unit.count, handle.indexType, unit.offset * (handle.indexBytes ?? 2));
+          drawCalls++; triangles += unit.count / 3;
+        }
+      }
+      for (const entry of segment.firstDrawEntries) { this.noteEntryFirstDraw(entry); entry.firstDrawQueuedTo = null; }
+      segment.firstDrawEntries.length = 0;
+    }
+    stream.endFrame();
+    // Pools retain capacity, never unloaded world/model ownership indefinitely.
+    for (let i = queue.length; i < pool.length; i++) { pool[i].entry = pool[i].avatar = pool[i].snapshot = pool[i].particle = pool[i].handle = pool[i].unit = null; }
+    if (pool.length > queue.length * 2 + 1024) pool.length = queue.length + 1024;
+    for (let i = segments.length; i < segmentPool.length; i++) segmentPool[i].owner = segmentPool[i].handle = segmentPool[i].avatar = segmentPool[i].sorted = null;
+    if (segmentPool.length > segments.length * 2 + 64) segmentPool.length = segments.length + 64;
+    gl.bindVertexArray(null); gl.depthMask(true); gl.disable(gl.BLEND); gl.enable(gl.CULL_FACE);
+    return { drawCalls, triangles, bufferMemory: 0 };
   }
 
   renderBuildingPreviewChunks(visibleChunks, origin, opacity = 0.46) {
@@ -1276,21 +1477,109 @@ export class WebGL2VoxelRenderer {
     return stats;
   }
 
-  avatarFrameState(avatar,entry){
-    this.avatarFrameStates ??= new Map();
-    let snapshot=this.avatarFrameStates.get(avatar);
-    if(!snapshot||snapshot.mesh!==entry.mesh){
-      this.avatarSnapshotCache ??= new WeakMap();
-      snapshot=this.avatarSnapshotCache.get(avatar);
-      if(!snapshot||snapshot.mesh!==entry.mesh) {
-        snapshot={mesh:entry.mesh,revision:0,vertices:entry.mesh?.parts?.length?new Float32Array(entry.mesh.vertices.length):entry.mesh?.vertices};
-        this.avatarSnapshotCache.set(avatar,snapshot);
+  avatarInstanceKey(avatar) { return avatar.id == null ? avatar : String(avatar.id); }
+
+  releaseAvatarInstances(modelKey = null, { lost = false, live = null } = {}) {
+    for (const [key, instance] of this.avatarInstances ?? []) {
+      if (modelKey != null && instance.modelKey !== modelKey || live?.has(key)) continue;
+      for (const handle of [instance.handle, instance.stagingHandle]) if (handle) {
+        if (!lost) { this.gl?.deleteBuffer(handle.vbo); this.gl?.deleteVertexArray(handle.vao); }
       }
-      if(entry.mesh?.parts?.length)snapshot.vertices.set(updateAvatarMeshVertices(entry.mesh,avatar.animation));
-      snapshot.revision++;
-      this.avatarFrameStates.set(avatar,snapshot);
+      this.avatarInstances.delete(key);
+      this.avatarFrameStates.delete(key);
+      this.cpuMeshBytesDirty = true;
     }
+  }
+
+  avatarFrameState(avatar, entry) {
+    if (!entry.mesh) return { vertices: null, handle: entry.handle };
+    this.avatarFrameStates ??= new Map();
+    this.avatarInstances ??= new Map();
+    const key = this.avatarInstanceKey(avatar), modelKey = String(avatar.meshId || avatar.id);
+    let snapshot = this.avatarFrameStates.get(key);
+    if (snapshot?.mesh === entry.mesh && snapshot.staticHandle === entry.handle) { snapshot.modelKey = modelKey; return snapshot; }
+    snapshot = this.avatarInstances.get(key);
+    if (snapshot && (snapshot.mesh !== entry.mesh || snapshot.staticHandle !== entry.handle
+      || snapshot.generation !== this.contextGeneration)) {
+      for (const handle of [snapshot.handle, snapshot.stagingHandle]) if (handle) {
+        this.gl.deleteBuffer(handle.vbo); this.gl.deleteVertexArray(handle.vao);
+      }
+      this.avatarInstances.delete(key); snapshot = null;
+    }
+    if (!snapshot) {
+      const animated = Boolean(entry.mesh.parts?.length);
+      const committed = animated ? new Float32Array(entry.mesh.vertices) : entry.mesh.vertices;
+      snapshot = { mesh: entry.mesh, staticHandle: entry.handle, modelKey, generation: this.contextGeneration,
+        revision: 0, gpuRevision: -1, handle: null, stagingHandle: null,
+        vertices: committed,
+        pendingVertices: animated ? new Float32Array(entry.mesh.vertices.length) : null,
+        committedVertices: animated ? committed : null, retryAfter: 0,
+        pendingDrawState: {visible:[],blend:[],visibleCount:0,blendCount:0,valid:false},
+        committedDrawState: {visible:[],blend:[],visibleCount:0,blendCount:0,valid:false}, drawState: null };
+      this.avatarInstances.set(key, snapshot);
+      this.cpuMeshBytesDirty = true;
+    }
+    snapshot.modelKey = modelKey;
+    if (entry.mesh.parts?.length) {
+      const poseStartedAt = performance.now();
+      snapshot.pendingVertices.set(updateAvatarMeshVertices(entry.mesh, avatar.animation, snapshot.pendingDrawState));
+      snapshot.vertices = snapshot.pendingVertices;
+      snapshot.drawState = snapshot.pendingDrawState;
+      this.stageStats?.record('avatar-pose-cpu',performance.now()-poseStartedAt);
+    }
+    snapshot.revision++;
+    this.avatarFrameStates.set(key, snapshot);
     return snapshot;
+  }
+
+  avatarRenderHandle(avatar, entry, snapshot) {
+    if (!entry.mesh?.parts?.length) return entry.handle;
+    if (snapshot.gpuRevision === snapshot.revision) return snapshot.handle ?? entry.handle;
+    if (performance.now() < snapshot.retryAfter) {
+      snapshot.vertices = snapshot.committedVertices ?? entry.mesh.vertices;
+      snapshot.drawState = snapshot.committedDrawState;
+      return snapshot.handle ?? entry.handle;
+    }
+    const gl = this.gl;
+    const uploadStartedAt = performance.now();
+    let staging = snapshot.stagingHandle, created = false;
+    try {
+      if (!staging) {
+        created = true;
+        staging = { vao: null, vbo: null, ibo: entry.handle.ibo, drawIndices: entry.mesh.indices, sortOwner: snapshot,
+          stride: entry.mesh.vertexStrideBytes || 40, indexCount: entry.handle.indexCount,
+          indexType: entry.handle.indexType, indexBytes: entry.mesh.indices.BYTES_PER_ELEMENT,
+          triangleCount: entry.handle.triangleCount, byteLength: entry.mesh.vertices.byteLength };
+        staging.vao = gl.createVertexArray(); if (!staging.vao) throw Error('Avatar instance VAO allocation returned null');
+        staging.vbo = gl.createBuffer(); if (!staging.vbo) throw Error('Avatar instance VBO allocation returned null');
+        configureAvatarVertexArray(gl, staging.vbo, staging.ibo, staging.stride, staging.vao);
+        gl.bufferData(gl.ARRAY_BUFFER, snapshot.pendingVertices.byteLength, gl.DYNAMIC_DRAW);
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, staging.vbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, snapshot.pendingVertices);
+      assertGpuUpload(gl, 'avatar instance pose');
+      const previous = snapshot.handle;
+      snapshot.handle = staging; snapshot.stagingHandle = previous;
+      const oldVertices = snapshot.committedVertices ?? snapshot.vertices;
+      snapshot.committedVertices = snapshot.pendingVertices;
+      snapshot.vertices = snapshot.committedVertices;
+      snapshot.pendingVertices = oldVertices;
+      const priorDrawState = snapshot.committedDrawState;
+      snapshot.committedDrawState = snapshot.pendingDrawState;
+      snapshot.pendingDrawState = priorDrawState;
+      snapshot.drawState = snapshot.committedDrawState;
+      snapshot.gpuRevision = snapshot.revision;
+      snapshot.retryAfter = 0;
+      this.stageStats?.record('avatar-pose-upload-cpu',performance.now()-uploadStartedAt);
+      return snapshot.handle;
+    } catch (error) {
+      if (created && staging) { if (staging.vao) gl.deleteVertexArray(staging.vao); if (staging.vbo) gl.deleteBuffer(staging.vbo); }
+      snapshot.retryAfter = performance.now() + this.options.uploadRetryMs;
+      snapshot.vertices = snapshot.committedVertices ?? entry.mesh.vertices;
+      snapshot.drawState = snapshot.committedDrawState;
+      this.lastAvatarUploadError = error;
+      return snapshot.handle ?? entry.handle;
+    } finally { gl.bindVertexArray(null); }
   }
   renderAvatars(cameraState, avatars, viewProjection, origin, lighting = this.lighting, { opaqueOnly=false, transparentOnly=false, drawRange=null, vertexSnapshot=null }={}) {
     const gl = this.gl;
@@ -1319,14 +1608,8 @@ export class WebGL2VoxelRenderer {
     for (const avatar of avatars) {
       const entry = this.avatarBuffers.get(String(avatar.meshId || avatar.id));
       if (!entry?.handle) continue;
-      const handle = entry.handle;
       const snapshot=vertexSnapshot??this.avatarFrameState(avatar,entry);
-      if (entry.mesh?.parts?.length && (handle.animationSnapshot!==snapshot || handle.animationRevision!==snapshot.revision)) {
-        gl.bindBuffer(gl.ARRAY_BUFFER, handle.vbo);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, snapshot.vertices);
-        handle.animationSnapshot=snapshot;
-        handle.animationRevision=snapshot.revision;
-      }
+      const handle = this.avatarRenderHandle(avatar,entry,snapshot);
       const worldX = Math.trunc(avatar.worldX || 0) + (avatar.localOffsetX || 0);
       const worldY = Math.trunc(avatar.worldY || 0) + (avatar.localOffsetY || 0);
       const worldZ = Math.trunc(avatar.worldZ || 0) + (avatar.localOffsetZ || 0);
@@ -1341,6 +1624,18 @@ export class WebGL2VoxelRenderer {
       if(opacity<=0.001)continue;
       gl.uniform1f(this.avatarUniforms.uAvatarOpacity, opacity);
       gl.bindVertexArray(handle.vao);
+      const drawVisible = () => {
+        const state = snapshot.drawState;
+        if (state?.valid) for (let index = 0; index < state.visibleCount; index++) {
+          const range = state.visible[index];
+          gl.drawElements(gl.TRIANGLES,range.count,handle.indexType,range.offset*(handle.indexBytes??2));
+          drawCalls++;triangles+=range.count/3;
+        }
+        else {
+          gl.drawElements(gl.TRIANGLES,handle.indexCount,handle.indexType,0);
+          drawCalls++;triangles+=handle.triangleCount;
+        }
+      };
       if(drawRange){
         setTransparentPass(true);gl.uniform1f(this.avatarUniforms.uAvatarSurfacePass,opacity<0.999?0:2);
         gl.drawElements(gl.TRIANGLES,drawRange.count,handle.indexType,drawRange.offset*(entry.mesh.indices.BYTES_PER_ELEMENT||2));drawCalls++;triangles+=drawRange.count/3;continue;
@@ -1350,28 +1645,22 @@ export class WebGL2VoxelRenderer {
       if (opacity < 0.999) {
         setTransparentPass(true);
         gl.uniform1f(this.avatarUniforms.uAvatarSurfacePass, 0);
-        gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
-        drawCalls += 1;
-        triangles += handle.triangleCount;
+        drawVisible();
       } else if (opaqueOnly || avatarHoldsTransparentBlock(avatar.animation)) {
         if (!transparentOnly) {
         setTransparentPass(false);
         gl.uniform1f(this.avatarUniforms.uAvatarSurfacePass, 1);
-        gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
-        drawCalls += 1; triangles += handle.triangleCount;
+        drawVisible();
         }
         if (!opaqueOnly) {
         setTransparentPass(true);
         gl.uniform1f(this.avatarUniforms.uAvatarSurfacePass, 2);
-        gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
-        drawCalls += 1; triangles += handle.triangleCount;
+        drawVisible();
         }
       } else {
         setTransparentPass(false);
         gl.uniform1f(this.avatarUniforms.uAvatarSurfacePass, 0);
-        gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
-        drawCalls += 1;
-        triangles += handle.triangleCount;
+        drawVisible();
       }
       bufferMemory += handle.byteLength;
     }
@@ -1383,7 +1672,7 @@ export class WebGL2VoxelRenderer {
     return { drawCalls, triangles, bufferMemory };
   }
 
-  renderProjectedShadows(avatars, viewProjection, origin, lighting = this.lighting) {
+  renderProjectedShadows(avatars, viewProjection, origin, lighting = this.lighting, cameraState = null) {
     if (!this.options.shadows) return { drawCalls: 0, triangles: 0, bufferMemory: 0 };
     if(this.contextLost||this.disposed||!this.gl||this.gl.isContextLost?.())return {drawCalls:0,triangles:0,bufferMemory:0};
     const gl = this.gl;
@@ -1393,7 +1682,7 @@ export class WebGL2VoxelRenderer {
     gl.disable(gl.CULL_FACE);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    const stats = this.projectedShadowLayer.render({ viewProjection, origin, lighting, casters: avatars });
+    const stats = this.projectedShadowLayer.render({ viewProjection, origin, lighting, casters: avatars, cameraState });
     gl.disable(gl.BLEND);
     gl.depthMask(true);
     gl.enable(gl.CULL_FACE);
@@ -1458,11 +1747,16 @@ export class WebGL2VoxelRenderer {
     for (const entry of this.visualRegionBuffers.values()) for (const member of entry.members?.values() ?? []) safely(() => this.bufferManager?.disposeChunkBuffers(member.handle));
     this.visualRegionBuffers.clear();
     safely(() => this.bufferManager?.dispose?.({lost:this.contextLost}));
+    safely(() => this.releaseAvatarInstances(null,{lost:this.contextLost}));
+    safely(() => this.sortedIndexStream?.dispose({lost:this.contextLost})); this.sortedIndexStream=null;
+    this.clearFramePools();
     for (const entry of this.avatarBuffers.values()) safely(() => this.disposeAvatarBuffers(entry.handle));
     this.avatarBuffers.clear();
     this.avatarResourceCache=new WeakMap();this.cpuMeshBytesDirty=true;
     this.regionGroupCache.clear();
     this.frustumFilterCache = null;
+    this.preparedRenderFrame = null;
+    this.renderFrameInputs?.clear();
     safely(() => this.cloudLayer?.dispose());
     this.cloudLayer = null;
     safely(() => this.skyGradient?.dispose());
@@ -1498,8 +1792,9 @@ export class WebGL2VoxelRenderer {
     if(this.disposed)return;
     this.disposed=true;
     this.releaseContextResources();
-    this.avatarMeshes.clear(); this.retryUploads.clear(); this.pendingUploadSince.clear();this.pendingMeshSources.clear();this.prefetchQueueCache=null;this.avatarFrameStates.clear();
+    this.avatarMeshes.clear(); this.retryUploads.clear(); this.pendingUploadSince.clear();this.uploadWaitFrames.clear();this.pendingMeshSources.clear();this.prefetchQueueCache=null;this.avatarFrameStates.clear();
     this.avatarSnapshotCache = new WeakMap();
+    this.canvasResizeObserver?.disconnect(); this.canvasResizeObserver = null;
     this.detachContextListeners();
   }
 
@@ -1548,6 +1843,10 @@ export class WebGL2VoxelRenderer {
       ibo,
       indexCount: mesh.indexCount,
       indexType: mesh.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT,
+      indexBytes: mesh.indices.BYTES_PER_ELEMENT,
+      drawIndices: mesh.indices,
+      drawVertices: mesh.vertices,
+      stride,
       triangleCount: mesh.triangleCount,
       byteLength: mesh.vertices.byteLength + mesh.indices.byteLength,
     };
@@ -1563,6 +1862,28 @@ export class WebGL2VoxelRenderer {
     if(handle.ibo)gl.deleteBuffer(handle.ibo);
     if(handle.vao)gl.deleteVertexArray(handle.vao);
   }
+}
+
+function previewSortUnits(entry) {
+  if (entry.previewSortedHandle === entry.handle) return entry.previewSortedUnits;
+  const handle = entry.handle, vertices = handle.drawVertices ?? entry.mesh.vertices,
+    indices = handle.drawIndices ?? entry.mesh.indices, start = handle.indexStart ?? 0,
+    vertexStart = handle.vertexStart ?? 0, units = [];
+  const data = new DataView(vertices.buffer, vertices.byteOffset, vertices.byteLength);
+  for (const pass of ['opaque', 'cutout', 'blend']) {
+    const range = handle.drawRanges?.[pass]; if (!range?.count) continue;
+    for (let i = range.offset; i < range.offset + range.count; i += 3) {
+      const center = [0, 0, 0];
+      for (let corner = 0; corner < 3; corner++) {
+        const offset = (indices[i - start + corner] - vertexStart) * 20,
+          scale = Math.max(1, data.getInt16(offset + 6, true));
+        for (let axis = 0; axis < 3; axis++) center[axis] += data.getInt16(offset + axis * 2, true) / scale / 3;
+      }
+      units.push({ pass, offset: i, sortOffset: i - start, count: 3, center });
+    }
+  }
+  entry.previewSortedHandle = handle; entry.previewSortedUnits = units;
+  return units;
 }
 
 function sharedPlacement(chunk,mesh,enabled) {
@@ -1707,7 +2028,7 @@ function retireCommittedEmptyChunkBuffers(renderer, chunks) {
       const key=`${visual?'visual':'opaque'}:${chunk.id}`;
       const staged=renderer.uploadStaging.get(key);
       if(staged){renderer.bufferManager?.disposeChunkBuffers(staged.transaction.handle);renderer.uploadStaging.delete(key);}
-      renderer.pendingUploadSince.delete(key);renderer.pendingMeshSources.delete(key);
+      renderer.pendingUploadSince.delete(key);renderer.pendingMeshSources.delete(key);renderer.uploadWaitFrames?.delete(key);renderer.retryUploads.delete(key);
       const region=regionBatchEligible(chunk)?regions.get(regionIdForChunk(chunk,renderer.options.regionChunkSize)):null;
       const member=region?.members?.get(chunk.id);
       if(member){renderer.bufferManager?.disposeChunkBuffers(member.handle);region.members.delete(chunk.id);region.chunkIds.delete(chunk.id);if(!region.members.size)regions.delete(region.id);}

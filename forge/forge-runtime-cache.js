@@ -1,3 +1,4 @@
+import { STARTER_AXE_CODE, registerStarterAxePresentationRestore } from "../renderer/forge-avatar-presentation.js";
 import {
   FORGE_COMPONENT_GRID,
   FORGE_FIXED_SCALE,
@@ -323,3 +324,6 @@ function cloneRuntimeGrip(grip) {
     rotation: grip.rotation,
   };
 }
+
+// Asset restoration is already loaded when a validated runtime needs legacy presentation.
+registerStarterAxePresentationRestore(() => restoreForgeRuntime(STARTER_AXE_CODE));

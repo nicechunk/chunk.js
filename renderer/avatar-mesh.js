@@ -1,4 +1,4 @@
-import { forgeAvatarGripForRuntime, forgePresentationForRuntime } from "../forge/starter-axe.js";
+import { forgeAvatarGripForRuntime, forgePresentationForRuntime } from "./forge-avatar-presentation.js";
 import {
   createEquipmentModelParts,
   EQUIPMENT_MODEL_ID,
@@ -166,6 +166,7 @@ export function createAvatarMeshFromNcm(ncmCode, {
       ? { [FORGED_PICKAXE_EQUIPMENT_ID]: restoredForge.pose }
       : {},
     parts: runtimeParts,
+    partIndexLayout: 1,
     ...(restoredForge ? { collisionParts } : {}),
     pivots: rig.pivots,
     boneOffsets: rig.boneOffsets,
@@ -297,6 +298,7 @@ export function createAvatarMeshFromNcm4Character(character, {
     renderBounds,
     equipment: [],
     parts,
+    partIndexLayout: 1,
     pivots,
     boneOffsets: Object.fromEntries(skeleton.bones.map((bone) => [bone.name, [0, 0, 0]])),
     handAnchors: {},
@@ -389,9 +391,15 @@ function cuboidsToCharacterBoxes(sourceBoxes, size, scale) {
   });
 }
 
-export function updateAvatarMeshVertices(mesh, animation = {}) {
+export function updateAvatarMeshVertices(mesh, animation = {}, drawState = null) {
+  if (drawState) {
+    drawState.visible ??= []; drawState.blend ??= [];
+    drawState.valid = Boolean(mesh?.partIndexLayout === 1 && mesh.parts?.length && mesh.runtimeVertices
+      && mesh.parts.every(part => Number.isInteger(part.indexOffset) && Number.isInteger(part.indexCount)));
+    drawState.visibleCount = drawState.blendCount = 0;
+  }
   if (!mesh?.parts?.length || !mesh.runtimeVertices) return mesh?.vertices ?? null;
-  if (mesh.format === "NCM4") return updateNcm4AvatarMeshVertices(mesh, animation);
+  if (mesh.format === "NCM4") return updateNcm4AvatarMeshVertices(mesh, animation, drawState);
   const out = mesh.runtimeVertices;
   let cursor = 0;
   const equipment = avatarEquipmentState(animation);
@@ -428,6 +436,11 @@ export function updateAvatarMeshVertices(mesh, animation = {}) {
   for (const part of mesh.parts) {
     const equipmentVisible = avatarEquipmentPartVisible(part, equipment);
     const colorOverride = avatarEquipmentPartColor(part, equipment);
+    if (drawState?.valid && equipmentVisible) {
+      const mayBlend = part.mayBlend || (colorOverride ?? part.color)?.[3] < .999
+        || part.equipmentId === 'held_block' && avatarHoldsTransparentBlock(animation);
+      collectAvatarPartRange(drawState, part, mayBlend);
+    }
     const pivot = mesh.pivots[part.bone] ?? mesh.pivots.torso;
     const rotation = rotations[part.bone] ?? rotations.torso;
     const offset = offsets[part.bone] ?? offsets.torso;
@@ -532,14 +545,16 @@ function ncm4BoneIndex(skeleton, boneId) {
   return numeric >= 0 && numeric < skeleton.bones.length ? numeric : 0;
 }
 
-function updateNcm4AvatarMeshVertices(mesh, animation) {
+function updateNcm4AvatarMeshVertices(mesh, animation, drawState = null) {
   const out = mesh.runtimeVertices;
   const sample = sampleNcm4Action(mesh.actions, animation);
+  const transforms = prepareNcm4PoseTransforms(mesh, sample.rotations);
   let cursor = 0;
   for (const part of mesh.parts) {
     const visible = ncm4PartGroupVisible(part.group, sample.visibleGroupMask);
+    if (drawState?.valid && visible) collectAvatarPartRange(drawState, part, part.mayBlend || part.color?.[3] < .999);
     cursor = visible
-      ? appendNcm4BoxToArray(out, cursor, part, part.boneIndex, mesh.skeleton, sample.rotations)
+      ? appendNcm4BoxToArray(out, cursor, part, part.boneIndex, transforms)
       : appendCollapsedBoxToArray(out, cursor, mesh.skeleton.bones[part.boneIndex]?.pivot);
   }
   mesh.animation = {
@@ -551,7 +566,29 @@ function updateNcm4AvatarMeshVertices(mesh, animation) {
   return out;
 }
 
-function appendNcm4BoxToArray(out, cursor, box, boneIndex, skeleton, rotations) {
+const ncm4PoseTransforms = new WeakMap();
+const ncm4BoxFaces = new WeakMap();
+function prepareNcm4PoseTransforms(mesh, rotations) {
+  let transforms = ncm4PoseTransforms.get(mesh);
+  if (!transforms) { transforms = { bones: [], normal: new Float64Array(3) }; ncm4PoseTransforms.set(mesh, transforms); }
+  const bones = mesh.skeleton.bones;
+  transforms.bones.length = bones.length;
+  for (let index = 0; index < bones.length; index++) {
+    const bone = bones[index]; if (!bone) { transforms.bones[index] = null; continue; }
+    const prepared = transforms.bones[index] ?? (transforms.bones[index] = {}), rotation = ncm4RotationForBone(rotations, bone);
+    prepared.px = bone.pivot[0]; prepared.py = bone.pivot[1]; prepared.pz = bone.pivot[2]; prepared.parent = bone.parent;
+    prepared.rx = rotation.x || 0; prepared.ry = rotation.y || 0; prepared.rz = rotation.z || 0;
+    prepared.cx = Math.cos(prepared.rx); prepared.sx = Math.sin(prepared.rx);
+    prepared.cy = Math.cos(prepared.ry); prepared.sy = Math.sin(prepared.ry);
+    prepared.cz = Math.cos(prepared.rz); prepared.sz = Math.sin(prepared.rz);
+  }
+  return transforms;
+}
+
+function preparedNcm4BoxFaces(box) {
+  const prior = ncm4BoxFaces.get(box);
+  if (prior && prior.cx === box.cx && prior.cy === box.cy && prior.cz === box.cz
+    && prior.sx === box.sx && prior.sy === box.sy && prior.sz === box.sz) return prior.faces;
   const x0 = box.cx - box.sx * 0.5;
   const x1 = box.cx + box.sx * 0.5;
   const y0 = box.cy - box.sy * 0.5;
@@ -566,18 +603,21 @@ function appendNcm4BoxToArray(out, cursor, box, boneIndex, skeleton, rotations) 
     { n: [0, 0, 1], p: [[x0, y0, z1], [x0, y1, z1], [x1, y1, z1], [x1, y0, z1]] },
     { n: [0, 0, -1], p: [[x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z0]] },
   ];
+  ncm4BoxFaces.set(box, {cx:box.cx,cy:box.cy,cz:box.cz,sx:box.sx,sy:box.sy,sz:box.sz,faces});
+  return faces;
+}
+
+function appendNcm4BoxToArray(out, cursor, box, boneIndex, transforms) {
+  const faces = preparedNcm4BoxFaces(box), normal = transforms.normal;
   for (let faceIndex = 0; faceIndex < faces.length; faceIndex += 1) {
     const face = faces[faceIndex];
+    transformPreparedNcm4Normal(normal, face.n, boneIndex, transforms.bones);
     for (let vertexIndex = 0; vertexIndex < face.p.length; vertexIndex += 1) {
       const point = face.p[vertexIndex];
-      const transformedPoint = transformNcm4Point(point, boneIndex, skeleton, rotations);
-      const transformedNormal = transformNcm4Normal(face.n, boneIndex, skeleton, rotations);
-      out[cursor++] = transformedPoint[0];
-      out[cursor++] = transformedPoint[1];
-      out[cursor++] = transformedPoint[2];
-      out[cursor++] = transformedNormal[0];
-      out[cursor++] = transformedNormal[1];
-      out[cursor++] = transformedNormal[2];
+      transformPreparedNcm4Point(out, cursor, point, boneIndex, transforms.bones); cursor += 3;
+      out[cursor++] = normal[0];
+      out[cursor++] = normal[1];
+      out[cursor++] = normal[2];
       out[cursor++] = box.color[0];
       out[cursor++] = box.color[1];
       out[cursor++] = box.color[2];
@@ -591,28 +631,37 @@ function appendNcm4BoxToArray(out, cursor, box, boneIndex, skeleton, rotations) 
   return cursor;
 }
 
-function transformNcm4Point(source, boneIndex, skeleton, rotations) {
-  let point = source;
+function transformPreparedNcm4Point(out, offset, source, boneIndex, bones) {
+  let x = source[0], y = source[1], z = source[2];
   let index = boneIndex;
-  for (let depth = 0; index >= 0 && depth < skeleton.bones.length; depth += 1) {
-    const bone = skeleton.bones[index];
+  // Preserve the original Z/X/Y order and every ancestor's subtract/add pivot
+  // boundary. Composite matrices could change final Float32 rounding; caching
+  // only trig and immutable face points keeps the historical output exact.
+  for (let depth = 0; index >= 0 && depth < bones.length; depth += 1) {
+    const bone = bones[index];
     if (!bone) break;
-    point = transformPoint(point, bone.pivot, ncm4RotationForBone(rotations, bone));
+    x -= bone.px; y -= bone.py; z -= bone.pz;
+    if (bone.rz) { const nx = x * bone.cz - y * bone.sz, ny = x * bone.sz + y * bone.cz; x = nx; y = ny; }
+    if (bone.rx) { const ny = y * bone.cx - z * bone.sx, nz = y * bone.sx + z * bone.cx; y = ny; z = nz; }
+    if (bone.ry) { const nx = x * bone.cy + z * bone.sy, nz = -x * bone.sy + z * bone.cy; x = nx; z = nz; }
+    x += bone.px; y += bone.py; z += bone.pz;
     index = bone.parent;
   }
-  return point;
+  out[offset] = x; out[offset + 1] = y; out[offset + 2] = z;
 }
 
-function transformNcm4Normal(source, boneIndex, skeleton, rotations) {
-  let normal = source;
+function transformPreparedNcm4Normal(out, source, boneIndex, bones) {
+  let x = source[0], y = source[1], z = source[2];
   let index = boneIndex;
-  for (let depth = 0; index >= 0 && depth < skeleton.bones.length; depth += 1) {
-    const bone = skeleton.bones[index];
+  for (let depth = 0; index >= 0 && depth < bones.length; depth += 1) {
+    const bone = bones[index];
     if (!bone) break;
-    normal = transformNormal(normal, ncm4RotationForBone(rotations, bone));
+    if (bone.rz) { const nx = x * bone.cz - y * bone.sz, ny = x * bone.sz + y * bone.cz; x = nx; y = ny; }
+    if (bone.rx) { const ny = y * bone.cx - z * bone.sx, nz = y * bone.sx + z * bone.cx; y = ny; z = nz; }
+    if (bone.ry) { const nx = x * bone.cy + z * bone.sy, nz = -x * bone.sy + z * bone.cy; x = nx; z = nz; }
     index = bone.parent;
   }
-  return normal;
+  out[0] = x; out[1] = y; out[2] = z;
 }
 
 function vector3(value, fallback) {
@@ -1306,8 +1355,31 @@ function boundsOfParts(parts) {
 }
 
 function appendPart(vertices, indices, part) {
+  part.indexOffset = indices.length;
   if (part?.geometry) appendGeometry(vertices, indices, part.geometry);
   else appendBox(vertices, indices, part);
+  part.indexCount = indices.length - part.indexOffset;
+  part.mayBlend = part.geometry ? geometryMayBlend(part.geometry) : part.color?.[3] < .999;
+}
+
+function geometryMayBlend(geometry) {
+  const vertices = geometry.vertices;
+  for (let at = 0; at < vertices.length; at += AVATAR_VERTEX_STRIDE_FLOATS) {
+    if (vertices[at + 9] < .999 || vertices[at + 13] > .5) return true;
+  }
+  return false;
+}
+
+function collectAvatarPartRange(state, part, mayBlend) {
+  state.visibleCount = appendAvatarIndexRange(state.visible, state.visibleCount, part.indexOffset, part.indexCount);
+  if (mayBlend) state.blendCount = appendAvatarIndexRange(state.blend, state.blendCount, part.indexOffset, part.indexCount);
+}
+function appendAvatarIndexRange(ranges, count, offset, length) {
+  if (!length) return count;
+  const previous = ranges[count - 1];
+  if (previous && previous.offset + previous.count === offset) { previous.count += length; return count; }
+  const range = ranges[count] ?? (ranges[count] = {}); range.offset = offset; range.count = length;
+  return count + 1;
 }
 
 function appendGeometry(vertices, indices, geometry) {

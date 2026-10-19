@@ -32,7 +32,7 @@ export class BufferManager {
       gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3,2,gl.UNSIGNED_SHORT,false,CHUNK_VERTEX_STRIDE_BYTES,16);
       gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4,1,gl.UNSIGNED_BYTE,true,CHUNK_VERTEX_STRIDE_BYTES,11);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,prepared.indices.byteLength,gl.STATIC_DRAW);
-      const handle={vao,vbo,ibo,indexCount:prepared.indexCount,indexType:prepared.indices instanceof Uint32Array?gl.UNSIGNED_INT:gl.UNSIGNED_SHORT,indexBytes:prepared.indices.BYTES_PER_ELEMENT,byteLength:prepared.vertices.byteLength+prepared.indices.byteLength,triangleCount:prepared.triangleCount,drawRanges:prepared.drawRanges,blendUnits:prepared.blendUnits,bounds:prepared.bounds,originY:mesh.originY??0};
+      const handle={vao,vbo,ibo,drawIndices:prepared.indices,drawVertices:prepared.vertices,indexCount:prepared.indexCount,indexType:prepared.indices instanceof Uint32Array?gl.UNSIGNED_INT:gl.UNSIGNED_SHORT,indexBytes:prepared.indices.BYTES_PER_ELEMENT,byteLength:prepared.vertices.byteLength+prepared.indices.byteLength,triangleCount:prepared.triangleCount,drawRanges:prepared.drawRanges,blendUnits:prepared.blendUnits,bounds:prepared.bounds,originY:mesh.originY??0};
       return {handle,vertices:prepared.vertices,indices:new Uint8Array(prepared.indices.buffer,prepared.indices.byteOffset,prepared.indices.byteLength),vertexOffset:0,indexOffset:0,done:false,uploadedBytes:0};
     } catch(error) {this.disposeChunkBuffers({vao,vbo,ibo});throw error;}
     finally {gl.bindVertexArray(null);}

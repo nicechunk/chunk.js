@@ -85,11 +85,11 @@ export function instrumentGl(gl, ledger) {
         const result = value.apply(target, args);
         if (key === "bindBuffer") bindings.set(args[0], args[1]);
         if (key === "bufferData") {
-          const bytes = typeof args[1] === "number" ? args[1] : args[1]?.byteLength ?? 0;
+          const bytes = typeof args[1] === "number" ? args[1] : transferByteLength(args[1], args[3], args[4]);
           ledger.size(bindings.get(args[0]), bytes);
           if (typeof args[1] !== "number") ledger.uploadBytes += bytes;
         }
-        if (key === "bufferSubData") ledger.uploadBytes += args[2]?.byteLength ?? 0;
+        if (key === "bufferSubData") ledger.uploadBytes += transferByteLength(args[2], args[3], args[4]);
         if (key === "bindTexture") textureBindings.set(args[0], args[1]);
         if (key === "texStorage3D") {
           let pixels = 0;
@@ -103,6 +103,13 @@ export function instrumentGl(gl, ledger) {
       return wrapped;
     },
   });
+}
+
+function transferByteLength(data, sourceOffset = 0, length = null) {
+  const elementBytes = data?.BYTES_PER_ELEMENT ?? 1;
+  const available = Math.max(0, (data?.byteLength ?? 0) - sourceOffset * elementBytes);
+  // WebGL2's zero/omitted length means the remainder of the source view.
+  return length == null || length === 0 ? available : Math.max(0, Math.min(available, length * elementBytes));
 }
 
 export class AsyncGpuTimer {

@@ -44,6 +44,21 @@ The normal section path supplies verified material metadata from its build task,
 so the main thread does not reclassify all vertices/triangles. These limits are
 not a guarantee that every driver call or arbitrary legacy mesh finishes in 4 ms.
 
+`prepareChunksForRender(chunks, { deadline })` also accepts an absolute
+`performance.now()` deadline from the host streaming budget. An expired explicit
+deadline starts no upload. Retry cooldowns do not consume a channel turn. Near
+terrain and visual channels share one priority queue; waiting frame debt and age
+provide progress under sustained nearby edits. Partial transfers reset debt only
+after real byte progress, and preserve their staging transaction across turns.
+
+Preparation updates backing size and camera aspect before visibility. A
+`ResizeObserver`, when available, supplies subsequent canvas dimensions without
+per-frame layout reads; the fallback reads once in a prepare/render pair. A
+short-lived scalar input record validates source identity, instance generation,
+managed active-list revisions, channel storage and bounds before render reuses
+the prepared list. Mutable legacy section maps are conservatively rechecked.
+CPU upload candidates remain independent from committed GPU draw entries.
+
 A failed channel retries after 250 ms by default (`uploadRetryMs`). Its signature
 never advances on failure. CPU models registered during context loss are pending
 work, not successful GPU uploads.
@@ -65,6 +80,25 @@ Failed replacements retain their old handle and retry automatically. A disposed
 renderer clears the registry and detaches listeners; late load completions or
 restoration events cannot resurrect it.
 
+Animated entities additionally own independent persistent pose storage: two CPU
+arrays and up to two ping-pong VBO/VAO pairs sharing the model's immutable IBO.
+Each visible entity generates/transfers at most one pose per frame. The inactive
+buffer and matching part-visibility ranges commit together only after successful
+validation; failure keeps the previous complete GPU pose and CPU sort data.
+Conservative animation envelopes include equipment, cloth and NCM4 ancestor
+pivots before pose generation. Offscreen body instances are pruned; projected
+shadow candidates are considered separately by their projected quad and obey the
+actual `maxDynamicShadowCasters` limit. The gameplay shadow policy remains off.
+
+NCM4 pose preparation caches the per-bone rotation terms once per pose and the
+unposed cuboid face points by geometry values. Parent chains still execute in the
+original order with double precision between ancestors and the same final
+Float32 write. Normals are calculated once per face. This avoids per-vertex trig,
+rotation lookups and intermediate vector allocations without introducing GPU
+skinning, changing animation frequency or using a lower-detail model. Live
+pivot/parent/action changes refresh the pose terms, and changed cuboid dimensions
+invalidate cached face points.
+
 ## Material ranges and transparency
 
 `prepareMeshDrawRanges()` partitions indices by material semantics, regardless of
@@ -83,6 +117,27 @@ The default renderer queues water, ice, glass, transparent avatar/equipment
 triangles, preview geometry and particle instances together in eye-space depth
 order, recomputed for the actual camera. Equal depths use a stable identity key.
 Invisible avatar fades are skipped. Particle instances are a bounded pool.
+
+Model construction records part index ranges and possible blend material paths.
+Each pose updates visible ranges while it already visits parts. Known hidden
+equipment/groups leave both the opaque index draws and transparent queue source;
+an ordinary opaque body skips per-triangle blend classification. Unknown external
+mesh layouts retain the conservative per-triangle fallback. A texture replaces
+vertex color and alpha in the avatar shader: zero vertex alpha alone never proves
+that a textured triangle is invisible.
+
+The globally sorted queue is divided into contiguous compatible segments. Each
+vertex-storage owner has a separate dynamic sorted EBO and dedicated VAO; the
+canonical opaque/cutout/shadow index buffer remains immutable. The stream reads
+indices from the currently committed GPU handle, including shared-page rebasing.
+It supports 16/32-bit indices, has an 8 MiB reusable CPU index-capacity bound, and
+falls back to canonical per-unit draws in the same global order on allocation or
+upload failure. A stream owner for an animated entity survives pose VBO swaps;
+its VAO attributes are rebound when the VBO changes. Unused owners are pruned.
+
+Particles prepare their complete ordered instance data once per frame. Each
+contiguous segment uses instance attribute byte offsets to select its interval;
+WebGL2 base-instance support is not assumed. Empty input transfers no data.
 
 This is sorted source-alpha transparency, not order-independent transparency.
 Terrain/model triangles are sortable units; large greedy triangles, intersecting
@@ -138,6 +193,10 @@ Tests cover signed `2^20` and `2^24`, equivalent eye encodings, and split chunks
   allocations; transition peaks; cumulative real buffer transfer bytes. Texture allocation bytes are separate.
 - Context generation, allocation/upload failures, oldest upload wait, bounded
   cache size, GPU channel/instance/dependency versions, and commit tokens.
+- Per-entry CPU mesh-ready, GPU-ready and first submitted draw timestamps.
+  Enabled render logging emits `mesh-gpu-ready` and `mesh-first-draw` once per
+  commit; it does not scan the world each frame. These are submission timestamps,
+  not proof of display scanout or a hardware GPU completion measurement.
 - Retained CPU mesh buffers and the bounded shared material-tile cache separately.
   The host manager supplies the remaining world CPU mesh/cache totals.
 - CPU stage distributions from the bounded `RenderStageStats` recorder. Callers
@@ -160,6 +219,10 @@ entries. Diagnostic snapshots sort bounded CPU samples on demand, not per voxel.
   aliases, loss during init, texture fallback, water cells and bounded metrics.
 - Existing renderer context, avatar held-material and forge texture tests retain
   their correct behavior assertions.
+- `tests/transparent-streaming.test.mjs` checks committed sorted-index ownership,
+  canonical EBO isolation, both index widths, shared origins, allocation failure,
+  particle intervals, independent real poses, visibility/cooldown/fairness,
+  prepared-frame invalidation and budgeted material-partition steps.
 - `tools/render-gpu-long-session.mjs` runs a controlled 60-minute renderer and real
   module Worker component session. It explicitly identifies synthetic local
   dig/backfill, view-distance changes, periodic loss/restore, pruning, its renderer
