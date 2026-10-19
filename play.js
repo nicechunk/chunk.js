@@ -96,7 +96,7 @@ export {
   preparedCollisionBoxIntersectsBlock,
   preparedCollisionFootprintIntersectsBlock,
 } from "./input/collision.js";
-export { resolveCameraCollisionSegment } from "./input/camera-collision.js";
+export { resolveCameraCollisionSegment, isCameraVolumeClear } from "./input/camera-collision.js";
 export { raycastBlock, raycastBlockFromScreen } from "./input/raycast.js";
 export { createAvatarToolCollisionResolver } from "./physics/voxel-item-collision.js";
 export { inspectBlock } from "./debug/block-inspector.js";

@@ -26,7 +26,7 @@ test("camera sweep stops before a blocking terrain wall", () => {
 
   assert.equal(result.collided, true);
   assert.ok(result.x < 4, `camera x ${result.x} must remain in front of the wall`);
-  assert.ok(Math.abs(result.x - 3.9) < 0.000001);
+  assert.ok(Math.abs(result.x - 3.66) < 0.000001);
 });
 
 test("camera sweep radius catches terrain beside the center ray", () => {
