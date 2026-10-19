@@ -136,6 +136,9 @@ export class WebGL2VoxelRenderer {
       textureQuality: options.textureQuality ?? "balanced",
       maxUploadBytesPerFrame: options.maxUploadBytesPerFrame ?? 4 * 1024 * 1024,
       maxUploadCpuMs: options.maxUploadCpuMs ?? 4,
+      maxPrefetchGpuBytes: options.maxPrefetchGpuBytes ?? 32 * 1024 * 1024,
+      maxPrefetchUploadsPerFrame: options.maxPrefetchUploadsPerFrame ?? 2,
+      prefetchIntervalMs: options.prefetchIntervalMs ?? 100,
       uploadRetryMs: options.uploadRetryMs ?? 250,
       antialias: options.antialias ?? false,
     };
@@ -171,6 +174,8 @@ export class WebGL2VoxelRenderer {
     this.uploadDiagnostics = { failed: 0, bytes: 0, cpuMs: 0, oldestPendingMs: 0 };
     this.pendingUploadSince = new Map();
     this.pendingMeshSources = new Map();
+    this.observedChunkCommits = new WeakMap();
+    this.lastPrefetchAt = -Infinity;
     this.avatarFrameStates = new Map();
     this.cloudLayer = null;
     this.skyGradient = null;
@@ -222,6 +227,8 @@ export class WebGL2VoxelRenderer {
     this.regionGroupCache.clear(); this.frustumFilterCache = null;
     this.avatarResourceCache = new WeakMap();
     this.retryUploads.clear(); this.uploadStaging.clear();
+    this.pendingMeshSources.clear(); this.pendingUploadSince.clear();
+    this.observedChunkCommits = new WeakMap();
     this.uploadValidationFence = null;
     this.frameCompletionFences.length = 0;
   }
@@ -578,6 +585,8 @@ export class WebGL2VoxelRenderer {
 
   removeChunk(chunkId) {
     this.cpuMeshBytesDirty=true;
+    this.observedChunkCommits = new WeakMap();
+    this.preparedRenderFrame = null;
     for (const buffers of [this.chunkBuffers, this.visualChunkBuffers]) {
       for (const [id, entry] of buffers) if (id === chunkId || entry.parentId === chunkId) {
         this.bufferManager?.disposeChunkBuffers(entry.handle); buffers.delete(id);
@@ -601,11 +610,37 @@ export class WebGL2VoxelRenderer {
     for (const buffers of [this.chunkBuffers, this.visualChunkBuffers]) for (const [id, entry] of buffers) if (!live.has(id) && !live.has(entry.parentId)) dead.add(entry.parentId ?? id);
     for (const regions of [this.regionBuffers, this.visualRegionBuffers]) for (const region of regions.values()) for (const [id,entry] of region.members ?? []) if (!live.has(id) && !live.has(entry.parentId)) dead.add(entry.parentId ?? id);
     for (const { source } of this.uploadStaging.values()) if(!live.has(source.id) && !live.has(source.parentId))dead.add(source.parentId ?? source.id);
+    for (const { chunk, parent } of this.pendingMeshSources.values()) if(!live.has(chunk.id) && !live.has(parent?.id ?? chunk.parentId))dead.add(parent?.id ?? chunk.parentId ?? chunk.id);
     for (const id of dead) this.removeChunk(id);
     for (const [key,groups] of this.regionGroupCache) if(groups.some(group=>group.chunks.some(c=>!live.has(c.id)&&!live.has(c.parentId)))) this.regionGroupCache.delete(key);
   }
 
-  prepareChunksForRender(visibleChunks = [], { maxUploads = this.options.maxChunkUploadsPerFrame, cameraState = null } = {}) {
+  observeChunkCommits(chunks) {
+    for (const chunk of chunks) {
+      if (!chunk) continue;
+      const revision = chunk.renderSectionCommitRevision;
+      const prior = this.observedChunkCommits.get(chunk);
+      // Managed columns publish an immutable active list with their summary.
+      // Legacy/building callers may mutate channels directly and are rechecked.
+      if (revision != null && prior?.revision === revision && prior.generation === this.contextGeneration
+        && prior.mesh === chunk.mesh && prior.visualMesh === chunk.visualMesh) continue;
+      const sections = chunk.renderSections?.size ? [...chunk.renderSections.values()] : [chunk];
+      retireCommittedEmptyChunkBuffers(this, sections);
+      for (const section of chunk.renderActiveSections ?? sections) for (const visual of [false,true]) {
+        const mesh = section?.[visual ? "visualMesh" : "mesh"];
+        if (!mesh?.indexCount) continue;
+        const entry = this.entryForChunk(section,visual);
+        if (entry?.token === meshIdentity(section,visual) && section[visual ? "visualGpuUploaded" : "gpuUploaded"]) continue;
+        const key = `${visual ? 'visual' : 'opaque'}:${section.id}`;
+        if (!this.pendingUploadSince.has(key)) this.pendingUploadSince.set(key,performance.now());
+        this.pendingMeshSources.set(key,{chunk:section,visual,parent:chunk});
+      }
+      if (revision != null) this.observedChunkCommits.set(chunk,{revision,generation:this.contextGeneration,mesh:chunk.mesh,visualMesh:chunk.visualMesh});
+    }
+  }
+
+  prepareChunksForRender(visibleChunks = [], { maxUploads = this.options.maxChunkUploadsPerFrame, cameraState = null, residencyChunks = [] } = {}) {
+    this.preparedRenderFrame = null;
     if (!this.gpuReady()) return { uploaded: 0, pendingUploads: 0, paused: true };
     const settlement = this.settleDeferredUploads();
     if(settlement.waiting) return { uploaded: settlement.uploaded,
@@ -615,35 +650,52 @@ export class WebGL2VoxelRenderer {
       if(this.frameCompletionFences.length>=2)return {uploaded:0,pendingUploads:this.pendingUploadSince.size,uploadedBytes:0,frameDeferred:true};
     }
     this.restoreAvatarUploads();
-    const sections = flattenRenderSections(visibleChunks);
-    retireCommittedEmptyChunkBuffers(this, sections);
-    // Empty committed sections have no pixels. Retire their old/staged handles
-    // above, then keep them out of repeated frustum/pass traversal.
-    const chunks = this.filterChunksForCamera(sections.filter(chunk=>chunk?.mesh?.indexCount || chunk?.visualMesh?.indexCount), cameraState);
     const startedAt = performance.now(), limit = Math.max(0, Math.trunc(maxUploads ?? 0));
+    const visibleSet = new Set(visibleChunks), residentSet = new Set(residencyChunks);
+    this.observeChunkCommits(visibleSet);
+    this.observeChunkCommits(residentSet);
+    const chunks = this.filterChunksForCamera(filterChunksByRenderRadius(flattenRenderSections(visibleChunks,{includeEmpty:false}),cameraState,this.options.viewDistance),cameraState);
+    const visibleSections = new Map(chunks.map((chunk,index)=>[chunk,index]));
+    this.preparedRenderFrame = {input:visibleChunks,camera:captureFrustumCamera(cameraState),chunks,viewDistance:this.options.viewDistance};
+    const candidates = [];
+    const center = cameraState ? cameraRenderCenterChunk(cameraState) : null;
+    const allowPrefetch = performance.now()-this.lastPrefetchAt >= this.options.prefetchIntervalMs && !this.frameCompletionFences.length;
+    for (const [key, source] of this.pendingMeshSources) {
+      const {chunk,visual,parent} = source;
+      const mesh = chunk?.[visual ? 'visualMesh' : 'mesh'];
+      if (!mesh?.indexCount) continue;
+      const visible = visibleSections.has(chunk);
+      if (!visible && !residentSet.has(parent ?? chunk)) continue;
+      if (!visible && !allowPrefetch) continue;
+      if (!visible && this.resourceLedger.bufferBytes >= this.options.maxPrefetchGpuBytes) continue;
+      const distance = center ? Math.max(Math.abs(chunk.chunkX-center.chunkX),Math.abs(chunk.chunkZ-center.chunkZ)) : 0;
+      candidates.push({key,chunk,visual,visible,distance,order:visible ? visibleSections.get(chunk)*2+Number(visual) : candidates.length});
+    }
+    candidates.sort((a,b)=>Number(b.visible)-Number(a.visible) || (a.visible ? a.order-b.order : a.distance-b.distance || a.order-b.order));
     let uploaded=settlement.uploaded, bytes=0, attempts=0,pendingUploads=0, oldestPendingMs=0;
     // A task is one chunk/section channel. Region membership never causes repacking.
     // Finish both channels of nearer sections before distant opaque work. A
     // completed validation can feed this frame's bounded batch immediately;
     // no draw/upload occurs behind an outstanding validation fence.
-    for (const chunk of chunks) for (const visual of [false,true]) {
+    let prefetchUploads=0;
+    for (const {key,chunk,visual,visible} of candidates) {
       const mesh=chunk?.[visual?'visualMesh':'mesh']; if(!mesh?.indexCount)continue;
       const existing=this.entryForChunk(chunk,visual);
       if(existing?.token===meshIdentity(chunk,visual) && chunk[visual?'visualGpuUploaded':'gpuUploaded'])continue;
-      const key=`${visual?'visual':'opaque'}:${chunk.id}`;
-      if(!this.pendingUploadSince.has(key))this.pendingUploadSince.set(key,performance.now());
-      this.pendingMeshSources.set(key,{chunk,visual});
-      const taskBytes=mesh.vertices.byteLength+mesh.indices.byteLength;
       const overBudget=attempts>=limit || bytes>=this.options.maxUploadBytesPerFrame || (attempts>0 && performance.now()-startedAt>=this.options.maxUploadCpuMs);
-      if(overBudget) {pendingUploads++;oldestPendingMs=Math.max(oldestPendingMs,performance.now()-this.pendingUploadSince.get(key));continue;}
+      if(overBudget) {if(visible)pendingUploads++;oldestPendingMs=Math.max(oldestPendingMs,performance.now()-this.pendingUploadSince.get(key));continue;}
+      if (!visible && prefetchUploads >= this.options.maxPrefetchUploadsPerFrame) continue;
+      if (!visible && this.resourceLedger.bufferBytes + mesh.vertices.byteLength + mesh.indices.byteLength > this.options.maxPrefetchGpuBytes) continue;
       const region = this.options.useRegionBatching && regionBatchEligible(chunk) ? this.getRegionGroups([chunk],visual?'visualMesh':'mesh')[0] : null;
       const remainingBytes=Math.max(1,this.options.maxUploadBytesPerFrame-bytes);
       const result=region?this.uploadRegion(region,undefined,{visual,maxBytes:remainingBytes}):this.uploadChannel(chunk,visual,null,remainingBytes);
       attempts++;bytes+=this.lastUploadAttemptBytes;
-      if(result)uploaded++;else {pendingUploads++;oldestPendingMs=Math.max(oldestPendingMs,performance.now()-(this.pendingUploadSince.get(key)??performance.now()));}
+      if (!visible) prefetchUploads++;
+      if(result)uploaded++;else {if(visible)pendingUploads++;oldestPendingMs=Math.max(oldestPendingMs,performance.now()-(this.pendingUploadSince.get(key)??performance.now()));}
     }
+    if (prefetchUploads) this.lastPrefetchAt=performance.now();
     this.uploadDiagnostics.oldestPendingMs=oldestPendingMs;
-    return {uploaded,pendingUploads,uploadedBytes:bytes,cpuMs:performance.now()-startedAt,oldestPendingMs};
+    return {uploaded,pendingUploads,prefetchUploads,uploadedBytes:bytes,cpuMs:performance.now()-startedAt,oldestPendingMs};
   }
 
   uploadRegion(region, signature = null, { visual = false, maxBytes=Infinity } = {}) {
@@ -741,7 +793,9 @@ export class WebGL2VoxelRenderer {
     const gl = this.gl;
     if (this.options.autoResizeEachFrame) this.resize();
     cameraState.aspect = Math.max(1, this.canvas.width) / Math.max(1, this.canvas.height);
-    const renderChunks = this.filterChunksForCamera(
+    const prepared = this.preparedRenderFrame;
+    this.preparedRenderFrame = null;
+    const renderChunks = prepared?.input === visibleChunks && prepared.viewDistance === this.options.viewDistance && sameFrustumCamera(prepared.camera,cameraState) ? prepared.chunks : this.filterChunksForCamera(
       filterChunksByRenderRadius(flattenRenderSections(visibleChunks, { includeEmpty: false }), cameraState, this.options.viewDistance),
       cameraState,
     );
@@ -941,7 +995,11 @@ export class WebGL2VoxelRenderer {
     gl.useProgram(this.solidProgram??this.program);gl.uniform1f(uniforms.uOpacity,1);this.textureArray?.bind(0);
     let drawCalls=0,triangles=0;
     for(const chunk of chunks){const entry=this.entryForChunk(chunk,visual);if(!entry?.handle)continue;
-      const handle=entry.handle;gl.uniform3f(uniforms.uChunkOrigin,chunk.chunkX*chunk.chunkSize-origin.worldX,entry.originY-origin.worldY,chunk.chunkZ*chunk.chunkSize-origin.worldZ);gl.bindVertexArray(handle.vao);
+      const handle=entry.handle;
+      let eligible=false;
+      for (const pass of passes) if (handle.drawRanges?.[pass]?.count || (!handle.drawRanges && pass==='opaque' && handle.indexCount)) { eligible=true;break; }
+      if (!eligible) continue;
+      gl.uniform3f(uniforms.uChunkOrigin,chunk.chunkX*chunk.chunkSize-origin.worldX,entry.originY-origin.worldY,chunk.chunkZ*chunk.chunkSize-origin.worldZ);gl.bindVertexArray(handle.vao);
       for(const pass of passes){const range=handle.drawRanges?.[pass] ?? (pass==='opaque'?{offset:0,count:handle.indexCount}:null);if(!range?.count)continue;
         if(uniforms.uSurfacePass)gl.uniform1f(uniforms.uSurfacePass,pass==='cutout'?1:0);
         gl.drawElements(gl.TRIANGLES,range.count,handle.indexType,range.offset*(handle.indexBytes??2));drawCalls++;triangles+=range.count/3;}
@@ -1709,4 +1767,4 @@ function emptyStats() {
 const gpuObjectTokens=new WeakMap();let nextGpuObjectToken=1;
 function objectToken(object){if(!object||typeof object!=="object")return 0;if(!gpuObjectTokens.has(object))gpuObjectTokens.set(object,nextGpuObjectToken++);return gpuObjectTokens.get(object);}
 function meshIdentity(chunk, visual=false){const mesh=chunk?.[visual?"visualMesh":"mesh"];return `${objectToken(chunk)}:${chunk?.generation??0}:${committedMeshVersion(chunk,visual)}:${visual?chunk?.visualCommitToken??0:chunk?.meshCommitToken??0}:${objectToken(mesh)}:${objectToken(mesh?.vertices)}:${objectToken(mesh?.indices)}`;}
-export function flattenRenderSections(chunks,{includeEmpty=true}={}){const out=[];for(const chunk of chunks??[]){if(chunk?.renderSections instanceof Map && chunk.renderSections.size){for(const section of chunk.renderSections.values()){if(!includeEmpty&&!section.mesh?.indexCount&&!section.visualMesh?.indexCount)continue;if(section.parentId==null)section.parentId=chunk.id;out.push(section);}}else out.push(chunk);}return out;}
+export function flattenRenderSections(chunks,{includeEmpty=true}={}){const out=[];for(const chunk of chunks??[]){if(chunk?.renderSections instanceof Map && chunk.renderSections.size){for(const section of (!includeEmpty&&chunk.renderActiveSections || chunk.renderSections.values())){if(!includeEmpty&&!section.mesh?.indexCount&&!section.visualMesh?.indexCount)continue;if(section.parentId==null)section.parentId=chunk.id;out.push(section);}}else out.push(chunk);}return out;}

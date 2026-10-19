@@ -9,6 +9,8 @@ export const RENDER_SECTION_HEIGHT = 16;
 let generationSerial = 1;
 let submissionSerial = 1;
 const generatedPlans = new WeakMap();
+const voxelScratchPool = [];
+const MAX_RETAINED_VOXEL_SCRATCH_BYTES = 128 * 1024;
 
 // Canonical generated terrain has no buried cavities. Chain/halo edits still
 // enumerate their exact affected sections; custom/dense worlds use the full path.
@@ -212,7 +214,46 @@ function finalColumnTop(chunk,x,z) {
 }
 
 export function sectionRevision(section, materialVersion = section.materialVersion) {
-  return `${section.generation}:${section.dataRevision}:${section.haloRevision}:${section.lightRevision}:${materialVersion}`;
+  return `${section.generation}:${section.dataRevision}:${section.haloRevision}:${section.lightRevision}:${materialVersion}:${section.decorationRevision ?? 0}`;
+}
+
+// Ground models belong to the section containing their support cell. Rules and
+// pickups never change the opaque terrain/tree channel, even when a model's
+// material is opaque. Edited columns can also have exposed cave floors.
+export function invalidateSurfaceDecorations(chunk, { surfaces = null, columns = null } = {}) {
+  if (!chunk.renderSections) { chunk.markDirty(); return; }
+  const affected = new Set();
+  if (!chunk.baseProfile || chunk.baseBlocks) {
+    for (const index of chunk.renderSections.keys()) affected.add(index);
+  } else {
+    const profile = chunk.baseProfile;
+    for (let column = 0; column < chunk.chunkSize * chunk.chunkSize; column++) {
+      if (columns && !columns.has(column)) continue;
+      if (!surfaces || !profile.surfaceBlock || surfaces.has(profile.surfaceBlock[column])) {
+        affected.add(sectionIndexAt(chunk, profile.surfaceY[column]));
+      }
+    }
+    for (const delta of chunk.getFinalDeltaMap().values()) {
+      if (columns && !columns.has(delta.localX + delta.localZ * chunk.chunkSize)) continue;
+      affected.add(sectionIndexAt(chunk, delta.localY));
+      affected.add(sectionIndexAt(chunk, delta.localY - 1));
+    }
+  }
+  let changed = false;
+  for (const index of affected) {
+    const section = chunk.renderSections.get(index);
+    if (!section) continue;
+    section.decorationRevision = (section.decorationRevision ?? 0) + 1;
+    section.visualDirty = true;
+    section.visualRetryAt = 0;
+    section.dirtyReason = "surface-decoration";
+    section.oldestDirtyAt ??= performance.now();
+    changed = true;
+  }
+  if (changed) {
+    chunk.renderInvalidationPending = true;
+    chunk.markDirty();
+  }
 }
 
 export function sectionDeltaValues(chunk, index, marginSections = 1) {
@@ -261,7 +302,11 @@ export function buildRenderSection(chunk, section, access = {}, { visualOnly = f
   }
   const margin=chunk.shadows===false?8:SUNLIGHT_HORIZONTAL_REACH,verticalMargin=8,width=chunk.chunkSize+margin*2,cacheHeight=section.height+verticalMargin*2;
   const originX=chunk.chunkX*chunk.chunkSize-margin,originZ=chunk.chunkZ*chunk.chunkSize-margin,originY=section.originY-verticalMargin;
-  const voxels=new Uint16Array(width*width*cacheHeight);voxels.fill(65535);
+  const length=width*width*cacheHeight;
+  const scratchIndex=voxelScratchPool.findIndex(array=>array.length===length);
+  const voxels=scratchIndex<0?new Uint16Array(length):voxelScratchPool.splice(scratchIndex,1)[0];
+  voxels.fill(65535);
+  try {
   let voxelQueries=0,voxelVisits=0;
   const columns=new Map();
   const getWorld=(x,y,z)=>{
@@ -313,6 +358,9 @@ export function buildRenderSection(chunk, section, access = {}, { visualOnly = f
   if(mesh)mesh=prepareMeshDrawRanges(mesh);
   if(visualMesh)visualMesh=prepareMeshDrawRanges(visualMesh);
   return {mesh,visualMesh,visualError,lighting,voxelQueries,voxelVisits,voxelCacheBytes:voxels.byteLength,opaqueCellBudget:chunk.chunkSize*chunk.chunkSize*section.height,elapsedMs:performance.now()-startedAt};
+  } finally {
+    if (voxels.byteLength<=MAX_RETAINED_VOXEL_SCRATCH_BYTES && voxelScratchPool.reduce((bytes,array)=>bytes+array.byteLength,0)+voxels.byteLength<=MAX_RETAINED_VOXEL_SCRATCH_BYTES) voxelScratchPool.push(voxels);
+  }
 }
 
 function emptySectionMesh(chunk,section) {
@@ -344,6 +392,8 @@ export function updateChunkSectionSummary(chunk) {
   const sections=[...chunk.renderSections.values()];
   chunk.mesh=combinedSectionMesh(chunk,sections,"mesh");
   chunk.visualMesh=combinedSectionMesh(chunk,sections,"visualMesh");
+  chunk.renderActiveSections = sections.filter(section => section.mesh?.indexCount || section.visualMesh?.indexCount);
+  chunk.renderSectionCommitRevision = (chunk.renderSectionCommitRevision ?? 0) + 1;
   chunk.dirty=sections.some(s=>s.dirty||s.visualDirty);
   if(!sections.some(s=>s.dirty))chunk.meshVersion=chunk.version;
   if(!sections.some(s=>s.visualDirty))chunk.visualMeshVersion=chunk.version;
@@ -397,11 +447,13 @@ function mergeMeshes(meshes) {
 }
 
 export function packedMeshBounds(mesh) {
-  const bounds={minX:Infinity,minY:Infinity,minZ:Infinity,maxX:-Infinity,maxY:-Infinity,maxZ:-Infinity};
+  let minX=Infinity,minY=Infinity,minZ=Infinity,maxX=-Infinity,maxY=-Infinity,maxZ=-Infinity;
   const view=new DataView(mesh.vertices.buffer,mesh.vertices.byteOffset,mesh.vertices.byteLength);
   for(let i=0;i<mesh.vertexCount;i++) {
-    const o=i*20,s=view.getInt16(o+6,true),p=[view.getInt16(o,true)/s,view.getInt16(o+2,true)/s,view.getInt16(o+4,true)/s];
-    for(let a=0;a<3;a++){const axis="XYZ"[a];bounds[`min${axis}`]=Math.min(bounds[`min${axis}`],p[a]);bounds[`max${axis}`]=Math.max(bounds[`max${axis}`],p[a]);}
+    const o=i*20,s=view.getInt16(o+6,true),x=view.getInt16(o,true)/s,y=view.getInt16(o+2,true)/s,z=view.getInt16(o+4,true)/s;
+    minX=Math.min(minX,x);maxX=Math.max(maxX,x);
+    minY=Math.min(minY,y);maxY=Math.max(maxY,y);
+    minZ=Math.min(minZ,z);maxZ=Math.max(maxZ,z);
   }
-  return bounds;
+  return {minX,minY,minZ,maxX,maxY,maxZ};
 }

@@ -30,7 +30,7 @@ import {
   normalizeDelta,
 } from "./chunk-delta.js";
 import { meshChunkOpaqueFast, meshChunkVisual } from "./chunk-mesher.js";
-import { ensureRenderSections, buildRenderSection, commitRenderSection, updateChunkSectionSummary, sectionRevision, sectionDeltaValues, invalidateRenderSections, prepareRenderSnapshotInvalidation } from "./render-sections.js";
+import { ensureRenderSections, buildRenderSection, commitRenderSection, updateChunkSectionSummary, sectionRevision, sectionDeltaValues, invalidateRenderSections, prepareRenderSnapshotInvalidation, invalidateSurfaceDecorations } from "./render-sections.js";
 import { chunkIntersectsCameraFrustum, prepareCameraFrustum, cameraRenderCenterChunk } from "../renderer/frustum.js";
 import { RenderStageStats } from "../debug/stats.js";
 
@@ -84,6 +84,7 @@ export class ChunkManager {
     deferContinuousBuildDispatch = false,
     maxQueuedBuilds = DEFAULT_MAX_BUILD_QUEUE,
     visibilityLingerFrames = DEFAULT_VISIBILITY_LINGER_FRAMES,
+    maxCachedMeshBytes = 32 * 1024 * 1024,
   } = {}) {
     this.config = createWorldGeneratorConfig({ worldSeed, chunkSize, height, minY, maxBuildY, seaLevel, maxTerrainHeight, generationVersion, resourceRuleVersion });
     managerWorldSeeds.set(this, this.config.worldSeed);
@@ -108,6 +109,11 @@ export class ChunkManager {
     this.surfaceDecorationRulesRevision = 0;
     this.surfaceDecorationRulesSignature = decorationRulesSignature(this.surfaceDecorationRules.rules);
     this.chunks = new Map();
+    this.reusableMeshes = new Map();
+    this.reusableMeshBytes = 0;
+    this.reusedMeshChunks = 0;
+    this.pickedSurfaceColumnsByChunk = new Map();
+    this.maxCachedMeshBytes = boundedManagerInteger(maxCachedMeshBytes, 0, 128 * 1024 * 1024, "reusable mesh byte limit");
     this.centerChunkX = 0;
     this.centerChunkZ = 0;
     this.loadDirX = 0;
@@ -138,6 +144,7 @@ export class ChunkManager {
     this.idleWorkers = [];
     this.buildQueue = [];
     this.buildQueueNeedsSort = false;
+    this.lastBuildQueueSortAt = -Infinity;
     this.inFlightBuilds = new Map();
     this.settledWorkerTaskIds = new WeakMap();
     this.completedBuilds = [];
@@ -199,12 +206,15 @@ export class ChunkManager {
       this.surfaceDecorationRulesRevision = Math.max(this.surfaceDecorationRulesRevision, Math.trunc(Number(revision) || 0));
       return false;
     }
+    const surfaces = new Set([...this.surfaceDecorationRules.bySurface.keys(), ...compiled.bySurface.keys()]);
+    for (const surface of surfaces) {
+      if (JSON.stringify(this.surfaceDecorationRules.bySurface.get(surface)) === JSON.stringify(compiled.bySurface.get(surface))) surfaces.delete(surface);
+    }
     this.surfaceDecorationRules = compiled;
     this.surfaceDecorationRulesSignature = signature;
     this.surfaceDecorationRulesRevision = compiled.rules.length
       ? Math.max(1, Math.trunc(Number(revision) || 1))
       : Math.max(0, Math.trunc(Number(revision) || 0));
-    this.materialVersion += 1;
     for (const worker of [...this.workers]) {
       if (!this.useWorkers) break;
       try {
@@ -215,10 +225,22 @@ export class ChunkManager {
     }
     for (const chunk of this.chunks.values()) {
       chunk.surfaceDecorationRules = compiled;
-      chunk.materialVersion = this.materialVersion;
-      chunk.markDirty();
+      invalidateSurfaceDecorations(chunk, { surfaces });
     }
     this.dispatchBuilds();
+    return true;
+  }
+
+  setPickedSurfaceColumns(chunkX, chunkZ, columns = []) {
+    const id = chunkId(chunkX, chunkZ), chunk = this.chunks.get(id);
+    const next = [...new Set(columns)].filter(column => Number.isInteger(column) && column >= 0 && column < this.chunkSize * this.chunkSize).sort((a,b) => a-b);
+    this.pickedSurfaceColumnsByChunk.set(id,next);
+    if (!chunk) return false;
+    const previous = new Set(chunk.pickedSurfaceColumns ?? []), current = new Set(next);
+    const changed = new Set([...previous, ...current].filter(column => previous.has(column) !== current.has(column)));
+    if (!changed.size) return false;
+    chunk.pickedSurfaceColumns = next;
+    invalidateSurfaceDecorations(chunk, { columns: changed });
     return true;
   }
 
@@ -331,6 +353,7 @@ export class ChunkManager {
       baseBlocksReady: false,
     });
     chunk.prepareRenderSnapshotNeighborhood=(changes)=>this.prepareSnapshotNeighborhood(chunk,changes);
+    chunk.pickedSurfaceColumns = [...(this.pickedSurfaceColumnsByChunk.get(id) ?? [])];
     const manager=this;
     chunk.prepareRenderSnapshotInvalidation=function*(next,changes,options) {
       if(chunk.renderSections)return yield* prepareRenderSnapshotInvalidation(chunk,next,changes,options);
@@ -343,6 +366,12 @@ export class ChunkManager {
       else this.remoteOverlayChunks.delete(chunk);
     };
     this.chunks.set(id, chunk);
+    // Rehydration allocates section states. Step it under rebuildDirtyChunks'
+    // frame budget rather than restoring an entire returning range in one call.
+    if (this.reusableMeshes.has(id)) {
+      if (!deferBase && !this.useWorkers) this.restoreReusableMesh(chunk);
+      return chunk;
+    }
     if (this.useWorkers) {
       this.enqueueBuild(chunk);
     } else if(!deferBase) {
@@ -356,6 +385,7 @@ export class ChunkManager {
     for (const [id, chunk] of Array.from(this.chunks.entries())) {
       if (Math.max(Math.abs(chunk.chunkX - centerX), Math.abs(chunk.chunkZ - centerZ)) > limit) {
         const edits=[...chunk.getFinalDeltaMap().values()];
+        this.retainReusableMesh(chunk);
         this.chunks.delete(id);
         this.remoteOverlayChunks.delete(chunk);
         if(edits.length)this.markBoundaryNeighborsDirty(chunk,15,edits);
@@ -369,6 +399,54 @@ export class ChunkManager {
     for (const id of this.workerBuildFailures.keys()) {
       if (!this.chunks.has(id)) this.workerBuildFailures.delete(id);
     }
+  }
+
+  reusableMeshNeighborhoodIsClean(chunk) {
+    const radius = Math.ceil((this.shadows ? SUNLIGHT_HORIZONTAL_REACH : 8) / this.chunkSize);
+    for (let dz=-radius;dz<=radius;dz++) for (let dx=-radius;dx<=radius;dx++) {
+      const neighbor=this.chunks.get(chunkId(chunk.chunkX+dx,chunk.chunkZ+dz));
+      if (neighbor && (hasDeltas(neighbor) || neighbor.baseBlocks)) return false;
+    }
+    return true;
+  }
+
+  retainReusableMesh(chunk) {
+    if (!this.maxCachedMeshBytes || !chunk.baseProfile || !chunk.renderSections || chunk.dirty
+      || chunk.reusableBaseVersion !== chunk.version || !this.reusableMeshNeighborhoodIsClean(chunk)) return;
+    const sections = [...chunk.renderSections.values()].map(section=>({sectionIndex:section.sectionIndex,mesh:section.mesh,visualMesh:section.visualMesh,visualError:null}));
+    if (sections.some(section=>!section.mesh || !section.visualMesh)) return;
+    const buffers = new Set();
+    for (const section of sections) for (const mesh of [section.mesh,section.visualMesh]) for (const array of [mesh.vertices,mesh.indices]) buffers.add(array.buffer);
+    for (const array of [chunk.baseProfile.surfaceY,chunk.baseProfile.waterY,chunk.baseProfile.surfaceBlock]) if (array) buffers.add(array.buffer);
+    // Include conservative JS metadata estimates as well as actual retained bytes.
+    const bytes = [...buffers].reduce((total,buffer)=>total+buffer.byteLength,0) + sections.length*512 + (chunk.treeInstances?.length??0)*256 + 1024;
+    if (bytes > this.maxCachedMeshBytes) return;
+    const old = this.reusableMeshes.get(chunk.id);
+    if (old) { this.reusableMeshBytes -= old.bytes; this.reusableMeshes.delete(chunk.id); }
+    this.reusableMeshes.set(chunk.id,{bytes,sections,baseProfile:chunk.baseProfile,treeInstances:chunk.treeInstances,
+      materialVersion:this.materialVersion,rules:this.surfaceDecorationRulesSignature,picked:chunk.pickedSurfaceColumns.join(',')});
+    this.reusableMeshBytes += bytes;
+    while (this.reusableMeshBytes > this.maxCachedMeshBytes || this.reusableMeshes.size > 768) {
+      const id=this.reusableMeshes.keys().next().value;
+      this.reusableMeshBytes -= this.reusableMeshes.get(id).bytes;
+      this.reusableMeshes.delete(id);
+    }
+  }
+
+  restoreReusableMesh(chunk) {
+    const cached = this.reusableMeshes.get(chunk.id);
+    if (!cached) return false;
+    this.reusableMeshes.delete(chunk.id);this.reusableMeshBytes-=cached.bytes;
+    if (cached.materialVersion !== this.materialVersion || cached.rules !== this.surfaceDecorationRulesSignature
+      || cached.picked !== chunk.pickedSurfaceColumns.join(',') || !this.reusableMeshNeighborhoodIsClean(chunk)) return false;
+    chunk.setBaseProfile(cached.baseProfile,cached.treeInstances,this.baseBlockResolverForChunk(chunk.chunkX,chunk.chunkZ,cached.baseProfile));
+    const sections=ensureRenderSections(chunk);
+    for (const result of cached.sections) commitRenderSection(chunk,sections.get(result.sectionIndex),result,undefined,{updateSummary:false});
+    updateChunkSectionSummary(chunk);
+    chunk.reusableBaseVersion=chunk.version;
+    this.reusedMeshChunks++;
+    this.completedBuilds.push(chunk);
+    return true;
   }
 
   getVisibleChunks(cameraState = {}) {
@@ -531,11 +609,16 @@ export class ChunkManager {
     if(!this.useWorkers)return false;
     const sections=ensureRenderSections(chunk);
     let queued=false;
+    let batch = null;
     for(const section of sections.values()) {
       if(!section.dirty&&(!section.visualDirty||performance.now()<section.visualRetryAt))continue;
       if(section.buildState!=="ready"||this.buildQueue.length>=this.maxQueuedBuilds)continue;
       section.buildState="queued";
-      this.buildQueue.push({id:chunk.id,chunk,sectionIndex:section.sectionIndex,chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,mode:"section",queuedAt:section.oldestDirtyAt??performance.now(),version:chunk.version});
+      if (!batch || batch.sectionIndices.length >= 4) {
+        batch = {id:chunk.id,chunk,sectionIndex:section.sectionIndex,sectionIndices:[],chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,mode:"section",queuedAt:section.oldestDirtyAt??performance.now(),version:chunk.version};
+        this.buildQueue.push(batch);
+      }
+      batch.sectionIndices.push(section.sectionIndex);
       queued=true;
     }
     this.buildQueueNeedsSort ||= queued;
@@ -543,21 +626,31 @@ export class ChunkManager {
   }
 
   dispatchSectionBuild(worker,queued,chunk) {
-    const section=chunk.renderSections.get(queued.sectionIndex);
-    if(!section||(!section.dirty&&!section.visualDirty)){if(section)section.buildState="ready";return false;}
+    const selected = [];
+    for (const index of queued.sectionIndices ?? [queued.sectionIndex]) {
+      const section = chunk.renderSections.get(index);
+      if (section && (section.dirty || section.visualDirty)) selected.push(section);
+      else if (section) section.buildState = "ready";
+    }
+    if (!selected.length) return false;
+    const section = selected[0];
     const taskId=this.taskSerial++,revision=sectionRevision(section,this.materialVersion),startedAt=performance.now();
-    const task={...queued,worker,chunk,version:chunk.version,sectionRevision:revision,materialVersion:this.materialVersion,phase:"chunk",cancelled:false,startedAt};
-    section.buildState="building";section.buildTaskId=taskId;
+    const sectionJobs = selected.map(section => ({ sectionIndex: section.sectionIndex, sectionRevision: sectionRevision(section,this.materialVersion), visualOnly: !section.dirty }));
+    const task={...queued,sectionIndex:section.sectionIndex,sectionJobs,worker,chunk,version:chunk.version,sectionRevision:revision,materialVersion:this.materialVersion,phase:"chunk",cancelled:false,startedAt};
+    for (const item of selected) { item.buildState="building";item.buildTaskId=taskId; }
     this.inFlightBuilds.set(taskId,task);
-    const finalDeltas=packDeltaValues(sectionDeltaValues(chunk,section.sectionIndex));
-    const neighborDeltas=this.neighborDeltasForWorker(chunk.chunkX,chunk.chunkZ,section.sectionIndex);
-    const treeDeltas=this.treeNeighborDeltasForWorker(chunk.chunkX,chunk.chunkZ,section.sectionIndex);
-    const lightingDeltas=this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,this.shadows?SUNLIGHT_HORIZONTAL_REACH:8,section.sectionIndex);
+    // One column snapshot per bounded batch. Every child still carries its own
+    // revision, so an edit can reject one result without discarding its siblings.
+    const finalDeltas=packedFinalDeltasForWorker(chunk);
+    const neighborDeltas=this.neighborDeltasForWorker(chunk.chunkX,chunk.chunkZ);
+    const treeDeltas=this.treeNeighborDeltasForWorker(chunk.chunkX,chunk.chunkZ);
+    const lightingDeltas=this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,this.shadows?SUNLIGHT_HORIZONTAL_REACH:8);
     const columnTopHalo=this.captureWorkerColumnTopHalo(chunk);
     try {
       worker.postMessage({type:"buildChunk",taskId,worldSeed:new Uint8Array(managerWorldSeed(this)),chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,
         generationVersion:this.generationVersion,resourceRuleVersion:this.resourceRuleVersion,materialVersion:this.materialVersion,
         options:this.workerOptions(),mode:"section",taskVersion:task.version,sectionIndex:section.sectionIndex,sectionRevision:revision,
+        sectionJobs,
         finalDeltas,neighborDeltas,treeDeltas,lightingDeltas,columnTopHalo,baseProfile:chunk.baseProfile,treeInstances:chunk.treeInstances,
         pickedSurfaceColumns:[...(chunk.pickedSurfaceColumns??[])],
         visualOnly:!section.dirty},[finalDeltas.buffer,neighborDeltas.buffer,treeDeltas.buffer,lightingDeltas.buffer,columnTopHalo.tops.buffer,...(columnTopHalo.columns?[columnTopHalo.columns.buffer]:[])]);
@@ -582,6 +675,11 @@ export class ChunkManager {
       .filter((chunk) => chunk.dirty && chunk.buildState !== "queued" && chunk.buildState !== "building")
       .sort((a, b) => Math.max(Math.abs(a.chunkX - this.centerChunkX), Math.abs(a.chunkZ - this.centerChunkZ)) - Math.max(Math.abs(b.chunkX - this.centerChunkX), Math.abs(b.chunkZ - this.centerChunkZ)));
     for (const chunk of dirty) {
+      if (!chunk.baseBlocksReady && this.restoreReusableMesh(chunk)) {
+        rebuilt.push(chunk);
+        if (performance.now()-start >= budgetMs) break;
+        continue;
+      }
       if (this.useWorkers) {
         if (chunk.buildState === "error" && !this.prepareWorkerBuildRetry(chunk, start)) continue;
         if (chunk.baseBlocksReady && chunk.renderSections) {
@@ -1021,6 +1119,9 @@ export class ChunkManager {
     }
     return {
       chunks: this.chunks.size,
+      reusableMeshBytes: this.reusableMeshBytes,
+      reusableMeshChunks: this.reusableMeshes.size,
+      reusedMeshChunks: this.reusedMeshChunks,
       ready,
       uploaded,
       triangles,
@@ -1078,6 +1179,8 @@ export class ChunkManager {
     this.workerCount = 0;
     this.activeBuildLimit = 0;
     this.chunks.clear();
+    this.reusableMeshes.clear();this.reusableMeshBytes=0;
+    this.pickedSurfaceColumnsByChunk.clear();
     this.visibleChunkMemory.clear();
     this.collisionColumnTopCache.clear();
     this.supplementalCollisionProvider = null;
@@ -1135,8 +1238,10 @@ export class ChunkManager {
     for (const [taskId, task] of Array.from(this.inFlightBuilds.entries())) {
       if (task.worker !== worker) continue;
       const chunk = this.chunks.get(task.id);
-      const section=chunk?.renderSections?.get(task.sectionIndex);
-      if(section&&section.buildTaskId===taskId){section.buildTaskId=null;section.buildState="ready";}
+      for (const job of task.sectionJobs ?? [{sectionIndex:task.sectionIndex}]) {
+        const section=chunk?.renderSections?.get(job.sectionIndex);
+        if(section&&section.buildTaskId===taskId){section.buildTaskId=null;section.buildState="ready";}
+      }
       const obsolete = task.cancelled
         || !chunk
         || (task.phase === "chunk" && chunk.buildTaskId !== taskId);
@@ -1290,11 +1395,12 @@ export class ChunkManager {
     if (!this.useWorkers || !this.idleWorkers.length || !this.buildQueue.length) return;
     const activeLimit = Math.max(0, Math.min(this.workerCount, Math.trunc(this.activeBuildLimit || 0)));
     if (this.inFlightBuilds.size >= activeLimit) return;
-    if (this.buildQueueNeedsSort || this.buildQueue.length) {
+    if (this.buildQueueNeedsSort || performance.now() - this.lastBuildQueueSortAt >= 100) {
       const now = performance.now();
       for(const task of this.buildQueue)task.dispatchPriority=taskPriority(task,this,now);
       this.buildQueue.sort((a, b) => a.dispatchPriority - b.dispatchPriority);
       this.buildQueueNeedsSort = false;
+      this.lastBuildQueueSortAt = now;
     }
     while (this.idleWorkers.length && this.buildQueue.length && this.inFlightBuilds.size < activeLimit) {
       const worker = this.idleWorkers.pop();
@@ -1345,6 +1451,7 @@ export class ChunkManager {
         mode: task.mode || "base",
         version: task.version,
         includesFinalDeltas: true,
+        reusableBase: !finalDeltas.length && !neighborDeltas.length && !treeDeltas.length && this.reusableMeshNeighborhoodIsClean(chunk),
         materialVersion: this.materialVersion,
         phase: "chunk",
         cancelled: false,
@@ -1420,7 +1527,9 @@ export class ChunkManager {
     }
     const task = validation.task;
     const chunk = this.chunks.get(task.id);
-    if (task.phase === "chunk" && (!chunk || (task.sectionIndex!==undefined ? chunk!==task.chunk||chunk.renderSections?.get(task.sectionIndex)?.buildTaskId!==message.taskId : chunk.buildTaskId!==message.taskId))) task.cancelled = true;
+    if (task.phase === "chunk" && (!chunk || (task.sectionJobs
+      ? chunk!==task.chunk || !task.sectionJobs.some(job=>chunk.renderSections?.get(job.sectionIndex)?.buildTaskId===message.taskId)
+      : task.sectionIndex!==undefined ? chunk!==task.chunk||chunk.renderSections?.get(task.sectionIndex)?.buildTaskId!==message.taskId : chunk.buildTaskId!==message.taskId))) task.cancelled = true;
 
     if (message.type === "chunkBuildError" || message.type === "visualBuildError") {
       const error = new Error(message.error || (message.type === "visualBuildError" ? "Visual build failed." : "Chunk build failed."));
@@ -1501,6 +1610,23 @@ export class ChunkManager {
 
   applyWorkerBuildResult(message, timingTask = null) {
     const chunk = this.chunks.get(chunkId(message.chunkX, message.chunkZ));
+    if (timingTask?.sectionJobs) {
+      if (chunk !== timingTask.chunk) return;
+      const results = message.sectionResults ? new Map(message.sectionResults.map(result=>[result.sectionIndex,result]))
+        : new Map([[message.sectionIndex ?? timingTask.sectionIndex,message]]);
+      let changed = false;
+      for (const job of timingTask.sectionJobs) {
+        const section = chunk.renderSections?.get(job.sectionIndex), result = results.get(job.sectionIndex);
+        if (!section || section.buildTaskId !== message.taskId) continue;
+        if (result && result.sectionRevision === job.sectionRevision && commitRenderSection(chunk,section,result,job.sectionRevision,{updateSummary:false})) changed = true;
+        else { section.buildState="ready";section.buildTaskId=null;this.staleBuildResults++; }
+      }
+      if (changed) {
+        updateChunkSectionSummary(chunk);
+        this.completedBuilds.push(chunk);
+      }
+      return;
+    }
     if(timingTask?.sectionIndex!==undefined) {
       const section=chunk?.renderSections?.get(timingTask.sectionIndex);
       if(!section||chunk!==timingTask.chunk||section.buildTaskId!==message.taskId)return;
@@ -1516,6 +1642,7 @@ export class ChunkManager {
       if(!timingTask || (chunk===timingTask.chunk&&chunk.version===timingTask.version&&message.materialVersion===this.materialVersion)) {
         for(const result of message.sectionResults){const section=sections.get(result.sectionIndex);if(section)commitRenderSection(chunk,section,result,sectionRevision(section,this.materialVersion),{updateSummary:false});}
         updateChunkSectionSummary(chunk);
+        if (timingTask?.reusableBase) chunk.reusableBaseVersion=chunk.version;
         this.completedBuilds.push(chunk);
       } else {chunk.markBuildStale();this.staleBuildResults++;}
       return;

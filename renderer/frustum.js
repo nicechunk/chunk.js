@@ -1,6 +1,7 @@
 import { cameraOrigin, cameraViewProjection } from "./camera.js";
 
 const meshBoundsCache = new WeakMap();
+const worldBoundsCache = new WeakMap();
 
 /** Rendering, build priority and initial coverage share the camera target radius. */
 export function cameraRenderCenterChunk(cameraState, chunkSize = 16) {
@@ -77,6 +78,50 @@ function boundsIntersectPreparedFrustum(bounds, { planes, origin }) {
 /** World-space bounds of committed channels; never infer geometry from column tops. */
 export function chunkWorldBounds(chunk) {
   if (validBounds(chunk?.renderBounds)) return chunk.renderBounds;
+  if (!chunk || typeof chunk !== "object") return null;
+  const managed = chunk.renderSectionCommitRevision != null || chunk.meshCommitToken != null;
+  const prior = worldBoundsCache.get(chunk);
+  if (managed) {
+    if (prior?.managed && prior.mesh === chunk.mesh && prior.visualMesh === chunk.visualMesh
+      && prior.chunkX === chunk.chunkX && prior.chunkZ === chunk.chunkZ && prior.chunkSize === chunk.chunkSize
+      && prior.minY === chunk.minY && prior.height === chunk.height && prior.generation === chunk.generation
+      && prior.revision === chunk.renderSectionCommitRevision && prior.meshToken === chunk.meshCommitToken
+      && prior.visualToken === chunk.visualCommitToken && prior.sections === chunk.renderSections
+      && prior.meshOrigin === chunk.mesh?.originY && prior.visualOrigin === chunk.visualMesh?.originY
+      && sameBounds(prior.meshBounds,chunk.mesh?.bounds) && sameBounds(prior.visualBounds,chunk.visualMesh?.bounds)
+      && prior.sphereX === chunk.frustumBounds?.centerX && prior.sphereY === chunk.frustumBounds?.centerY
+      && prior.sphereZ === chunk.frustumBounds?.centerZ && prior.sphereRadius === chunk.frustumBounds?.radius) return prior.bounds;
+    const bounds = calculateChunkWorldBounds(chunk);
+    worldBoundsCache.set(chunk,{managed:true,mesh:chunk.mesh,visualMesh:chunk.visualMesh,chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,
+      chunkSize:chunk.chunkSize,minY:chunk.minY,height:chunk.height,generation:chunk.generation,
+      revision:chunk.renderSectionCommitRevision,meshToken:chunk.meshCommitToken,visualToken:chunk.visualCommitToken,
+      sections:chunk.renderSections,meshOrigin:chunk.mesh?.originY,visualOrigin:chunk.visualMesh?.originY,
+      meshBounds:chunk.mesh?.bounds?{...chunk.mesh.bounds}:null,visualBounds:chunk.visualMesh?.bounds?{...chunk.visualMesh.bounds}:null,
+      sphereX:chunk.frustumBounds?.centerX,sphereY:chunk.frustumBounds?.centerY,sphereZ:chunk.frustumBounds?.centerZ,sphereRadius:chunk.frustumBounds?.radius,bounds});
+    return bounds;
+  }
+  // Managed columns publish fresh summary identities at each commit. Unmanaged
+  // section maps remain uncached because legacy callers can mutate them directly.
+  const cacheable = !(chunk.renderSections ?? chunk.sections)?.size || chunk.mesh?.sectionSummary || chunk.visualMesh?.sectionSummary;
+  if (!cacheable) return calculateChunkWorldBounds(chunk);
+  const key = [chunk.mesh,chunk.visualMesh,chunk.chunkX,chunk.chunkZ,chunk.chunkSize,chunk.minY,chunk.height,
+    chunk.generation,chunk.renderSectionCommitRevision];
+  for (const mesh of [chunk.mesh,chunk.visualMesh]) {
+    const bounds=mesh?.bounds;
+    key.push(mesh?.originY,!mesh?.sectionSummary ? mesh?.vertices : null,
+      mesh?.revision,mesh?.commitToken,mesh?.meshVersion,
+      bounds?.minX,bounds?.minY,bounds?.minZ,bounds?.maxX,bounds?.maxY,bounds?.maxZ);
+  }
+  const sphere = chunk.frustumBounds;
+  key.push(sphere?.centerX,sphere?.centerY,sphere?.centerZ,sphere?.radius);
+  const cached=worldBoundsCache.get(chunk);
+  if (cached && key.every((value,index)=>Object.is(value,cached.key[index]))) return cached.bounds;
+  const bounds=calculateChunkWorldBounds(chunk);
+  worldBoundsCache.set(chunk,{key,bounds});
+  return bounds;
+}
+
+function calculateChunkWorldBounds(chunk) {
   const chunkSize = Number(chunk?.chunkSize);
   const ox = Number(chunk?.chunkX) * chunkSize;
   const oz = Number(chunk?.chunkZ) * chunkSize;
@@ -145,6 +190,10 @@ function committedMeshBounds(mesh) {
 function validBounds(bounds) {
   return bounds && [bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ].every(Number.isFinite)
     && bounds.minX <= bounds.maxX && bounds.minY <= bounds.maxY && bounds.minZ <= bounds.maxZ;
+}
+function sameBounds(a,b) {
+  return !a&&!b || Boolean(a&&b) && Object.is(a.minX,b.minX) && Object.is(a.minY,b.minY) && Object.is(a.minZ,b.minZ)
+    && Object.is(a.maxX,b.maxX) && Object.is(a.maxY,b.maxY) && Object.is(a.maxZ,b.maxZ);
 }
 function unionBounds(a, b) {
   if (!a) return { ...b };

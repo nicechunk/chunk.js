@@ -84,11 +84,14 @@ self.onmessage = (event) => {
     };
     if(task.sectionIndex !== undefined || options.renderSections) {
       const sections=ensureRenderSections(chunk);
-      const indices=task.sectionIndex!==undefined?[task.sectionIndex]:[...sections.keys()];
-      const results=indices.map(index=>({sectionIndex:index,...buildRenderSection(chunk,sections.get(index),access,{visualOnly:Boolean(task.visualOnly)})}));
+      const jobs=task.sectionJobs ?? (task.sectionIndex!==undefined
+        ? [{sectionIndex:task.sectionIndex,sectionRevision:task.sectionRevision,visualOnly:task.visualOnly}]
+        : [...sections.keys()].map(sectionIndex=>({sectionIndex})));
+      const results=jobs.map(job=>({sectionIndex:job.sectionIndex,sectionRevision:job.sectionRevision,
+        ...buildRenderSection(chunk,sections.get(job.sectionIndex),access,{visualOnly:Boolean(job.visualOnly)})}));
       const response={type:"chunkBuilt",taskId:task.taskId,chunkX:task.chunkX,chunkZ:task.chunkZ,mode:task.mode||"base",taskVersion:task.taskVersion,materialVersion:task.materialVersion,
         sectionRevision:task.sectionRevision,baseProfile:task.mode==="base"?baseProfile:null,treeInstances:task.mode==="base"?treeInstances:null,
-        ...(task.sectionIndex!==undefined?results[0]:{sectionResults:results}),visualPending:false,elapsedMs:performance.now()-startedAt};
+        ...(task.sectionIndex!==undefined&&results.length===1?results[0]:{sectionResults:results}),visualPending:false,elapsedMs:performance.now()-startedAt};
       self.postMessage(response,transferablesForBuild(response));return;
     }
     const opaqueStartedAt = performance.now();

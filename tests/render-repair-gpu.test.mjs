@@ -27,6 +27,34 @@ function mesh(x=0, layer=3) {const vertices=new Uint8Array(4*20);const v=new Dat
 function chunk(id='0,0', x=0) {return {id,chunkX:x,chunkZ:0,chunkSize:16,version:1,meshVersion:1,mesh:mesh(),gpuUploaded:false};}
 function renderer() {const r=new WebGL2VoxelRenderer(canvas(),{useRegionBatching:false});const {gl,control}=mockGl();r.gl=gl;r.initialized=true;r.bufferManager=new BufferManager(gl);return {r,gl,control};}
 
+test('bounded off-camera residency keeps draw selection separate and reclaims unuploaded pending sources',()=>{
+ const {r}=renderer();r.options.maxUploadCpuMs=10000;
+ const front=chunk('0,0',0),back=chunk('0,3',0);back.chunkZ=3;
+ const first=r.prepareChunksForRender([front],{maxUploads:4,residencyChunks:[back]});
+ assert.equal(first.prefetchUploads,1);assert.ok(r.entryForChunk(front));assert.ok(r.entryForChunk(back));
+ assert.deepEqual(r.preparedRenderFrame.chunks,[front]);
+ const pending=chunk('9,9',9);pending.chunkZ=9;
+ r.prepareChunksForRender([front],{maxUploads:0,residencyChunks:[pending]});
+ assert.ok(r.pendingMeshSources.size);r.pruneChunks(new Set([front.id,back.id]));
+ assert.equal([...r.pendingMeshSources.values()].some(source=>source.chunk===pending),false);
+ r.options.maxPrefetchGpuBytes=0;r.lastPrefetchAt=-Infinity;
+ assert.equal(r.prepareChunksForRender([front],{maxUploads:4,residencyChunks:[pending]}).prefetchUploads,0);
+ r.dispose();
+});
+
+test('managed commit observation retires emptied channels once and reuploads after explicit removal',()=>{
+ const {r}=renderer();r.options.maxUploadCpuMs=10000;
+ const section={...chunk('0,0@0'),parentId:'0,0',generation:1};
+ const parent={id:'0,0',renderSections:new Map([[0,section]]),renderActiveSections:[section],renderSectionCommitRevision:1};
+ assert.equal(r.prepareChunksForRender([parent],{maxUploads:4}).uploaded,1);
+ assert.equal(r.prepareChunksForRender([parent],{maxUploads:4}).uploaded,0);
+ r.removeChunk(parent.id);
+ assert.equal(r.prepareChunksForRender([parent],{maxUploads:4}).uploaded,1);
+ section.mesh={...mesh(),indices:new Uint16Array(),indexCount:0};section.meshVersion++;parent.renderSectionCommitRevision++;parent.renderActiveSections=[];
+ r.prepareChunksForRender([parent],{maxUploads:4});assert.equal(r.chunkBuffers.size,0);
+ r.dispose();
+});
+
 test('completed and staged chunk uploads validate once per stage and still reject GL allocation errors',()=>{
  const {gl,control}=mockGl(),manager=new BufferManager(gl);let polls=0;const getError=gl.getError;
  gl.getError=()=>{polls++;return getError();};

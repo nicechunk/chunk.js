@@ -63,11 +63,18 @@ export function instrumentGl(gl, ledger) {
   const bindings = new Map(), textureBindings = new Map(), methods = new Map();
   const creationKinds = { createBuffer: "buffer", createTexture: "texture", createVertexArray: "vao", createQuery: "query" };
   const deletionMethods = new Set(["deleteBuffer", "deleteTexture", "deleteVertexArray", "deleteQuery"]);
+  const trackedMethods = new Set([...Object.keys(creationKinds), ...deletionMethods,
+    "bindBuffer", "bufferData", "bufferSubData", "bindTexture", "texStorage3D", "texImage2D"]);
   return new Proxy(gl, {
     get(target, key) {
       const value = target[key];
       if (typeof value !== "function") return value;
       if (methods.has(key)) return methods.get(key);
+      if (!trackedMethods.has(key)) {
+        const native = value.bind(target);
+        methods.set(key, native);
+        return native;
+      }
       const wrapped = (...args) => {
         if (creationKinds[key]) return ledger.create(value.apply(target, args), creationKinds[key]);
         if (deletionMethods.has(key)) {
