@@ -1,4 +1,4 @@
-import { forgeAvatarGripForRuntime } from "../forge/starter-axe.js";
+import { forgeAvatarGripForRuntime, forgePresentationForRuntime } from "../forge/starter-axe.js";
 import {
   createEquipmentModelParts,
   EQUIPMENT_MODEL_ID,
@@ -185,6 +185,7 @@ export function forgeRuntimeAvatarCollisionReport(runtime, {
   forgeMetersToWorldUnits = null,
   forgeGripRollQuarterTurns = 0,
 } = {}) {
+  runtime = forgePresentationForRuntime(runtime);
   if (!runtime?.mesh || !forgeAvatarGripForRuntime(runtime)?.offsetQ) return emptyForgeAvatarCollisionReport();
   const mesh = avatarMesh ?? createAvatarMeshFromNcm(avatarModelCode, {
     attachIronPickaxe: false,
@@ -662,7 +663,8 @@ function createRestoredForgeEquipment(
   forgeMetersToWorldUnits,
   forgeGripRollQuarterTurns,
 ) {
-  const packedMesh = runtime?.mesh;
+  const presentation = forgePresentationForRuntime(runtime);
+  const packedMesh = presentation?.mesh;
   const grip = forgeAvatarGripForRuntime(runtime);
   if (!packedMesh?.vertices?.byteLength || !packedMesh?.indices?.length || !grip?.offsetQ) return null;
   const rightArm = boundsOfParts(parts.filter((part) => part.bone === "right_arm"));
@@ -685,9 +687,9 @@ function createRestoredForgeEquipment(
     runtime.fixedScale ?? 64,
     forgeGripRollQuarterTurns,
   );
-  const clothComponentIndexes = Array.isArray(runtime.clothComponentIndexes)
-    ? runtime.clothComponentIndexes
-    : (runtime.components ?? [])
+  const clothComponentIndexes = Array.isArray(presentation.clothComponentIndexes)
+    ? presentation.clothComponentIndexes
+    : (presentation.components ?? [])
       .map((component, index) => component?.resourceId === "cloth" ? index : -1)
       .filter((index) => index >= 0);
   const geometry = unpackPlacedForgeGeometry(packedMesh, placement, { clothComponentIndexes });

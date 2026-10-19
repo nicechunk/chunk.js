@@ -302,11 +302,12 @@ export function voxelItemLabel(item = {}) {
 async function upgradeForgedItemPreview(canvas, ctx, size, source, designHash, options) {
   try {
     const { restoreForgeRuntime } = await import("../forge/forge-runtime-cache.js");
+    const { forgePresentationForRuntime } = await import("../forge/starter-axe.js");
     const expectedDesignHash = normalizedDesignHash(designHash);
     const runtime = restoreForgeRuntime(source, {
       expectedDesignHash: expectedDesignHash || null,
     });
-    const mesh = forgeRuntimePreviewMesh(runtime.mesh);
+    const mesh = forgeRuntimePreviewMesh(forgePresentationForRuntime(runtime).mesh);
     const renderVoxelYaw = (yaw = 0) => {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, size, size);
