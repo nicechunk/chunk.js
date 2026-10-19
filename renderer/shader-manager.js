@@ -7,9 +7,11 @@ layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUv;
 layout(location = 3) in vec2 aLayerFlags;
 layout(location = 4) in float aAo;
+layout(location = 5) in ivec4 aChunkOffset;
 
 uniform mat4 uViewProjection;
 uniform vec3 uChunkOrigin;
+uniform bool uUseChunkOffset;
 
 uniform float uTileScale;
 
@@ -21,10 +23,14 @@ out float vSunVisibility;
 out float vSkyVisibility;
 out vec3 vViewPosition;
 out float vLocalLight;
+flat out float vSurfacePass;
 
 void main() {
   float positionScale = max(1.0, float(aPosition.w));
-  vec3 p = vec3(float(aPosition.x), float(aPosition.y), float(aPosition.z)) / positionScale + uChunkOrigin;
+  vec3 chunkOrigin = uChunkOrigin;
+  if (uUseChunkOffset) chunkOrigin += vec3(aChunkOffset.xyz);
+  vec3 p = vec3(float(aPosition.x), float(aPosition.y), float(aPosition.z)) / positionScale + chunkOrigin;
+  vSurfacePass = float(aChunkOffset.w);
   gl_Position = uViewProjection * vec4(p, 1.0);
   vNormal = normalize(aNormal);
   vAo = aAo;
@@ -78,6 +84,7 @@ in float vSunVisibility;
 in float vSkyVisibility;
 in vec3 vViewPosition;
 in float vLocalLight;
+flat in float vSurfacePass;
 
 out vec4 outColor;
 
@@ -152,8 +159,9 @@ void main() {
   bool isShadowLayer = layer == 54.0;
   vec2 tileUv = fract(vUv);
   vec4 texel = textureGrad(uTextureArray, vec3(tileUv, layer), dFdx(vUv), dFdy(vUv));
-  if (uSurfacePass > 0.5 && texel.a < 0.5) discard;
-  if (uSurfacePass > 0.5) texel.a = 1.0;
+  float surfacePass = uSurfacePass < 0.0 ? vSurfacePass : uSurfacePass;
+  if (surfacePass > 0.5 && texel.a < 0.5) discard;
+  if (surfacePass > 0.5) texel.a = 1.0;
   if (texel.a < 0.08) discard;
   if (isShadowLayer) {
     outColor = vec4(0.020, 0.028, 0.018, texel.a * clamp(vAo, 0.0, 1.0));

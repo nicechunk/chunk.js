@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Add bounded shared GPU pages with independently replaceable section channels,
+  exact integer origin offsets, material-pass tags and ordered cross-column draws.
+  Reuse released slices, retain validated geometry during failed uploads and
+  preserve standalone and unavailable-extension fallbacks.
+
 - Avoid repeated camera sweep voxel slab tests using at most 64 KiB of retained
   visit scratch; preserve conservative near-plane geometry and reentrant queries.
 - Bypass tree crown evaluation for loaded air only when all possible root columns

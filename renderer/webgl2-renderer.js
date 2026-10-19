@@ -118,6 +118,8 @@ export class WebGL2VoxelRenderer {
       waterEffects: options.waterEffects ?? true,
       shadows: options.shadows ?? true,
       multiDraw: options.multiDraw ?? true,
+      sharedChunkBuffers: options.sharedChunkBuffers ?? false,
+      maxSharedChunkBufferBytes: options.maxSharedChunkBufferBytes ?? 32 * 1024 * 1024,
       gpuTiming: options.gpuTiming ?? true,
       deferredChunkUploads: options.deferredChunkUploads ?? false,
       textureTileSize: options.textureTileSize ?? 32,
@@ -221,6 +223,7 @@ export class WebGL2VoxelRenderer {
     this.contextGeneration += 1;
     this.gpuTimer?.dispose({ lost: true });
     this.gpuTimer = null;
+    this.bufferManager?.dispose?.({lost:true});
     this.resourceLedger.reset(this.contextGeneration);
     this.chunkBuffers.clear(); this.visualChunkBuffers.clear();
     this.regionBuffers.clear(); this.visualRegionBuffers.clear(); this.avatarBuffers.clear();
@@ -275,7 +278,9 @@ export class WebGL2VoxelRenderer {
         this.solidUniforms = collectUniforms(gl, this.solidProgram);
         this.avatarUniforms = collectAvatarUniforms(gl, this.avatarProgram);
       });
-      this.bufferManager = new BufferManager(gl);
+      this.bufferManager = new BufferManager(gl, {shared:this.options.sharedChunkBuffers,maxSharedBytes:this.options.maxSharedChunkBufferBytes,
+        canReuseSharedSlices:()=>!this.frameCompletionFences.length&&!this.uploadValidationFence});
+      gl.vertexAttribI4i?.(5,0,0,0,0);
       this.textureArray = new TextureArrayManager(gl, {
         tileSize: this.options.textureTileSize,
         seed: this.options.textureSeed,
@@ -378,7 +383,7 @@ export class WebGL2VoxelRenderer {
     for(const map of [this.chunkBuffers,this.visualChunkBuffers])for(const e of map.values())addEntry(e);
     for(const map of [this.regionBuffers,this.visualRegionBuffers])for(const region of map.values())for(const e of region.members?.values()??[])addEntry(e);
     for(const stage of this.uploadStaging.values()){const t=stage.transaction;addMesh(stage.source?.mesh);pendingUploadBytes+=t.vertices.byteLength+t.indices.byteLength-t.uploadedBytes;}
-    return {...this.resourceLedger.snapshot(),...this.gpuTimer?.snapshot(),cpuStages:this.stageStats.snapshot(),cpuTextureTileCache:materialTileCacheStats(),cpuMeshBytes,pendingUploadBytes,regionCacheEntries:this.regionGroupCache.size,pendingUploads:this.pendingUploadSince.size,uploadStaging:this.uploadStaging.size,upload:{...this.uploadDiagnostics},entries};
+    return {...this.resourceLedger.snapshot(),...this.gpuTimer?.snapshot(),...this.bufferManager?.shared?.snapshot(),cpuStages:this.stageStats.snapshot(),cpuTextureTileCache:materialTileCacheStats(),cpuMeshBytes,pendingUploadBytes,regionCacheEntries:this.regionGroupCache.size,pendingUploads:this.pendingUploadSince.size,uploadStaging:this.uploadStaging.size,upload:{...this.uploadDiagnostics},entries};
   }
 
   setRenderLogger(logger) {
@@ -476,7 +481,7 @@ export class WebGL2VoxelRenderer {
       const current = stage.generation === this.contextGeneration
         && stage.token === meshIdentity(stage.source, stage.visual);
       if (error || !current) {
-        this.bufferManager.disposeChunkBuffers(stage.transaction.handle);
+        this.bufferManager.disposeChunkBuffers(stage.transaction.handle,{failed:Boolean(error)});
         this.uploadStaging.delete(key);
         if (error) this.noteUploadFailure(stage.source, stage.visual, error);
         continue;
@@ -519,6 +524,7 @@ export class WebGL2VoxelRenderer {
   }
 
   commitChannelUpload(chunk, visual, mesh, handle, generation, target = null, region = null) {
+    this.bufferManager.commitChunkBuffers?.(handle);
     const regions = visual ? this.visualRegionBuffers : this.regionBuffers;
     const previousRegion = region ? regions.get(region.id) : null;
     const buffers = region ? new Map(previousRegion?.members ?? [])
@@ -563,14 +569,14 @@ export class WebGL2VoxelRenderer {
         if(staging && (staging.token!==token || staging.generation!==generation)){
           this.bufferManager.disposeChunkBuffers(staging.transaction.handle);this.uploadStaging.delete(key);staging=null;
         }
-        if(!staging){staging={token,generation,transaction:this.bufferManager.beginChunkBuffers(mesh),source:chunk,mesh,visual,region};this.uploadStaging.set(key,staging);}
+        if(!staging){staging={token,generation,transaction:this.bufferManager.beginChunkBuffers(mesh,sharedPlacement(chunk,mesh,this.options.sharedChunkBuffers)),source:chunk,mesh,visual,region};this.uploadStaging.set(key,staging);}
         const deferred = this.deferredUploadsSupported();
         const progress=this.bufferManager.advanceChunkBuffers(staging.transaction,Math.max(1,maxBytes),{validate:!deferred});
         this.lastUploadAttemptBytes=progress.uploadedBytes;
         if(deferred){staging.awaitingValidation=true;return null;}
         if(!progress.done)return null;
         handle=staging.transaction.handle;this.uploadStaging.delete(key);
-      }else{handle = this.bufferManager.createChunkBuffers(mesh);this.lastUploadAttemptBytes=handle.byteLength;}
+      }else{handle = this.bufferManager.createChunkBuffers(mesh,sharedPlacement(chunk,mesh,this.options.sharedChunkBuffers));this.lastUploadAttemptBytes=handle.byteLength;}
 
       if (this.contextLost || this.disposed || generation !== this.contextGeneration || this.gl.isContextLost?.()) {
         throw new Error("GPU context changed during upload");
@@ -582,8 +588,8 @@ export class WebGL2VoxelRenderer {
         elapsedMs: performance.now() - startedAt, token: entry.token, contextGeneration: generation });
       return entry;
     } catch (error) {
-      if (handle) this.bufferManager?.disposeChunkBuffers(handle);
-      const staging=this.uploadStaging.get(key);if(staging){this.bufferManager?.disposeChunkBuffers(staging.transaction.handle);this.uploadStaging.delete(key);}
+      if (handle) this.bufferManager?.disposeChunkBuffers(handle,{failed:true});
+      const staging=this.uploadStaging.get(key);if(staging){this.bufferManager?.disposeChunkBuffers(staging.transaction.handle,{failed:true});this.uploadStaging.delete(key);}
       this.noteUploadFailure(chunk,visual,error);
       return null;
     }
@@ -661,6 +667,7 @@ export class WebGL2VoxelRenderer {
     }
     this.restoreAvatarUploads();
     const startedAt = performance.now(), limit = Math.max(0, Math.trunc(maxUploads ?? 0));
+    this.bufferManager.reclaimSharedChunks?.();
     const visibleSet = new Set(visibleChunks), residentSet = new Set(residencyChunks);
     this.observeChunkCommits(visibleSet);
     this.observeChunkCommits(residentSet);
@@ -924,6 +931,7 @@ export class WebGL2VoxelRenderer {
       cpuDrawSubmitMs: performance.now()-drawSubmitStartedAt,
       uploadDiagnostics: {...this.uploadDiagnostics},
       cpuMeshBytes:this.residentCpuMeshBytes(),
+      ...this.bufferManager?.shared?.snapshot(),
       gpuChunks: this.regionBuffers.size + this.visualRegionBuffers.size + this.chunkBuffers.size + this.visualChunkBuffers.size,
       width: this.canvas.width,
       height: this.canvas.height,
@@ -1003,17 +1011,43 @@ export class WebGL2VoxelRenderer {
     const gl=this.gl;if(!gl || gl.isContextLost?.() || !this.program || this.contextLost || this.disposed)return {drawCalls:0,triangles:0,bufferMemory:0};
     const uniforms=this.solidUniforms??this.uniforms;
     gl.useProgram(this.solidProgram??this.program);gl.uniform1f(uniforms.uOpacity,1);this.textureArray?.bind(0);
-    let drawCalls=0,triangles=0;
+    let drawCalls=0,triangles=0,pendingPage=null,runs=0;
+    const combined = passes.length===2 && passes[0]==='opaque' && passes[1]==='cutout';
+    const flush=()=>{
+      if(!runs)return;
+      if(uniforms.uUseChunkOffset)gl.uniform1i(uniforms.uUseChunkOffset,1);
+      if(uniforms.uSurfacePass)gl.uniform1f(uniforms.uSurfacePass,-1);
+      gl.uniform3f(uniforms.uChunkOrigin,pendingPage.x-origin.worldX,pendingPage.y-origin.worldY,pendingPage.z-origin.worldZ);
+      gl.bindVertexArray(pendingPage.vao);
+      if(runs>1 && typeof this.multiDraw?.multiDrawElementsWEBGL==='function'){
+        this.multiDraw.multiDrawElementsWEBGL(gl.TRIANGLES,this.multiDrawCounts,0,gl.UNSIGNED_INT,this.multiDrawOffsets,0,runs);drawCalls++;
+      }else for(let i=0;i<runs;i++){gl.drawElements(gl.TRIANGLES,this.multiDrawCounts[i],gl.UNSIGNED_INT,this.multiDrawOffsets[i]);drawCalls++;}
+      runs=0;pendingPage=null;
+    };
     for(const chunk of chunks){const entry=this.entryForChunk(chunk,visual);if(!entry?.handle)continue;
       const handle=entry.handle;
       let eligible=false;
       for (const pass of passes) if (handle.drawRanges?.[pass]?.count || (!handle.drawRanges && pass==='opaque' && handle.indexCount)) { eligible=true;break; }
       if (!eligible) continue;
-      gl.uniform3f(uniforms.uChunkOrigin,chunk.chunkX*chunk.chunkSize-origin.worldX,entry.originY-origin.worldY,chunk.chunkZ*chunk.chunkSize-origin.worldZ);gl.bindVertexArray(handle.vao);
+      if(handle.sharedPage && combined){
+        if(pendingPage && pendingPage!==handle.sharedPage)flush();
+        pendingPage=handle.sharedPage;
+        for(const pass of passes){const range=handle.drawRanges[pass];if(!range?.count)continue;
+          const offset=range.offset*4;
+          if(runs && this.multiDrawOffsets[runs-1]+this.multiDrawCounts[runs-1]*4===offset)this.multiDrawCounts[runs-1]+=range.count;
+          else{ensureMultiDrawCapacity(this,runs+1);this.multiDrawCounts[runs]=range.count;this.multiDrawOffsets[runs++]=offset;}
+          triangles+=range.count/3;
+        }
+        continue;
+      }
+      flush();
+      if(uniforms.uUseChunkOffset)gl.uniform1i(uniforms.uUseChunkOffset,handle.sharedPage?1:0);
+      const offset=shaderChunkOffset(handle,origin,[chunk.chunkX*chunk.chunkSize-origin.worldX,entry.originY-origin.worldY,chunk.chunkZ*chunk.chunkSize-origin.worldZ]);
+      gl.uniform3f(uniforms.uChunkOrigin,...offset);gl.bindVertexArray(handle.vao);
       for(const pass of passes){const range=handle.drawRanges?.[pass] ?? (pass==='opaque'?{offset:0,count:handle.indexCount}:null);if(!range?.count)continue;
         if(uniforms.uSurfacePass)gl.uniform1f(uniforms.uSurfacePass,pass==='cutout'?1:0);
         gl.drawElements(gl.TRIANGLES,range.count,handle.indexType,range.offset*(handle.indexBytes??2));drawCalls++;triangles+=range.count/3;}
-    }gl.bindVertexArray(null);return {drawCalls,triangles,bufferMemory:0};
+    }flush();gl.bindVertexArray(null);return {drawCalls,triangles,bufferMemory:0};
   }
   renderVisualChunks(chunks, origin) {return this.renderMeshPass(chunks,origin,['opaque','cutout'],true);}
 
@@ -1021,12 +1055,12 @@ export class WebGL2VoxelRenderer {
     if(this.contextLost||this.disposed||!this.gl||this.gl.isContextLost?.())return {drawCalls:0,triangles:0,bufferMemory:0};
     const gl=this.gl,queue=[];const forward=cameraForward(camera);
     const eye=[camera.localOffsetX||0,camera.localOffsetY||0,camera.localOffsetZ||0];
-    const add=(item,center)=>{item.key=`${item.kind}:${item.entry?.id??item.avatar?.id??item.particle?.id??""}:${item.unit?.offset??item.range?.offset??0}`;item.depth=(center[0]-eye[0])*forward[0]+(center[1]-eye[1])*forward[1]+(center[2]-eye[2])*forward[2];item.order=queue.length;queue.push(item);};
+    const add=(item,center)=>{item.key=`${item.kind}:${item.entry?.id??item.avatar?.id??item.particle?.id??""}:${item.unit?.sortOffset??item.unit?.offset??item.range?.offset??0}`;item.depth=(center[0]-eye[0])*forward[0]+(center[1]-eye[1])*forward[1]+(center[2]-eye[2])*forward[2];item.order=queue.length;queue.push(item);};
     for(const chunk of [...chunks,...previews])for(const visual of [false,true]){const entry=this.entryForChunk(chunk,visual);if(!entry?.handle)continue;
       const offset=[chunk.chunkX*chunk.chunkSize-origin.worldX,entry.originY-origin.worldY,chunk.chunkZ*chunk.chunkSize-origin.worldZ];
-      const preview=chunk.buildingPreview===true;
-      for(const unit of entry.handle.blendUnits??[]){if(unit.pass!=="blend")continue;add({kind:'terrain',entry,unit,offset,opacity:preview?0.46:1},unit.center.map((v,k)=>v+offset[k]));}
-      if(preview)for(const pass of ['opaque','cutout']){const range=entry.handle.drawRanges?.[pass];if(range?.count)add({kind:'terrain',entry,unit:range,offset,opacity:0.46},offset);}
+      const preview=chunk.buildingPreview===true,drawOffset=shaderChunkOffset(entry.handle,origin,offset);
+      for(const unit of entry.handle.blendUnits??[]){if(unit.pass!=="blend")continue;add({kind:'terrain',entry,unit,offset:drawOffset,opacity:preview?0.46:1},unit.center.map((v,k)=>v+offset[k]));}
+      if(preview)for(const pass of ['opaque','cutout']){const range=entry.handle.drawRanges?.[pass];if(range?.count)add({kind:'terrain',entry,unit:range,offset:drawOffset,opacity:0.46},offset);}
     }
     for(const avatar of avatars){const entry=this.avatarBuffers.get(String(avatar.meshId||avatar.id));if(!entry?.handle)continue;
       const opacity=Math.max(0,Math.min(1,Number(avatar.opacity??1)||0));
@@ -1053,7 +1087,7 @@ export class WebGL2VoxelRenderer {
     queue.sort((a,b)=>b.depth-a.depth||a.key.localeCompare(b.key)||a.order-b.order);
     gl.enable(gl.DEPTH_TEST);gl.depthMask(false);gl.enable(gl.CULL_FACE);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
     let drawCalls=0,triangles=0;
-    let terrainActive = false, boundHandle = null, boundOffset = null, boundOpacity = null;
+    let terrainActive = false, boundHandle = null, boundOffset = null, boundOpacity = null,boundShared=null;
     const sameOffset = (a, b) => a && b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
     for (let index = 0; index < queue.length; index++) {
       const item = queue[index];
@@ -1073,7 +1107,7 @@ export class WebGL2VoxelRenderer {
         };
         while (index + 1 < queue.length) {
           const next = queue[index + 1];
-          if (next.kind !== 'terrain' || next.entry.handle !== entry.handle || next.opacity !== opacity
+          if (next.kind !== 'terrain' || (next.entry.handle.sharedPage??next.entry.handle) !== (entry.handle.sharedPage??entry.handle) || next.opacity !== opacity
             || !sameOffset(next.offset, offset)) break;
           if(next.unit.offset===rangeOffset+count)count+=next.unit.count;
           else {saveRange();rangeOffset=next.unit.offset;count=next.unit.count;}
@@ -1086,11 +1120,13 @@ export class WebGL2VoxelRenderer {
           applyLightingUniforms(gl, this.uniforms, lighting);
           gl.uniform1f(this.uniforms.uSurfacePass, 0);
           this.textureArray?.bind(0);
-          terrainActive = true; boundHandle = null; boundOffset = null; boundOpacity = null;
+          terrainActive = true; boundHandle = null; boundOffset = null; boundOpacity = null;boundShared=null;
         }
         if (boundOpacity !== opacity) { gl.uniform1f(this.uniforms.uOpacity, opacity); boundOpacity = opacity; }
         if (!sameOffset(boundOffset, offset)) { gl.uniform3f(this.uniforms.uChunkOrigin, ...offset); boundOffset = offset; }
-        if (boundHandle !== entry.handle) { gl.bindVertexArray(entry.handle.vao); boundHandle = entry.handle; }
+        const shared=Boolean(entry.handle.sharedPage);
+        if(boundShared!==shared){if(this.uniforms.uUseChunkOffset)gl.uniform1i(this.uniforms.uUseChunkOffset,shared?1:0);boundShared=shared;}
+        if (boundHandle !== entry.handle.vao) { gl.bindVertexArray(entry.handle.vao); boundHandle = entry.handle.vao; }
         // WEBGL_multi_draw executes these index ranges in their existing sorted
         // order with identical state. Keep the ordinary path when unavailable.
         if(runs>1&&typeof this.multiDraw?.multiDrawElementsWEBGL==='function') {
@@ -1139,14 +1175,11 @@ export class WebGL2VoxelRenderer {
         const entry = buffers.get(chunk.id);
         if (!entry?.handle) continue;
         const handle = entry.handle;
-        gl.uniform3f(
-          this.uniforms.uChunkOrigin,
-          chunk.chunkX * chunk.chunkSize - origin.worldX,
-          -origin.worldY,
-          chunk.chunkZ * chunk.chunkSize - origin.worldZ,
-        );
+        if(this.uniforms.uUseChunkOffset)gl.uniform1i(this.uniforms.uUseChunkOffset,handle.sharedPage?1:0);
+        const offset=shaderChunkOffset(handle,origin,[chunk.chunkX*chunk.chunkSize-origin.worldX,-origin.worldY,chunk.chunkZ*chunk.chunkSize-origin.worldZ]);
+        gl.uniform3f(this.uniforms.uChunkOrigin,...offset);
         gl.bindVertexArray(handle.vao);
-        gl.drawElements(gl.TRIANGLES, handle.indexCount, handle.indexType, 0);
+        gl.drawElements(gl.TRIANGLES,handle.indexCount,handle.indexType,(handle.indexStart??0)*(handle.indexBytes??2));
         drawCalls += 1;
         triangles += handle.triangleCount;
         bufferMemory += handle.byteLength;
@@ -1379,6 +1412,7 @@ export class WebGL2VoxelRenderer {
     this.regionBuffers.clear();
     for (const entry of this.visualRegionBuffers.values()) for (const member of entry.members?.values() ?? []) safely(() => this.bufferManager?.disposeChunkBuffers(member.handle));
     this.visualRegionBuffers.clear();
+    safely(() => this.bufferManager?.dispose?.({lost:this.contextLost}));
     for (const entry of this.avatarBuffers.values()) safely(() => this.disposeAvatarBuffers(entry.handle));
     this.avatarBuffers.clear();
     this.avatarResourceCache=new WeakMap();this.cpuMeshBytesDirty=true;
@@ -1486,6 +1520,22 @@ export class WebGL2VoxelRenderer {
   }
 }
 
+function sharedPlacement(chunk,mesh,enabled) {
+  if(!enabled || chunk.buildingPreview || !Number.isSafeInteger(chunk.chunkSize) || chunk.chunkSize<=0)return null;
+  return {x:chunk.chunkX*chunk.chunkSize,y:mesh.originY??chunk.originY??0,z:chunk.chunkZ*chunk.chunkSize};
+}
+function shaderChunkOffset(handle,origin,fallback) {
+  const page=handle.sharedPage;
+  return page?[page.x-origin.worldX,page.y-origin.worldY,page.z-origin.worldZ]:fallback;
+}
+function ensureMultiDrawCapacity(renderer,count) {
+  if(count<=renderer.multiDrawCounts.length)return;
+  const length=Math.max(count,renderer.multiDrawCounts.length*2);
+  const counts=new Int32Array(length),offsets=new Int32Array(length);
+  counts.set(renderer.multiDrawCounts);offsets.set(renderer.multiDrawOffsets);
+  renderer.multiDrawCounts=counts;renderer.multiDrawOffsets=offsets;
+}
+
 export function detectWebGl2Support() {
   try {
     const canvas = document.createElement("canvas");
@@ -1542,6 +1592,7 @@ function collectUniforms(gl, program) {
   const names = [
     "uViewProjection",
     "uChunkOrigin",
+    "uUseChunkOffset",
     "uCameraLocalEye",
     "uWaterOriginPhase",
     "uWaterCellOrigin[0]",

@@ -1,17 +1,23 @@
 import { CHUNK_VERTEX_STRIDE_BYTES } from "../chunk/chunk-mesher.js";
 import { assertGpuUpload } from "./gpu-diagnostics.js";
 import { prepareMeshDrawRanges } from "./mesh-draw-ranges.js";
+import { SharedChunkBuffers } from "./shared-chunk-buffers.js";
 
 export class BufferManager {
-  constructor(gl) { this.gl = gl; }
-  createChunkBuffers(mesh) {
-    const transaction=this.beginChunkBuffers(mesh);
-    try {this.advanceChunkBuffers(transaction,Infinity);return transaction.handle;}
-    catch(error){this.disposeChunkBuffers(transaction.handle);throw error;}
+  constructor(gl, { shared = false, maxSharedBytes, canReuseSharedSlices } = {}) {
+    this.gl = gl;
+    this.shared = shared ? new SharedChunkBuffers(gl, { maxBytes: maxSharedBytes,canReuse:canReuseSharedSlices }) : null;
   }
-  beginChunkBuffers(mesh) {
+  createChunkBuffers(mesh, placement = null) {
+    const transaction=this.beginChunkBuffers(mesh, placement);
+    try {this.advanceChunkBuffers(transaction,Infinity);this.commitChunkBuffers(transaction.handle);return transaction.handle;}
+    catch(error){this.disposeChunkBuffers(transaction.handle,{failed:true});throw error;}
+  }
+  beginChunkBuffers(mesh, placement = null) {
     const gl = this.gl;
     const prepared = prepareMeshDrawRanges(mesh);
+    const shared = this.shared?.begin(prepared, placement);
+    if (shared) return shared;
     let vao=null,vbo=null,ibo=null;
     try {
       vao=gl.createVertexArray(); if(!vao)throw new Error('WebGL vertex array allocation returned null');
@@ -33,21 +39,26 @@ export class BufferManager {
   }
   advanceChunkBuffers(transaction,maxBytes=Infinity,{validate=true}={}){
     const gl=this.gl,t=transaction;let remaining=Math.max(0,maxBytes),uploaded=0;
-    for(const channel of ['vertex','index']){
-      const source=channel==='vertex'?t.vertices:t.indices;
-      const offsetKey=channel==='vertex'?'vertexOffset':'indexOffset';
+    for(const channel of t.origins ? ['vertex','origin','index'] : ['vertex','index']){
+      const source=channel==='vertex'?t.vertices:channel==='origin'?t.origins:t.indices;
+      const offsetKey=channel==='vertex'?'vertexOffset':channel==='origin'?'originOffset':'indexOffset';
       const target=channel==='vertex'?gl.ARRAY_BUFFER:gl.ELEMENT_ARRAY_BUFFER;
-      const buffer=channel==='vertex'?t.handle.vbo:t.handle.ibo;
+      const actualTarget=channel==='origin'?gl.ARRAY_BUFFER:target;
+      const buffer=channel==='vertex'?t.handle.vbo:channel==='origin'?t.handle.sharedPage.origins:t.handle.ibo;
+      const baseOffset=channel==='vertex'?(t.handle.vertexStart??0)*CHUNK_VERTEX_STRIDE_BYTES:channel==='origin'?(t.handle.vertexStart??0)*8:(t.handle.indexStart??0)*4;
       const count=Math.min(source.byteLength-t[offsetKey],remaining);
-      if(count>0){gl.bindVertexArray(t.handle.vao);gl.bindBuffer(target,buffer);gl.bufferSubData(target,t[offsetKey],source.subarray(t[offsetKey],t[offsetKey]+count));t[offsetKey]+=count;remaining-=count;uploaded+=count;}
+      if(count>0){gl.bindVertexArray(t.handle.vao);gl.bindBuffer(actualTarget,buffer);gl.bufferSubData(actualTarget,baseOffset+t[offsetKey],source.subarray(t[offsetKey],t[offsetKey]+count));t[offsetKey]+=count;remaining-=count;uploaded+=count;}
     }
     // Validate allocations and this stage's transfers together before the caller
     // can publish a handle. A single check also catches earlier queued GL errors.
     gl.bindVertexArray(null);
     if(validate)assertGpuUpload(gl,"staged chunk upload");
     else if(gl.isContextLost?.())throw new Error("staged chunk upload: WebGL context lost");
-    t.done=t.vertexOffset===t.vertices.byteLength&&t.indexOffset===t.indices.byteLength;t.uploadedBytes+=uploaded;
+    t.done=t.vertexOffset===t.vertices.byteLength&&t.indexOffset===t.indices.byteLength&&(!t.origins||t.originOffset===t.origins.byteLength);t.uploadedBytes+=uploaded;
     return {done:t.done,uploadedBytes:uploaded};
   }
-  disposeChunkBuffers(handle) {const gl=this.gl;if(!handle)return;if(handle.vbo)gl.deleteBuffer(handle.vbo);if(handle.ibo)gl.deleteBuffer(handle.ibo);if(handle.vao)gl.deleteVertexArray(handle.vao);}
+  commitChunkBuffers(handle) { if(handle?.sharedPage)handle.sharedPage.validated=true; }
+  reclaimSharedChunks() { this.shared?.reclaim(); }
+  disposeChunkBuffers(handle, options) {const gl=this.gl;if(!handle)return;if(handle.sharedPage){this.shared?.release(handle,options);return;}if(handle.vbo)gl.deleteBuffer(handle.vbo);if(handle.ibo)gl.deleteBuffer(handle.ibo);if(handle.vao)gl.deleteVertexArray(handle.vao);}
+  dispose(options) { this.shared?.dispose(options); }
 }
