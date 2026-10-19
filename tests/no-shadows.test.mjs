@@ -33,7 +33,7 @@ test("disabling shadows omits vegetation, cactus and tree projection geometry an
   assert.ok(shadowQueries>0,"the enabled fixture must exercise terrain shadow samples");
 });
 
-test("disabled cast shadows skip directional rays while keeping surface light and diffuse transport",()=>{
+test("disabled shadows skip directional and diffuse-sky occlusion while preserving material/local bits",()=>{
   const access={getColumnTopAtWorld:(x)=>x===-2?12:-1,
     getBlockAtWorld:(x,y)=>x===-2&&y>=0&&y<=12?BLOCK_ID.stone:BLOCK_ID.air};
   const values=[];
@@ -47,11 +47,12 @@ test("disabled cast shadows skip directional rays while keeping surface light an
     values.push({light,flags:data.getUint16(18,true)});
   }
   assert.equal(values[0].flags>>>12,0);assert.equal(values[1].flags>>>12,15);
-  assert.equal(values[0].flags&4095,values[1].flags&4095,"diffuse/local light and material bits must be unchanged");
+  assert.equal((values[1].flags>>>8)&15,15,"sky must not be darkened by a roof");
+  assert.equal(values[0].flags&255,values[1].flags&255,"local light and material bits must be unchanged");
   assert.equal(values[1].light.sunlight,null,"no ray field is allocated or traced");
 });
 
-test("no-shadow lighting keeps a sealed cave dark and preserves emissive local light",()=>{
+test("no-shadow lighting removes sealed-cave occlusion and preserves additive emissive local light",()=>{
   const c=fixture(false);c.setBaseBlocks(new Uint16Array(16*16*16).fill(BLOCK_ID.stone));
   c.applyChainDelta([{worldX:8,worldY:4,worldZ:8,blockId:BLOCK_ID.air},
     {worldX:9,worldY:4,worldZ:8,blockId:BLOCK_ID.lava}],{protectUntilSnapshot:false});
@@ -64,7 +65,7 @@ test("no-shadow lighting keeps a sealed cave dark and preserves emissive local l
     if(p[0]<8||p[0]>10||p[1]<4||p[1]>5||p[2]<8||p[2]>9)continue;
     caveVertices++;
     const flags=d.getUint16(offset+18,true);
-    assert.equal(flags>>>12,0);local ||= ((flags>>>3)&15)>0;
+    assert.equal(flags>>>8,255);local ||= ((flags>>>3)&15)>0;
   }
   assert.ok(caveVertices>0);assert.ok(local);assert.equal(result.lighting.sunlight,null);
 });

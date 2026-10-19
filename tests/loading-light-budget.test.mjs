@@ -55,7 +55,7 @@ test("a reused section plan observes new edits, removals and emissive sources",(
   } finally {manager.dispose();}
 });
 
-test("open air without local light sources preserves exact lighting without recursive transport allocations",()=>{
+test("no-shadow surfaces without emitters skip all light cells and transport allocations",()=>{
   const chunk={chunkX:0,chunkZ:0,chunkSize:16,minY:0,height:16,shadows:false};
   const vertices=new Uint8Array(128*20),data=new DataView(vertices.buffer);
   for(let v=0;v<128;v++) {
@@ -65,9 +65,12 @@ test("open air without local light sources preserves exact lighting without recu
   const fast={vertices:vertices.slice(),vertexCount:128},full={vertices:vertices.slice(),vertexCount:128};
   const access={getBlockAtWorld:()=>BLOCK_ID.air,getColumnTopAtWorld:()=>-1};
   const old=bakeSectionLighting(chunk,{originY:0,height:16},access,[full]);
-  const next=bakeSectionLighting(chunk,{originY:0,height:16},{...access,noLocalLightSources:true},[fast]);
+  const next=bakeSectionLighting(chunk,{originY:0,height:16},{noLocalLightSources:true,
+    getBlockAtWorld:()=>{throw new Error("unneeded voxel query");},
+    getColumnTopAtWorld:()=>{throw new Error("disabled shadow query");}},[fast]);
   assert.deepEqual(fast.vertices,full.vertices);
   assert.ok(old.cells>next.cells*4);
+  assert.equal(next.cells,0);assert.equal(next.domainCells,0);assert.equal(next.occlusion,false);
   assert.equal(next.cells,next.samples);assert.equal(next.transportCacheBytes,0);assert.equal(next.sunlight,null);
 });
 
@@ -80,7 +83,7 @@ test("no-emitter shortcut exactly matches ordinary sky transport across roofs an
   }
   const access={getBlockAtWorld:(x,y,z)=>cells.has(`${x}:${y}:${z}`)?BLOCK_ID.stone:BLOCK_ID.air,
     getColumnTopAtWorld:(x,z)=>{for(let y=11;y>=0;y--)if(cells.has(`${x}:${y}:${z}`))return y;return -1;}};
-  const chunk={chunkX:0,chunkZ:0,chunkSize:16,minY:0,height:16,shadows:false};
+  const chunk={chunkX:0,chunkZ:0,chunkSize:16,minY:0,height:16,shadows:true};
   for(const radius of [1,2,4,8]) {
     const vertices=new Uint8Array(80*20),d=new DataView(vertices.buffer);
     for(let v=0;v<80;v++) {

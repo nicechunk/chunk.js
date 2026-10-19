@@ -62,7 +62,7 @@ export function ensureRenderSections(chunk) {
   chunk.renderColumnEpoch = 1;
   for (const delta of chunk.getFinalDeltaMap().values()) indexDelta(chunk, delta);
   chunk.renderColumnTops=new Map();
-  for(let z=0;z<chunk.chunkSize;z++)for(let x=0;x<chunk.chunkSize;x++)chunk.renderColumnTops.set(x+z*chunk.chunkSize,finalColumnTop(chunk,x,z));
+  if(chunk.shadows!==false)for(let z=0;z<chunk.chunkSize;z++)for(let x=0;x<chunk.chunkSize;x++)chunk.renderColumnTops.set(x+z*chunk.chunkSize,finalColumnTop(chunk,x,z));
   for (let i = 0; i < Math.ceil(chunk.height / RENDER_SECTION_HEIGHT); i++) {
     const originY = chunk.minY + i * RENDER_SECTION_HEIGHT;
     chunk.renderSections.set(i, {
@@ -100,7 +100,7 @@ export function* prepareRenderSnapshotInvalidation(chunk,nextChain,changes,{drop
     list=sections.get(index);if(!list)sections.set(index,list=new Map());list.set(key,delta);yield;
   }
   let skyBelow=-Infinity;
-  for(let z=0;z<chunk.chunkSize;z++)for(let x=0;x<chunk.chunkSize;x++) {
+  if(chunk.shadows!==false)for(let z=0;z<chunk.chunkSize;z++)for(let x=0;x<chunk.chunkSize;x++) {
     const column=x+z*chunk.chunkSize;
     let candidate=chunk.baseProfile?Math.min(chunk.minY+chunk.height-1,chunk.baseProfile.surfaceY[column]):chunk.minY+chunk.height-1;
     for(const delta of columns.get(column)?.values()??[]){if(isOpaqueSolidBlock(delta.blockId))candidate=Math.max(candidate,delta.localY);yield;}
@@ -127,7 +127,7 @@ export function* prepareRenderSnapshotInvalidation(chunk,nextChain,changes,{drop
     chunk.renderColumnRevisions=new Map();chunk.renderColumnEpoch++;chunk.renderInvalidationPending=true;
     for(const [index,section]of chunk.renderSections) {
       if(data.has(index)){section.dataRevision++;section.haloRevision++;}
-      else if(!light.has(index)&&section.originY>skyBelow)continue;
+      else if(!light.has(index)&&(chunk.shadows===false||section.originY>skyBelow))continue;
       if(!data.has(index)&&!section.mesh?.indexCount&&!section.visualMesh?.indexCount)continue;
       section.lightRevision++;section.dirty=true;section.visualDirty=true;section.dirtyReason="atomic-snapshot";section.oldestDirtyAt??=performance.now();
     }
@@ -159,7 +159,7 @@ export function invalidateRenderSections(chunk, deltas = null, reason = "edit") 
     chunk.renderColumnRevisions.clear();chunk.renderColumnEpoch++;
     for (const delta of chunk.getFinalDeltaMap().values()) indexDelta(chunk, delta);
     chunk.renderColumnTops.clear();
-    for(let z=0;z<chunk.chunkSize;z++)for(let x=0;x<chunk.chunkSize;x++)chunk.renderColumnTops.set(x+z*chunk.chunkSize,finalColumnTop(chunk,x,z));
+    if(chunk.shadows!==false)for(let z=0;z<chunk.chunkSize;z++)for(let x=0;x<chunk.chunkSize;x++)chunk.renderColumnTops.set(x+z*chunk.chunkSize,finalColumnTop(chunk,x,z));
   } else {
     for (const delta of deltas) {
       const y = delta.localY ?? delta.worldY;
@@ -175,10 +175,12 @@ export function invalidateRenderSections(chunk, deltas = null, reason = "edit") 
           const column=delta.localX+delta.localZ*chunk.chunkSize;
           chunk.renderColumnRevisions.set(column,(chunk.renderColumnRevisions.get(column)??0)+1);
         }
-        const column=delta.localX+delta.localZ*chunk.chunkSize;
-        const before=chunk.renderColumnTops.get(column),after=finalColumnTop(chunk,delta.localX,delta.localZ);
-        if(before!==after)skyChangedBelow=Math.max(skyChangedBelow,before??after,after);
-        chunk.renderColumnTops.set(column,after);
+        if(chunk.shadows!==false) {
+          const column=delta.localX+delta.localZ*chunk.chunkSize;
+          const before=chunk.renderColumnTops.get(column),after=finalColumnTop(chunk,delta.localX,delta.localZ);
+          if(before!==after)skyChangedBelow=Math.max(skyChangedBelow,before??after,after);
+          chunk.renderColumnTops.set(column,after);
+        }
       }
       // A tree is owned by the section containing its base; a canopy edit must
       // also rebuild that owner, even when the crown crosses a section boundary.
@@ -195,7 +197,7 @@ export function invalidateRenderSections(chunk, deltas = null, reason = "edit") 
     section.oldestDirtyAt ??= performance.now();
   }
   for(const [index,section] of chunk.renderSections) {
-    if(affected.has(index)||(!nearbyLight.has(index)&&section.originY>skyChangedBelow))continue;
+    if(affected.has(index)||(!nearbyLight.has(index)&&(chunk.shadows===false||section.originY>skyChangedBelow)))continue;
     if(!section.mesh?.indexCount&&!section.visualMesh?.indexCount)continue;
     section.lightRevision++;section.dirty=true;section.visualDirty=true;
     section.dirtyReason="sky-or-local-light";section.oldestDirtyAt??=performance.now();

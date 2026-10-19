@@ -12,6 +12,19 @@ const STEPS=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
 // samples; no early-out depends on a height-field assumption about cavities.
 export function bakeSectionLighting(chunk, section, access, meshes, options = DEFAULT_CAVE_LIGHTING) {
   if(!meshes.some(mesh=>mesh?.vertexCount))return;
+  const shadows=chunk.shadows!==false;
+  const noLocalLightSources=(typeof access.noLocalLightSources==="function"?access.noLocalLightSources():access.noLocalLightSources)===true;
+  // No-shadow gameplay must not bake roof/cave skylight masks either. With no
+  // emitters the result is constant, so skip every cell, column and transport
+  // allocation. Keep material/UV bits and the water-depth attribute intact.
+  if(!shadows&&noLocalLightSources) {
+    for(const mesh of meshes)if(mesh?.vertexCount) {
+      const data=new DataView(mesh.vertices.buffer,mesh.vertices.byteOffset,mesh.vertices.byteLength);
+      for(let v=0;v<mesh.vertexCount;v++)data.setUint16(v*20+18,(data.getUint16(v*20+18,true)&7)|0xff80,true);
+      mesh.lightEncoding="sun4-sky4-local4-v1";
+    }
+    return {cells:0,domainCells:0,radius:0,skySeeds:0,localSeeds:0,samples:0,sunlight:null,transportCacheBytes:0,occlusion:false};
+  }
   const radius=Math.max(1,Math.min(8,Math.trunc(options.radius??4)));
   const attenuation=Math.max(1,Math.ceil(15/radius));
   let minX=0,minZ=0,maxX=chunk.chunkSize,maxZ=chunk.chunkSize,minY=section.originY,maxY=section.originY+section.height;
@@ -35,12 +48,11 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     sampledCells++;
     solid[i]=isOpaqueSolidBlock(id)?1:0;
     emissive[i]=(blockFlags(id)&BLOCK_FLAGS.EMISSIVE)?1:0;
-    if(!solid[i]&&oy+y>columnTop(x,z))skySeeds++;
+    if(shadows&&!solid[i]&&oy+y>columnTop(x,z))skySeeds++;
     if(emissive[i])localSeeds++;
   };
   const maxDistance=Math.floor(14/attenuation);
-  const noLocalLightSources=(typeof access.noLocalLightSources==="function"?access.noLocalLightSources():access.noLocalLightSources)===true;
-  const sunlight=chunk.shadows===false?null:createDirectionalSunlight({
+  const sunlight=!shadows?null:createDirectionalSunlight({
     getColumnTopAtWorld:(x,z)=>access.getColumnTopAtWorld?.(x,z)??chunk.minY+chunk.height,
     getBlockAtWorld:access.getBlockAtWorld,
   });
@@ -51,7 +63,7 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     const cached=transportCache?.[remaining]?.[i];
     if(cached)return cached-1;
     readCell(i,x,y,z);
-    let sky=!solid[i]&&oy+y>columnTop(x,z)?15:0,local=emissive[i]?15:0;
+    let sky=shadows&&!solid[i]&&oy+y>columnTop(x,z)?15:0,local=emissive[i]?15:0;
     // Canonical generated terrain has no emissive blocks. The immutable edit
     // snapshot can prove this too. An outdoor sky seed is then already final;
     // do not walk six neighbours to search for a source that does not exist.
@@ -70,16 +82,16 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
   };
   const sample=(p)=>{
     const x=Math.floor(p[0])-ox,y=Math.floor(p[1])-oy,z=Math.floor(p[2])-oz;
-    if(x<0||y<0||z<0||x>=width||z>=width||y>=height)return {sun:0,sky:0,local:0};
+    if(x<0||y<0||z<0||x>=width||z>=width||y>=height)return {sun:shadows?0:15,sky:shadows?0:15,local:0};
     const first=index(x,y,z),cached=samples.get(first);
     if(cached)return cached;
     readCell(first,x,y,z);
     const light={sun:0,sky:0,local:0};
     const value=transport(first,x,y,z,maxDistance);
-    light.sky=value>>>4;light.local=value&15;
-    // Keep closed caves dark without tracing cast shadows. Exposed surfaces
-    // receive the original directional material light, independent of blockers.
-    light.sun=solid[first]?0:sunlight?sunlight.sample(ox+x,oy+y,oz+z):light.sky>0?15:0;
+    light.sky=shadows?value>>>4:15;light.local=value&15;
+    // Only enabled shadows may suppress sunlight or sky. Local emission remains
+    // additive in the no-shadow policy and cannot create dark occlusion masks.
+    light.sun=!shadows?15:solid[first]?0:sunlight.sample(ox+x,oy+y,oz+z);
     samples.set(first,light);return light;
   };
   for(const mesh of meshes) {
@@ -104,5 +116,5 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     mesh.lightEncoding="sun4-sky4-local4-v1";
   }
   return {cells:sampledCells,domainCells:count,radius,skySeeds,localSeeds,samples:samples.size,sunlight:sunlight?.stats??null,
-    transportCacheBytes:transportCache?.reduce((total,field)=>total+field.byteLength,0)??0};
+    transportCacheBytes:transportCache?.reduce((total,field)=>total+field.byteLength,0)??0,occlusion:shadows};
 }

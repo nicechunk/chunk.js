@@ -9,7 +9,7 @@ import { waterPrecisionUniforms } from "./water-precision.js";
 import { RenderStageStats } from "../debug/stats.js";
 import { CloudLayer } from "./cloud-layer.js";
 import { applyLightingUniforms, createUnderwaterLighting, createWorldLighting } from "./lighting.js";
-import { createProgram, FAST_FLUID_FRAGMENT_SHADER, OPAQUE_FRAGMENT_SHADER, SOLID_FRAGMENT_SHADER, OPAQUE_VERTEX_SHADER } from "./shader-manager.js";
+import { createProgram, FAST_FLUID_FRAGMENT_SHADER, OPAQUE_FRAGMENT_SHADER, SOLID_FRAGMENT_SHADER, OPAQUE_VERTEX_SHADER, shaderForShadowPolicy } from "./shader-manager.js";
 import { renderResolution } from "./render-resolution.js";
 import { ProjectedShadowLayer } from "./projected-shadow-layer.js";
 import { SkyGradient } from "./sky-gradient.js";
@@ -255,9 +255,10 @@ export class WebGL2VoxelRenderer {
       this.gl = gl;
       this.gpuTimer = this.options.gpuTiming ? new AsyncGpuTimer(gl, { generation: this.contextGeneration }) : null;
       runStage("shader programs", () => {
-        this.program = createProgram(gl, OPAQUE_VERTEX_SHADER,
-          this.options.waterEffects ? OPAQUE_FRAGMENT_SHADER : FAST_FLUID_FRAGMENT_SHADER);
-        this.solidProgram = createProgram(gl, OPAQUE_VERTEX_SHADER, SOLID_FRAGMENT_SHADER);
+        const shader=source=>shaderForShadowPolicy(source,this.options.shadows);
+        this.program = createProgram(gl, shader(OPAQUE_VERTEX_SHADER),
+          shader(this.options.waterEffects ? OPAQUE_FRAGMENT_SHADER : FAST_FLUID_FRAGMENT_SHADER));
+        this.solidProgram = createProgram(gl, shader(OPAQUE_VERTEX_SHADER), shader(SOLID_FRAGMENT_SHADER));
         this.avatarProgram = createProgram(gl, AVATAR_VERTEX_SHADER, AVATAR_FRAGMENT_SHADER);
         this.uniforms = collectUniforms(gl, this.program);
         this.solidUniforms = collectUniforms(gl, this.solidProgram);

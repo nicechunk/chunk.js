@@ -33,11 +33,16 @@ void main() {
   float packedFlags = floor(aLayerFlags.y + 0.5);
   float baseFlags = mod(packedFlags, 256.0);
   float hasBakedLight = step(127.5, baseFlags);
+#ifdef NICECHUNK_NO_OCCLUSION
+  vSunVisibility = 1.0;
+  vSkyVisibility = 1.0;
+#else
   float packedLight = floor(packedFlags / 256.0);
   float bakedSun = floor(packedLight / 16.0) / 15.0;
   float bakedSky = mod(packedLight, 16.0) / 15.0;
   vSunVisibility = mix(1.0, bakedSun, hasBakedLight);
   vSkyVisibility = mix(1.0, bakedSky, hasBakedLight);
+#endif
   vViewPosition = p;
   vLocalLight = mod(floor(baseFlags / 8.0), 16.0) / 15.0;
 }
@@ -161,13 +166,23 @@ void main() {
   float hemiUp = normal.y * 0.5 + 0.5;
   vec3 ambient = uSkyLightColor * uLightParams.x;
   vec3 hemi = mix(uGroundLightColor, uSkyLightColor, hemiUp) * uLightParams.z;
+#ifdef NICECHUNK_NO_OCCLUSION
+  vec3 direct = uSunColor * (toonSun * uLightParams.y);
+  vec3 color = texel.rgb * (ambient + hemi + direct + uLocalLightColor * vLocalLight);
+#else
   vec3 direct = uSunColor * (toonSun * uLightParams.y * clamp(vSunVisibility, 0.0, 1.0));
   float indirectVisibility = mix(clamp(uCaveAmbientFloor,0.0,1.0), 1.0, clamp(vSkyVisibility, 0.0, 1.0));
   vec3 color = texel.rgb * ((ambient + hemi) * indirectVisibility + direct + uLocalLightColor * vLocalLight);
+#endif
   float waterGlareCore = 0.0;
   float waterGlareHalo = 0.0;
   float aoValue = clamp(vAo, 0.0, 1.0);
+#ifdef NICECHUNK_NO_OCCLUSION
+  // Water uses this attribute for depth tint, never for scene occlusion.
+  if (isWaterSurface) color *= mix(0.78, 1.0, aoValue);
+#else
   color *= isWaterSurface ? mix(0.78, 1.0, aoValue) : mix(0.64, 1.0, aoValue);
+#endif
   if (!isWaterSurface && layer != 20.0) {
     float topFace = smoothstep(0.42, 0.88, normal.y);
     float sideFace = 1.0 - smoothstep(0.35, 0.82, abs(normal.y));
@@ -315,6 +330,14 @@ export const SOLID_FRAGMENT_SHADER = OPAQUE_FRAGMENT_SHADER.replace(
 export const FAST_FLUID_FRAGMENT_SHADER = OPAQUE_FRAGMENT_SHADER.replace(
   '#version 300 es', '#version 300 es\n#define NICECHUNK_FAST_WATER 1',
 );
+
+// Compile occlusion out when shadows are disabled, including for stale baked
+// mesh data. Normal-based sun direction and detailed water stay independent.
+export function shaderForShadowPolicy(source, shadows = true) {
+  return shadows === false
+    ? source.replace('#version 300 es', '#version 300 es\n#define NICECHUNK_NO_OCCLUSION 1')
+    : source;
+}
 
 export function createProgram(gl, vertexSource, fragmentSource) {
   let vertex = null;

@@ -422,6 +422,7 @@ export class ChunkManager {
       for(const section of target.renderSections.values()) {
         if(!section.mesh?.vertexCount&&!section.visualMesh?.vertexCount)continue;
         if(section.originY>Math.max(...relevant.map(d=>d.worldY))+4)continue;
+        if(!this.shadows&&section.originY+section.height<=Math.min(...relevant.map(d=>d.worldY))-4)continue;
         section.lightRevision++;section.dirty=true;section.visualDirty=true;
         section.dirtyReason="sun-halo";section.oldestDirtyAt??=performance.now();
       }
@@ -439,6 +440,8 @@ export class ChunkManager {
   }
 
   captureWorkerColumnTopHalo(chunk) {
+    // No-shadow lighting no longer reads the height field, even for emitters.
+    if(!this.shadows)return {originX:chunk.chunkX*this.chunkSize,originZ:chunk.chunkZ*this.chunkSize,width:0,tops:new Int32Array()};
     // The Worker reconstructs unchanged columns from the same captured seed and
     // generator configuration. Only edited column tops need a main-thread read.
     // Dense/custom base blocks retain the complete snapshot path.
@@ -488,7 +491,7 @@ export class ChunkManager {
         const treeSections=plan.trees?new Set((target.treeInstances??[]).map(tree=>Math.floor((tree.baseY-this.minY)/16))):null;
         for(const [index,section]of target.renderSections) {
           const geometry=plan.data.has(index)||treeSections?.has(index);
-          if(!geometry&&!plan.light.has(index)&&section.originY>plan.maxY)continue;
+          if(!geometry&&!plan.light.has(index)&&(!this.shadows||section.originY>plan.maxY))continue;
           if(!geometry&&!section.mesh?.indexCount&&!section.visualMesh?.indexCount)continue;
           if(geometry){section.dataRevision++;section.haloRevision++;}
           section.lightRevision++;section.dirty=true;section.visualDirty=true;section.dirtyReason="atomic-neighbor-snapshot";section.oldestDirtyAt??=performance.now();changed=true;
