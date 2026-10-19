@@ -75,7 +75,8 @@ export function createUnderwaterLighting(lighting, amount = 0) {
     skyColor,
     clearColor: [...skyColor, lighting.clearColor?.[3] ?? 1],
     fogColor: mixColor(lighting.fogColor, UNDERWATER_LIGHTING.fogColor, blend),
-    fogNearFar: mixPair(lighting.fogNearFar, UNDERWATER_LIGHTING.fogNearFar, blend),
+    fogNearFar: mixPair(lighting.fogNearFar, UNDERWATER_LIGHTING.fogNearFar, blend)
+      .map((value, index) => Math.min(value, lighting.fogNearFar[index])),
     sunColor: mixColor(lighting.sunColor, UNDERWATER_LIGHTING.sunColor, blend),
     skyLightColor: mixColor(lighting.skyLightColor, UNDERWATER_LIGHTING.skyLightColor, blend),
     groundLightColor: mixColor(lighting.groundLightColor, UNDERWATER_LIGHTING.groundLightColor, blend),
@@ -96,6 +97,7 @@ export function applyLightingUniforms(gl, uniforms, lighting) {
   setUniform3(gl, uniforms.uSkyLightColor, lighting.skyLightColor);
   setUniform3(gl, uniforms.uGroundLightColor, lighting.groundLightColor);
   setUniform3(gl, uniforms.uFogColor, lighting.fogColor);
+  if (uniforms.uCaveAmbientFloor) gl.uniform1f(uniforms.uCaveAmbientFloor, lighting.caveAmbientFloor ?? 0.12);
   if (uniforms.uFogNearFar) gl.uniform2f(uniforms.uFogNearFar, lighting.fogNearFar[0], lighting.fogNearFar[1]);
   if (uniforms.uLightParams) {
     gl.uniform4f(

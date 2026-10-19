@@ -10,7 +10,7 @@ layout(location = 4) in float aAo;
 
 uniform mat4 uViewProjection;
 uniform vec3 uChunkOrigin;
-uniform vec2 uWorldOrigin;
+
 uniform float uTileScale;
 
 out vec3 vNormal;
@@ -21,7 +21,7 @@ out float vSunVisibility;
 out float vSkyVisibility;
 out float vFogDepth;
 out vec3 vViewPosition;
-out vec2 vWorldXZ;
+out float vLocalLight;
 
 void main() {
   float positionScale = max(1.0, float(aPosition.w));
@@ -41,13 +41,14 @@ void main() {
   vSkyVisibility = mix(1.0, bakedSky, hasBakedLight);
   vFogDepth = max(0.0, gl_Position.w);
   vViewPosition = p;
-  vWorldXZ = p.xz + uWorldOrigin;
+  vLocalLight = mod(floor(baseFlags / 8.0), 16.0) / 15.0;
 }
 `;
 
 export const OPAQUE_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 precision highp sampler2DArray;
+precision highp int;
 
 uniform sampler2DArray uTextureArray;
 uniform vec3 uSunDirection;
@@ -60,6 +61,13 @@ uniform vec4 uLightParams;
 uniform float uTime;
 uniform float uOpacity;
 uniform float uUnderwater;
+uniform float uSurfacePass;
+uniform float uCaveAmbientFloor;
+uniform vec3 uLocalLightColor;
+uniform vec3 uCameraLocalEye;
+uniform vec2 uWaterOriginPhase;
+uniform ivec2 uWaterCellOrigin[6];
+uniform vec2 uWaterCellPhase[6];
 
 in vec3 vNormal;
 in vec2 vUv;
@@ -69,48 +77,52 @@ in float vSunVisibility;
 in float vSkyVisibility;
 in float vFogDepth;
 in vec3 vViewPosition;
-in vec2 vWorldXZ;
+in float vLocalLight;
 
 out vec4 outColor;
 
-float waterHash(vec2 p) {
-  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-  p3 += dot(p3, p3.yzx + 31.37);
-  return fract((p3.x + p3.y) * p3.z);
+float waterHash(ivec2 p) {
+  uvec2 v=uvec2(p);
+  uint h=v.x*0x8da6b343u ^ v.y*0xd8163841u;
+  h^=h>>16;h*=0x7feb352du;h^=h>>15;h*=0x846ca68bu;h^=h>>16;
+  return float(h & 0x00ffffffu)/16777216.0;
 }
-
+vec2 waterGrid(vec2 p,float size,int index){return p/size+uWaterCellPhase[index];}
+float waterNoise(vec2 p,float size,int index){return waterHash(ivec2(floor(waterGrid(p,size,index)))+uWaterCellOrigin[index]);}
 float waterWave(vec2 p, vec2 dir, float speed, float freq, float phase) {
-  return sin((dot(p, dir) * freq + phase + uTime * speed) * 3.14159);
+  // Integer wave numbers give an exact 256-block period; the CPU reduces the
+  // high precision world origin before upload. Never reconstruct absolute floats.
+  vec2 lattice=floor(dir*freq*128.0+0.5);
+  return sin(fract(dot(p+uWaterOriginPhase,lattice)/256.0+phase*0.5+uTime*speed*0.5)*6.28318530718);
 }
-
 float waterLine(vec2 p, vec2 dir, float freq, float speed, float width, float phase) {
-  float v = fract(dot(p, dir) * freq + uTime * speed + phase);
-  float d = abs(v - 0.5);
-  return 1.0 - smoothstep(width, width + 0.035, d);
+  vec2 lattice=floor(dir*freq*256.0+0.5);
+  float v=fract(dot(p+uWaterOriginPhase,lattice)/256.0+uTime*speed+phase);
+  float d=abs(v-0.5);return 1.0-smoothstep(width,width+0.035,d);
 }
 
-float waterSparkleCell(vec2 p, float cellSize, float density, float seed) {
-  vec2 grid = p / cellSize;
-  vec2 cell = floor(grid);
+float waterSparkleCell(vec2 p, float cellSize, float density, float seed, int index) {
+  vec2 grid = waterGrid(p,cellSize,index);
+  ivec2 cell = ivec2(floor(grid))+uWaterCellOrigin[index];
   vec2 local = fract(grid);
-  vec2 seedOffset = vec2(seed, seed * 1.731);
+  ivec2 seedOffset = ivec2(int(seed), int(seed * 1.731));
   float pick = waterHash(cell + seedOffset);
   float cellActive = step(1.0 - density, pick);
   vec2 center = vec2(
-    waterHash(cell + seedOffset + vec2(11.13, 5.91)),
-    waterHash(cell + seedOffset + vec2(3.77, 17.41))
+    waterHash(cell + seedOffset + ivec2(11.13, 5.91)),
+    waterHash(cell + seedOffset + ivec2(3.77, 17.41))
   );
   center = mix(vec2(0.24), vec2(0.76), center);
   vec2 halfSize = vec2(
-    0.065 + waterHash(cell + seedOffset + vec2(19.27, 2.43)) * 0.165,
-    0.040 + waterHash(cell + seedOffset + vec2(7.81, 23.59)) * 0.125
+    0.065 + waterHash(cell + seedOffset + ivec2(19.27, 2.43)) * 0.165,
+    0.040 + waterHash(cell + seedOffset + ivec2(7.81, 23.59)) * 0.125
   );
-  halfSize = mix(halfSize, halfSize.yx, step(0.5, waterHash(cell + seedOffset + vec2(31.7, 9.2))));
+  halfSize = mix(halfSize, halfSize.yx, step(0.5, waterHash(cell + seedOffset + ivec2(31.7, 9.2))));
   float boxEdge = max(abs(local.x - center.x) - halfSize.x, abs(local.y - center.y) - halfSize.y);
-  float feather = 0.050 + waterHash(cell + seedOffset + vec2(29.5, 13.4)) * 0.050;
+  float feather = 0.050 + waterHash(cell + seedOffset + ivec2(29.5, 13.4)) * 0.050;
   float coreBox = 1.0 - smoothstep(0.0, feather * 0.70, boxEdge);
   float haloBox = 1.0 - smoothstep(feather * 0.35, feather * 3.80, boxEdge);
-  float blinkPhase = pick * 6.2831853 + waterHash(cell + seedOffset + vec2(41.0, 37.0)) * 2.8;
+  float blinkPhase = pick * 6.2831853 + waterHash(cell + seedOffset + ivec2(41.0, 37.0)) * 2.8;
   float blink = smoothstep(-0.28, 0.94, sin(uTime * (1.15 + pick * 1.85) + blinkPhase));
   blink *= blink;
   float glowBox = max(coreBox, haloBox * 0.44);
@@ -129,7 +141,9 @@ void main() {
   bool isWaterSurface = layer >= 17.0 && layer <= 19.0;
   bool isShadowLayer = layer == 54.0;
   vec2 tileUv = fract(vUv);
-  vec4 texel = texture(uTextureArray, vec3(tileUv, layer));
+  vec4 texel = textureGrad(uTextureArray, vec3(tileUv, layer), dFdx(vUv), dFdy(vUv));
+  if (uSurfacePass > 0.5 && texel.a < 0.5) discard;
+  if (uSurfacePass > 0.5) texel.a = 1.0;
   if (texel.a < 0.08) discard;
   if (isShadowLayer) {
     float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);
@@ -145,8 +159,8 @@ void main() {
   vec3 ambient = uSkyLightColor * uLightParams.x;
   vec3 hemi = mix(uGroundLightColor, uSkyLightColor, hemiUp) * uLightParams.z;
   vec3 direct = uSunColor * (toonSun * uLightParams.y * clamp(vSunVisibility, 0.0, 1.0));
-  float indirectVisibility = mix(0.38, 1.0, clamp(vSkyVisibility, 0.0, 1.0));
-  vec3 color = texel.rgb * ((ambient + hemi) * indirectVisibility + direct);
+  float indirectVisibility = mix(clamp(uCaveAmbientFloor,0.0,1.0), 1.0, clamp(vSkyVisibility, 0.0, 1.0));
+  vec3 color = texel.rgb * ((ambient + hemi) * indirectVisibility + direct + uLocalLightColor * vLocalLight);
   float waterGlareCore = 0.0;
   float waterGlareHalo = 0.0;
   float aoValue = clamp(vAo, 0.0, 1.0);
@@ -159,7 +173,7 @@ void main() {
     color *= mix(1.0, 0.925, sideShade);
   }
   if (layer >= 17.0 && layer <= 20.0) {
-    vec2 p = vWorldXZ;
+    vec2 p = vViewPosition.xz;
     vec2 d1 = normalize(vec2(0.68, 1.0));
     vec2 d2 = normalize(vec2(-0.92, 0.38));
     vec2 d3 = normalize(vec2(0.24, -0.98));
@@ -170,23 +184,23 @@ void main() {
     float fineA = waterLine(p, normalize(vec2(0.92, -0.24)), 0.22, 0.018, 0.026, 5.0);
     float fineB = waterLine(p, normalize(vec2(0.36, 1.0)), 0.34, -0.014, 0.022, 9.0);
     float fineC = waterLine(p, normalize(vec2(-0.72, 0.42)), 0.48, 0.012, 0.018, 13.0);
-    vec2 grad = d1 * cos((dot(p, d1) * 0.64 + uTime * 0.42) * 3.14159) * 0.64 * 0.45;
-    grad += d2 * cos((dot(p, d2) * 1.12 - uTime * 0.29) * 3.14159) * 1.12 * 0.32;
-    grad += d3 * cos((dot(p, d3) * 0.28 + uTime * 0.17) * 3.14159) * 0.28 * 0.23;
+    vec2 grad = d1 * waterWave(p,d1,0.42,0.64,0.5) * 0.64 * 0.45;
+    grad += d2 * waterWave(p,d2,-0.29,1.12,0.5) * 1.12 * 0.32;
+    grad += d3 * waterWave(p,d3,0.17,0.28,0.5) * 0.28 * 0.23;
     vec3 waterNormal = normalize(vec3(-grad.x * 0.34, 1.0, -grad.y * 0.34));
     vec3 sunDir = normalize(uSunDirection);
-    vec3 viewDir = normalize(-vViewPosition + vec3(0.001, 0.001, 0.001));
+    vec3 viewDir = normalize(uCameraLocalEye-vViewPosition + vec3(0.001, 0.001, 0.001));
     vec3 halfDir = normalize(sunDir + viewDir);
-    float cameraDistance = length(vViewPosition.xz);
+    float cameraDistance = length(vViewPosition.xz-uCameraLocalEye.xz);
     float distanceFactor = smoothstep(18.0, 240.0, cameraDistance);
     vec2 sun2 = normalize(sunDir.xz + vec2(0.001, 0.001));
-    vec2 cameraToWater = normalize(vViewPosition.xz + vec2(0.001, 0.001));
+    vec2 cameraToWater = normalize(vViewPosition.xz-uCameraLocalEye.xz + vec2(0.001, 0.001));
     float sunTrail = smoothstep(0.36, 0.96, dot(cameraToWater, sun2));
     sunTrail *= smoothstep(4.0, 26.0, cameraDistance) * (1.0 - smoothstep(250.0, 440.0, cameraDistance));
     float specular = pow(max(dot(waterNormal, halfDir), 0.0), 22.0);
     float sharpSpecular = pow(max(dot(waterNormal, halfDir), 0.0), 88.0);
     float sparkleLine = smoothstep(0.58, 1.08, fineA * 0.16 + fineB * 0.12 + fineC * 0.08);
-    float brokenSparkle = step(0.91, waterHash(floor(p * 1.35)));
+    float brokenSparkle = step(0.91, waterNoise(p,1.0/1.35,0));
     float lineEnergy = clamp(fineA * 0.05 + fineB * 0.04 + fineC * 0.03, 0.0, 1.0);
     if (layer == 20.0) {
       color = texel.rgb * (0.72 + ripple * 0.22);
@@ -195,9 +209,9 @@ void main() {
     } else {
       float waterKind = layer == 18.0 ? 0.20 : layer == 19.0 ? 0.34 : 0.78;
       float waterDepthBase = clamp((vAo - 0.58) / 0.40, 0.0, 1.0);
-      float depthFeather = (waterHash(floor(p * 0.42)) - 0.5) * 0.030;
+      float depthFeather = (waterNoise(p,1.0/0.42,1) - 0.5) * 0.030;
       float waterDepth = clamp(waterDepthBase + depthFeather * (1.0 - smoothstep(0.88, 1.0, waterDepthBase)), 0.0, 1.0);
-      float largePatch = smoothstep(0.20, 0.82, waterHash(floor(p * 0.038)));
+      float largePatch = smoothstep(0.20, 0.82, waterNoise(p,1.0/0.038,2));
       float smoothWaterDepth = smoothstep(0.0, 1.0, waterDepth);
       float depth = clamp(smoothWaterDepth * 0.84 + distanceFactor * 0.055 + largePatch * 0.025, 0.0, 1.0);
       float shoreBlend = 1.0 - smoothstep(0.02, 0.78, waterDepth);
@@ -221,9 +235,9 @@ void main() {
       float viewSparkleFade = 1.0 - smoothstep(0.70, 1.0, distanceFactor);
       float smallSparkleDensity = clamp(0.003 + tailSparkleBand * 0.007 + edgeSparkleBand * 0.052, 0.0, 0.08);
       float wideSparkleDensity = clamp(0.002 + tailSparkleBand * 0.005 + edgeSparkleBand * 0.020, 0.0, 0.034);
-      float sparkleCells = waterSparkleCell(p, 0.52, smallSparkleDensity, 43.0)
-        + waterSparkleCell(p + vec2(19.0, -11.0), 0.86, wideSparkleDensity, 87.0) * 0.82
-        + waterSparkleCell(p + vec2(-7.0, 23.0), 1.42, 0.002 + tailSparkleBand * 0.003 + edgeSparkleBand * 0.009, 131.0) * 0.42;
+      float sparkleCells = waterSparkleCell(p, 0.52, smallSparkleDensity, 43.0, 3)
+        + waterSparkleCell(p + vec2(19.0, -11.0), 0.86, wideSparkleDensity, 87.0, 4) * 0.82
+        + waterSparkleCell(p + vec2(-7.0, 23.0), 1.42, 0.002 + tailSparkleBand * 0.003 + edgeSparkleBand * 0.009, 131.0, 5) * 0.42;
       float sparkleGlow = clamp(sparkleCells * cleanWater * viewSparkleFade * (0.82 + sunTrail * 0.72 + sharpSpecular * 0.18) * (0.76 + ripple * 0.14), 0.0, 0.72);
       float sparkleCore = pow(clamp(sparkleGlow, 0.0, 1.0), 1.28);
       float sparkleHalo = sparkleGlow * (0.22 + edgeSparkleBand * 0.38 + tailSparkleBand * 0.18);
@@ -258,9 +272,9 @@ void main() {
     color = mix(color, vec3(1.0, 0.985, 0.82), glareCore * 0.24);
     color = min(color, vec3(1.34, 1.30, 1.18));
   }
-  float viewLength = max(length(vViewPosition), 0.001);
-  float horizonAngle = 1.0 - smoothstep(0.025, 0.145, abs(vViewPosition.y) / viewLength);
-  float horizonDistance = smoothstep(uFogNearFar.x * 0.60, uFogNearFar.y * 0.96, length(vViewPosition.xz));
+  float viewLength = max(length(vViewPosition-uCameraLocalEye), 0.001);
+  float horizonAngle = 1.0 - smoothstep(0.025, 0.145, abs(vViewPosition.y-uCameraLocalEye.y) / viewLength);
+  float horizonDistance = smoothstep(uFogNearFar.x * 0.60, uFogNearFar.y * 0.96, length(vViewPosition.xz-uCameraLocalEye.xz));
   float horizonHaze = clamp(horizonAngle * horizonDistance, 0.0, 1.0);
   vec3 horizonFog = mix(uFogColor, uSkyLightColor, 0.28);
   color = mix(color, horizonFog, horizonHaze * 0.42);

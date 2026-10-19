@@ -18,7 +18,7 @@ test("building previews use a translucent pass without writing depth", () => {
     ONE_MINUS_SRC_ALPHA: 5,
     TRIANGLES: 6,
     useProgram() {},
-    uniform1f(_location, value) { opacityValues.push(value); },
+    uniform1f(location, value) { if (location === renderer.uniforms.uOpacity) opacityValues.push(value); },
     uniform2f() {},
     uniform3f() {},
     enable(value) { enabled.push(value); },

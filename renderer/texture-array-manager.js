@@ -1,3 +1,4 @@
+import { assertGpuUpload } from "./gpu-diagnostics.js";
 import { hashCoord3, normalizeSeedBytes } from "../core/hash.js";
 import { MATERIAL_ID } from "../world/block-registry.js";
 import { materialList } from "../world/material-registry.js";
@@ -6,45 +7,63 @@ const MATERIAL_TILE_CACHE = new Map();
 const MATERIAL_TILE_CACHE_LIMIT = 256;
 
 export class TextureArrayManager {
-  constructor(gl, { tileSize = 32, materials = materialList(), seed = "nicechunk-materials-v1" } = {}) {
+  constructor(gl, { tileSize = 32, materials = materialList(), seed = "nicechunk-materials-v1", quality = "pixel" } = {}) {
     this.gl = gl;
     this.tileSize = tileSize;
     this.materials = materials;
     this.seed = normalizeSeedBytes(seed);
     this.seedKey = Array.from(this.seed, (byte) => byte.toString(16).padStart(2, "0")).join("");
     this.texture = null;
+    this.quality = ["pixel", "balanced", "high"].includes(quality) ? quality : "balanced";
+    this.mipLevels = this.quality === "pixel" ? 1 : 1 + Math.floor(Math.log2(tileSize));
+    this.layerOverrides = new Map();
+    this.byteLength = 0;
     this.layerCount = Math.max(1, ...materials.map((material) => material.textureLayer + 1));
   }
 
   createTextureArray(materialTextures = null) {
-    const gl = this.gl;
-    this.texture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.texture);
-    gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA8, this.tileSize, this.tileSize, this.layerCount);
-    const blank = new Uint8Array(this.tileSize * this.tileSize * 4);
-    for (let layer = 0; layer < this.layerCount; layer += 1) {
-      const material = this.materials.find((entry) => entry.textureLayer === layer);
-      const pixels = materialTextures?.[layer] ?? (material ? this.generateMaterialTile(material) : blank);
-      gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, this.tileSize, this.tileSize, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-    }
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
-    return this.texture;
+    const gl=this.gl;
+    assertGpuUpload(gl,"before texture array upload");
+    const next=gl.createTexture();if(!next)throw new Error("WebGL texture allocation returned null");
+    try {
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY,next);
+      gl.texStorage3D(gl.TEXTURE_2D_ARRAY,this.mipLevels,gl.RGBA8,this.tileSize,this.tileSize,this.layerCount);
+      const blank=new Uint8Array(this.tileSize*this.tileSize*4);
+      for(let layer=0;layer<this.layerCount;layer++){
+        const material=this.materials.find(m=>m.textureLayer===layer);
+        let pixels=materialTextures?.[layer]??this.layerOverrides.get(layer)??(material?this.generateMaterialTile(material):blank);
+        const cutout=material?.shaderType==="cutout" && material?.style!=="shadow";
+        const coverage=cutout?alphaCoverage(pixels,0.5):0;
+        let width=this.tileSize,height=this.tileSize;
+        for(let level=0;level<this.mipLevels;level++){
+          gl.texSubImage3D(gl.TEXTURE_2D_ARRAY,level,0,0,layer,width,height,1,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+          if(level+1<this.mipLevels){const nextWidth=Math.max(1,width>>1),nextHeight=Math.max(1,height>>1);pixels=downsampleMaterialMip(pixels,width,height,cutout?coverage:null);width=nextWidth;height=nextHeight;}
+        }
+      }
+      const filter=this.quality==="pixel"?gl.NEAREST:this.quality==="high"?gl.LINEAR_MIPMAP_LINEAR:gl.NEAREST_MIPMAP_LINEAR;
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,filter);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_S,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_T,gl.REPEAT);
+      if(this.quality==="high") {const ext=gl.getExtension?.("EXT_texture_filter_anisotropic");if(ext)gl.texParameterf(gl.TEXTURE_2D_ARRAY,ext.TEXTURE_MAX_ANISOTROPY_EXT,Math.min(4,gl.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));}
+      assertGpuUpload(gl,"texture array upload");
+      const old=this.texture;this.texture=next;if(old)gl.deleteTexture(old);
+      this.byteLength=0;for(let l=0;l<this.mipLevels;l++)this.byteLength+=Math.max(1,this.tileSize>>l)**2*this.layerCount*4;
+      return next;
+    }catch(error){gl.deleteTexture(next);throw error;}
+    finally{gl.bindTexture(gl.TEXTURE_2D_ARRAY,null);}
   }
-
-  uploadLayer(layerIndex, imageOrCanvas) {
-    const gl = this.gl;
-    if (!this.texture) this.createTextureArray();
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.texture);
-    if (imageOrCanvas instanceof Uint8Array) {
-      gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layerIndex, this.tileSize, this.tileSize, 1, gl.RGBA, gl.UNSIGNED_BYTE, imageOrCanvas);
-    } else {
-      gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layerIndex, this.tileSize, this.tileSize, 1, gl.RGBA, gl.UNSIGNED_BYTE, imageOrCanvas);
+  uploadLayer(layerIndex, source) {
+    if(!Number.isInteger(layerIndex)||layerIndex<0||layerIndex>=this.layerCount)throw new RangeError("Texture layer out of range");
+    let pixels=source;
+    if(!(pixels instanceof Uint8Array)){
+      const canvas=source?.getContext?source:globalThis.document?.createElement("canvas");
+      if(!canvas)throw new TypeError("Texture layer requires RGBA bytes or a readable image/canvas");
+      if(canvas!==source){canvas.width=this.tileSize;canvas.height=this.tileSize;canvas.getContext("2d").drawImage(source,0,0,this.tileSize,this.tileSize);}
+      pixels=new Uint8Array(canvas.getContext("2d").getImageData(0,0,this.tileSize,this.tileSize).data);
     }
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
+    if(pixels.byteLength!==this.tileSize*this.tileSize*4)throw new RangeError("Texture layer RGBA byte length mismatch");
+    const old=this.layerOverrides.get(layerIndex);this.layerOverrides.set(layerIndex,pixels);
+    try{return this.createTextureArray();}catch(error){if(old)this.layerOverrides.set(layerIndex,old);else this.layerOverrides.delete(layerIndex);throw error;}
   }
 
   bind(unit = 0) {
@@ -461,3 +480,18 @@ function clamp(value, min, max) {
 function clampByte(value) {
   return Math.max(0, Math.min(255, Math.trunc(value)));
 }
+
+export function alphaCoverage(pixels, cutoff=0.5){let covered=0;for(let i=3;i<pixels.length;i+=4)if(pixels[i]/255>=cutoff)covered++;return covered/Math.max(1,pixels.length/4);}
+export function downsampleMaterialMip(source,width,height,targetCoverage=null){
+  const w=Math.max(1,width>>1),h=Math.max(1,height>>1),out=new Uint8Array(w*h*4);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+    const sums=[0,0,0,0];let samples=0;
+    for(let dy=0;dy<2;dy++)for(let dx=0;dx<2;dx++){const sx=Math.min(width-1,x*2+dx),sy=Math.min(height-1,y*2+dy),o=(sx+sy*width)*4;for(let c=0;c<4;c++)sums[c]+=source[o+c];samples++;}
+    for(let c=0;c<4;c++)out[(x+y*w)*4+c]=Math.round(sums[c]/samples);
+  }
+  // Preserve the nearest achievable discrete cutout coverage. At a 1x1 mip the
+  // quantization error is inherent; choose the closest covered/empty result.
+  if(targetCoverage!==null){const alphas=[];for(let i=3;i<out.length;i+=4)alphas.push({i,a:out[i]});alphas.sort((a,b)=>b.a-a.a||a.i-b.i);const keep=Math.round(targetCoverage*alphas.length);for(let i=0;i<alphas.length;i++)out[alphas[i].i]=i<keep?Math.max(128,alphas[i].a):Math.min(127,alphas[i].a);}
+  return out;
+}
+export function materialTileCacheStats(){let bytes=0;for(const tile of MATERIAL_TILE_CACHE.values())bytes+=tile.byteLength;return{entries:MATERIAL_TILE_CACHE.size,limit:MATERIAL_TILE_CACHE_LIMIT,bytes};}

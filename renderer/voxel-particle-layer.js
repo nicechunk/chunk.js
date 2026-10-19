@@ -79,7 +79,7 @@ out vec4 outColor;
 
 void main() {
   vec4 texel = vLayer >= 0.0
-    ? texture(uTextureArray, vec3(fract(vUv), floor(vLayer + 0.5)))
+    ? textureGrad(uTextureArray, vec3(fract(vUv), floor(vLayer + 0.5)), dFdx(vUv), dFdy(vUv))
     : vec4(1.0);
   float alpha = texel.a * vTint.a;
   if (alpha < 0.012) discard;
@@ -366,16 +366,16 @@ export class VoxelParticleLayer {
     return this.particles.length;
   }
 
-  render({ viewProjection, origin, lighting, textureArray = null }) {
-    if (!this.particles.length) return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength };
+  render({ viewProjection, origin, lighting, textureArray = null, particles = this.particles }) {
+    if (!particles.length) return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength };
     if (!this.program) this.init();
     const gl = this.gl;
-    const count = this.writeInstanceData();
+    const count = this.writeInstanceData(particles,origin);
     if (!count) return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength };
 
     gl.useProgram(this.program);
     gl.uniformMatrix4fv(this.uniforms.uViewProjection, false, viewProjection);
-    gl.uniform3f(this.uniforms.uWorldOrigin, origin.worldX, origin.worldY, origin.worldZ);
+    gl.uniform3f(this.uniforms.uWorldOrigin,0,0,0);
     const sun = lighting?.sunDirection ?? [-0.72, 0.34, 0.62];
     const sunColor = lighting?.sunColor ?? [1.0, 0.88, 0.62];
     const sky = lighting?.skyLightColor ?? [0.62, 0.78, 1.0];
@@ -406,16 +406,16 @@ export class VoxelParticleLayer {
     return { drawCalls: 1, triangles: count * CUBE_INDICES.length / 3, bufferMemory: this.byteLength };
   }
 
-  writeInstanceData() {
-    const count = Math.min(this.maxParticles, this.particles.length);
+  writeInstanceData(particles=this.particles, origin={worldX:0,worldY:0,worldZ:0}) {
+    const count = Math.min(this.maxParticles, particles.length);
     for (let index = 0; index < count; index += 1) {
-      const particle = this.particles[index];
+      const particle = particles[index];
       const fade = particleFade(particle);
       const shrink = 0.74 + fade * 0.26;
       const offset = index * PARTICLE_INSTANCE_FLOATS;
-      this.instanceData[offset] = particle.x;
-      this.instanceData[offset + 1] = particle.y;
-      this.instanceData[offset + 2] = particle.z;
+      this.instanceData[offset] = particle.x-origin.worldX;
+      this.instanceData[offset + 1] = particle.y-origin.worldY;
+      this.instanceData[offset + 2] = particle.z-origin.worldZ;
       this.instanceData[offset + 3] = Math.max(0.004, particle.scaleX * shrink);
       this.instanceData[offset + 4] = Math.max(0.004, particle.scaleY * shrink);
       this.instanceData[offset + 5] = Math.max(0.004, particle.scaleZ * shrink);
