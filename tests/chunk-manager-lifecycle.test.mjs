@@ -158,7 +158,7 @@ test("losing the last Worker releases queued chunks to synchronous fallback", ()
     assert.notEqual(first.buildState, "building");
     assert.notEqual(second.buildState, "queued");
 
-    manager.rebuildDirtyChunks(1000);
+    for (let frame = 0; frame < 20 && (!first.mesh || !second.mesh); frame++) manager.rebuildDirtyChunks(20);
     assert.equal(first.baseBlocksReady, true);
     assert.equal(second.baseBlocksReady, true);
     assert.ok(first.mesh);

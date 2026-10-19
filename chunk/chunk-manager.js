@@ -28,6 +28,9 @@ import {
   normalizeDelta,
 } from "./chunk-delta.js";
 import { meshChunkOpaqueFast, meshChunkVisual } from "./chunk-mesher.js";
+import { ensureRenderSections, buildRenderSection, commitRenderSection, sectionRevision, sectionDeltaValues, invalidateRenderSections, prepareRenderSnapshotInvalidation } from "./render-sections.js";
+import { chunkIntersectsCameraFrustum } from "../renderer/frustum.js";
+import { RenderStageStats } from "../debug/stats.js";
 
 const DEFAULT_MAX_BUILD_QUEUE = 768;
 const DEFAULT_VISIBILITY_LINGER_FRAMES = 12;
@@ -107,6 +110,10 @@ export class ChunkManager {
     this.lastRebuildMs = 0;
     this.lastWorkerBuildMs = 0;
     this.lastBuildError = null;
+    this.staleBuildResults = 0;
+    this.sectionBuildVisits = 0;
+    this.nearFieldRepairs = 0;
+    this.stageStats = new RenderStageStats();
     this.useWorkers = Boolean(useWorkers && typeof Worker !== "undefined");
     this.workerCount = this.useWorkers
       ? boundedManagerInteger(workerCount, 1, CHUNK_MANAGER_LIMITS.maxWorkers, "worker count")
@@ -132,6 +139,7 @@ export class ChunkManager {
     this.renderLogger = null;
     this.supplementalCollisionProvider = null;
     this.collisionColumnTopCache = new Map();
+    this.remoteOverlayChunks = new Set();
     this.visibilityFrame = 0;
     this.lastVisibilityCleanupFrame = 0;
     this.visibilityLingerFrames = boundedManagerInteger(
@@ -155,6 +163,10 @@ export class ChunkManager {
       CHUNK_MANAGER_LIMITS.maxQueuedBuilds,
       "maximum queued builds",
     );
+  }
+
+  setStageStats(stats) {
+    if(stats && typeof stats.record === "function")this.stageStats=stats;
   }
 
   setRenderLogger(logger) {
@@ -221,7 +233,10 @@ export class ChunkManager {
     }
     this.lastEnsuredRangeKey = rangeKey;
     for (const offset of buildLoadOffsets(this.preloadDistance, this.loadDirX, this.loadDirZ)) {
-      this.ensureChunk(centerX + offset.dx, centerZ + offset.dz);
+      // Reserve identities immediately, but do not reconstruct every new base
+      // column in this call when Workers are unavailable. The normal dirty
+      // scheduler generates near bases progressively under its task budget.
+      this.ensureChunk(centerX + offset.dx, centerZ + offset.dz, { deferBase: true });
     }
     this.dispatchBuilds();
   }
@@ -261,11 +276,14 @@ export class ChunkManager {
     this.ensureChunkRange(this.centerChunkX, this.centerChunkZ, { force: true });
   }
 
-  ensureChunk(chunkX, chunkZ) {
+  ensureChunk(chunkX, chunkZ, { deferBase = false } = {}) {
     if (this.disposed) throw new Error("Cannot use a disposed ChunkManager.");
     const id = chunkId(chunkX, chunkZ);
     let chunk = this.chunks.get(id);
-    if (chunk) return chunk;
+    if (chunk) {
+      if(!deferBase&&!this.useWorkers)this.ensureChunkBaseSync(chunk);
+      return chunk;
+    }
     chunk = new ChunkState({
       chunkX,
       chunkZ,
@@ -281,10 +299,22 @@ export class ChunkManager {
       baseBlocks: null,
       baseBlocksReady: false,
     });
+    chunk.prepareRenderSnapshotNeighborhood=(changes)=>this.prepareSnapshotNeighborhood(chunk,changes);
+    const manager=this;
+    chunk.prepareRenderSnapshotInvalidation=function*(next,changes,options) {
+      if(chunk.renderSections)return yield* prepareRenderSnapshotInvalidation(chunk,next,changes,options);
+      const neighborhood=yield* manager.prepareSnapshotNeighborhood(chunk,changes);
+      return {handlesNeighborhood:true,isCurrent:()=>!chunk.renderSections,commit(){neighborhood.commit();}};
+    };
+    chunk.onRemoteDeltasExpired=(deltas,mask)=>this.markBoundaryNeighborsDirty(chunk,mask,deltas);
+    chunk.onRemoteDeltasChanged=()=>{
+      if(this.chunks.get(id)===chunk&&chunk.remoteDeltas.size)this.remoteOverlayChunks.add(chunk);
+      else this.remoteOverlayChunks.delete(chunk);
+    };
     this.chunks.set(id, chunk);
     if (this.useWorkers) {
       this.enqueueBuild(chunk);
-    } else {
+    } else if(!deferBase) {
       this.ensureChunkBaseSync(chunk);
     }
     return chunk;
@@ -293,7 +323,12 @@ export class ChunkManager {
   unloadFarChunks(centerX, centerZ) {
     const limit = this.preloadDistance + 2;
     for (const [id, chunk] of Array.from(this.chunks.entries())) {
-      if (Math.max(Math.abs(chunk.chunkX - centerX), Math.abs(chunk.chunkZ - centerZ)) > limit) this.chunks.delete(id);
+      if (Math.max(Math.abs(chunk.chunkX - centerX), Math.abs(chunk.chunkZ - centerZ)) > limit) {
+        const edits=[...chunk.getFinalDeltaMap().values()];
+        this.chunks.delete(id);
+        this.remoteOverlayChunks.delete(chunk);
+        if(edits.length)this.markBoundaryNeighborsDirty(chunk,15,edits);
+      }
     }
     this.buildQueue = this.buildQueue.filter((task) => this.chunks.has(task.id));
     this.completedBuilds = this.completedBuilds.filter((chunk) => this.chunks.has(chunk.id));
@@ -316,7 +351,7 @@ export class ChunkManager {
         this.visibleChunkMemory.delete(chunk.id);
         continue;
       }
-      if (chunkVisibleInCameraCone(chunk, cameraState, this)) {
+      if (chunkIntersectsCameraFrustum(chunk, cameraState)) {
         this.visibleChunkMemory.set(chunk.id, frame);
         chunks.push(chunk);
         continue;
@@ -343,6 +378,129 @@ export class ChunkManager {
     chunk?.markDirty();
   }
 
+  meshAccessForChunk(chunk) {
+    return {
+      getBlockAtWorld:(x,y,z)=>this.getBlockAtWorld(x,y,z),
+      getDeltaAtWorld:(x,y,z)=>this.getDeltaAtWorld(x,y,z),
+      getColumnTopAtWorld:(x,z)=>this.getOpaqueColumnTopAtWorld(x,z),
+      getWaterLevelAtWorld:(x,z,surface)=>this.getWaterLevelAtWorld(x,z,surface),
+      getNeighborDeltas:(index)=>this.neighborDeltaValues(chunk.chunkX,chunk.chunkZ,index),
+      treeDeltaCandidateCount:this.treeDeltaCandidateCountForChunk(chunk.chunkX,chunk.chunkZ),
+    };
+  }
+
+  invalidateLightingDependencies(source,deltas) {
+    // Seven sun samples reach 14.3 horizontal cells. This footprint is separate
+    // from the one-cell geometry halo and the tree/vegetation dependency.
+    const reach=15;
+    const changed=new Set();
+    for(const target of this.chunks.values()) {
+      if(target===source)continue;
+      const minX=target.chunkX*this.chunkSize,minZ=target.chunkZ*this.chunkSize;
+      const relevant=deltas.filter(d=>d.worldX>=minX-reach&&d.worldX<minX+this.chunkSize+reach&&d.worldZ>=minZ-reach&&d.worldZ<minZ+this.chunkSize+reach);
+      if(!relevant.length)continue;
+      if(!target.renderSections) {target.markDirty();changed.add(target);continue;}
+      for(const section of target.renderSections.values()) {
+        if(!section.mesh?.vertexCount&&!section.visualMesh?.vertexCount)continue;
+        if(section.originY>Math.max(...relevant.map(d=>d.worldY))+4)continue;
+        section.lightRevision++;section.dirty=true;section.visualDirty=true;
+        section.dirtyReason="sun-halo";section.oldestDirtyAt??=performance.now();
+      }
+      target.renderInvalidationPending=true;target.markDirty();changed.add(target);
+    }
+    return changed;
+  }
+
+  captureColumnTopHalo(chunk) {
+    const margin=15,width=this.chunkSize+2*margin;
+    const originX=chunk.chunkX*this.chunkSize-margin,originZ=chunk.chunkZ*this.chunkSize-margin;
+    const tops=new Int32Array(width*width);
+    for(let z=0;z<width;z++)for(let x=0;x<width;x++)tops[x+z*width]=this.getOpaqueColumnTopAtWorld(originX+x,originZ+z);
+    return {originX,originZ,width,tops};
+  }
+
+  *prepareSnapshotNeighborhood(source,changes) {
+    const plans=new Map(),reach=15,radius=Math.ceil(reach/this.chunkSize);
+    for(const delta of changes) {
+      for(let dz=-radius;dz<=radius;dz++)for(let dx=-radius;dx<=radius;dx++) {
+        if(dx===0&&dz===0)continue;
+        const cx=source.chunkX+dx,cz=source.chunkZ+dz,x=delta.worldX-cx*this.chunkSize,z=delta.worldZ-cz*this.chunkSize;
+        if(x< -reach||z< -reach||x>=this.chunkSize+reach||z>=this.chunkSize+reach)continue;
+        const id=chunkId(cx,cz);let plan=plans.get(id);
+        if(!plan)plans.set(id,plan={data:new Set(),light:new Set(),maxY:-Infinity,trees:false});
+        const y=delta.localY??delta.worldY;
+        if(x>=-1&&z>=-1&&x<=this.chunkSize&&z<=this.chunkSize)for(const sy of [y-1,y,y+1])plan.data.add(Math.floor((sy-this.minY)/16));
+        for(const sy of [y-4,y,y+4])plan.light.add(Math.floor((sy-this.minY)/16));
+        plan.maxY=Math.max(plan.maxY,y+4);
+        plan.trees ||= x>=-6&&z>=-6&&x<this.chunkSize+6&&z<this.chunkSize+6;
+        yield;
+      }
+    }
+    return {commit:()=>{
+      for(const [id,plan]of plans) {
+        const target=this.chunks.get(id);if(!target)continue;
+        if(!target.renderSections){target.markDirty();continue;}
+        let changed=false;
+        const treeSections=plan.trees?new Set((target.treeInstances??[]).map(tree=>Math.floor((tree.baseY-this.minY)/16))):null;
+        for(const [index,section]of target.renderSections) {
+          const geometry=plan.data.has(index)||treeSections?.has(index);
+          if(!geometry&&!plan.light.has(index)&&section.originY>plan.maxY)continue;
+          if(!geometry&&!section.mesh?.indexCount&&!section.visualMesh?.indexCount)continue;
+          if(geometry){section.dataRevision++;section.haloRevision++;}
+          section.lightRevision++;section.dirty=true;section.visualDirty=true;section.dirtyReason="atomic-neighbor-snapshot";section.oldestDirtyAt??=performance.now();changed=true;
+        }
+        if(changed){target.renderInvalidationPending=true;target.markDirty();}
+      }
+    }};
+  }
+
+  enqueueSectionBuilds(chunk) {
+    if(!this.useWorkers)return false;
+    const sections=ensureRenderSections(chunk);
+    let queued=false;
+    for(const section of sections.values()) {
+      if(!section.dirty&&(!section.visualDirty||performance.now()<section.visualRetryAt))continue;
+      if(section.buildState!=="ready"||this.buildQueue.length>=this.maxQueuedBuilds)continue;
+      section.buildState="queued";
+      this.buildQueue.push({id:chunk.id,chunk,sectionIndex:section.sectionIndex,chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,mode:"section",queuedAt:section.oldestDirtyAt??performance.now(),version:chunk.version});
+      queued=true;
+    }
+    this.buildQueueNeedsSort ||= queued;
+    return queued;
+  }
+
+  dispatchSectionBuild(worker,queued,chunk) {
+    const section=chunk.renderSections.get(queued.sectionIndex);
+    if(!section||(!section.dirty&&!section.visualDirty)){if(section)section.buildState="ready";return false;}
+    const taskId=this.taskSerial++,revision=sectionRevision(section,this.materialVersion),startedAt=performance.now();
+    const task={...queued,worker,chunk,version:chunk.version,sectionRevision:revision,materialVersion:this.materialVersion,phase:"chunk",cancelled:false,startedAt};
+    section.buildState="building";section.buildTaskId=taskId;
+    this.inFlightBuilds.set(taskId,task);
+    const finalDeltas=packDeltaValues(sectionDeltaValues(chunk,section.sectionIndex));
+    const neighborDeltas=this.neighborDeltasForWorker(chunk.chunkX,chunk.chunkZ,section.sectionIndex);
+    const treeDeltas=this.treeNeighborDeltasForWorker(chunk.chunkX,chunk.chunkZ,section.sectionIndex);
+    const lightingDeltas=this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,8,section.sectionIndex);
+    const columnTopHalo=this.captureColumnTopHalo(chunk);
+    try {
+      worker.postMessage({type:"buildChunk",taskId,worldSeed:new Uint8Array(managerWorldSeed(this)),chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,
+        generationVersion:this.generationVersion,resourceRuleVersion:this.resourceRuleVersion,materialVersion:this.materialVersion,
+        options:this.workerOptions(),mode:"section",taskVersion:task.version,sectionIndex:section.sectionIndex,sectionRevision:revision,
+        finalDeltas,neighborDeltas,treeDeltas,lightingDeltas,columnTopHalo,baseProfile:chunk.baseProfile,treeInstances:chunk.treeInstances,
+        visualOnly:!section.dirty},[finalDeltas.buffer,neighborDeltas.buffer,treeDeltas.buffer,lightingDeltas.buffer,columnTopHalo.tops.buffer]);
+    } catch(error) {this.handleWorkerError(worker,error,{allowRestart:false});}
+    return true;
+  }
+
+  commitLegacyWorkerMeshes(chunk,message,version) {
+    const previous=chunk.visualMesh,previousVersion=chunk.visualMeshVersion;
+    chunk.setMeshes(message.mesh,message.visualMesh??null,version);
+    if(message.visualError) {
+      chunk.visualMesh=previous;chunk.visualMeshVersion=previousVersion;
+      chunk.visualBuildError=message.visualError;chunk.dirty=true;
+      this.recordWorkerBuildFailure(chunk,message.visualError);
+    } else chunk.visualBuildError=null;
+  }
+
   rebuildDirtyChunks(budgetMs = DEFAULT_MESH_BUDGET_MS) {
     const start = performance.now();
     const rebuilt = this.drainCompletedBuilds();
@@ -352,37 +510,38 @@ export class ChunkManager {
     for (const chunk of dirty) {
       if (this.useWorkers) {
         if (chunk.buildState === "error" && !this.prepareWorkerBuildRetry(chunk, start)) continue;
-        if (chunk.baseBlocksReady) this.enqueueRemesh(chunk);
+        if (chunk.baseBlocksReady && chunk.renderSections) {
+          const near=Math.max(Math.abs(chunk.chunkX-this.centerChunkX),Math.abs(chunk.chunkZ-this.centerChunkZ))<=1;
+          if(near) {
+            const sections=[...chunk.renderSections.values()].filter(section=>section.dirty&&section.mesh).sort((a,b)=>(a.oldestDirtyAt??Infinity)-(b.oldestDirtyAt??Infinity));
+            for(const section of sections) {
+              const revision=sectionRevision(section,this.materialVersion);
+              const result=buildRenderSection(chunk,section,this.meshAccessForChunk(chunk));
+              if(commitRenderSection(chunk,section,result,revision)){rebuilt.push(chunk);this.nearFieldRepairs++;}
+              if(performance.now()-start>=budgetMs)break;
+            }
+          }
+          this.enqueueRemesh(chunk);
+        } else if (chunk.baseBlocksReady) this.enqueueRemesh(chunk);
         else this.enqueueBuild(chunk);
         if (performance.now() - start >= budgetMs) break;
         continue;
       }
       if (!chunk.baseBlocksReady) this.ensureChunkBaseSync(chunk);
-      const access = {
-        getBlockAtWorld: (x, y, z) => this.getBlockAtWorld(x, y, z),
-        getDeltaAtWorld: (x, y, z) => this.getDeltaAtWorld(x, y, z),
-        getColumnTopAtWorld: (x, z) => this.getOpaqueColumnTopAtWorld(x, z),
-        getWaterLevelAtWorld: (x, z, surface) => this.getWaterLevelAtWorld(x, z, surface),
-        treeDeltaCandidateCount: this.treeDeltaCandidateCountForChunk(chunk.chunkX, chunk.chunkZ),
-      };
-      const meshStartedAt = performance.now();
-      const mesh = meshChunkOpaqueFast(chunk, access);
-      const opaqueMeshMs = performance.now() - meshStartedAt;
-      const visualStartedAt = performance.now();
-      const visualMesh = meshChunkVisual(chunk, access);
-      const visualMeshMs = performance.now() - visualStartedAt;
-      chunk.setMeshes(mesh, visualMesh);
-      this.logRenderEvent("chunk-build-sync", {
-        chunkId: chunk.id,
-        chunkX: chunk.chunkX,
-        chunkZ: chunk.chunkZ,
-        elapsedMs: opaqueMeshMs + visualMeshMs,
-        opaqueMeshMs,
-        visualMeshMs,
-        triangles: (mesh?.triangleCount || 0) + (visualMesh?.triangleCount || 0),
-        bytes: (mesh?.vertices?.byteLength || 0) + (mesh?.indices?.byteLength || 0) + (visualMesh?.vertices?.byteLength || 0) + (visualMesh?.indices?.byteLength || 0),
-      });
-      rebuilt.push(chunk);
+      const access = this.meshAccessForChunk(chunk);
+      const sections=ensureRenderSections(chunk);
+      let changed=false;
+      for (const section of sections.values()) {
+        if (!section.dirty && (!section.visualDirty || performance.now()<section.visualRetryAt)) continue;
+        const revision=sectionRevision(section,this.materialVersion);
+        const result=buildRenderSection(chunk,section,access,{visualOnly:!section.dirty});
+        if(commitRenderSection(chunk,section,result,revision))changed=true;
+        this.sectionBuildVisits+=result.voxelVisits;
+        this.stageStats.record("mesh-build",result.elapsedMs);
+        this.logRenderEvent("section-build-sync",{chunkId:chunk.id,section:section.sectionIndex,generation:section.generation,revision,elapsedMs:result.elapsedMs,voxelVisits:result.voxelVisits,uniqueVoxelQueries:result.voxelQueries,voxelCacheBytes:result.voxelCacheBytes,lightCells:result.lighting?.cells??0,visualError:result.visualError});
+        if(performance.now()-start>=budgetMs)break;
+      }
+      if(changed)rebuilt.push(chunk);
       if (performance.now() - start >= budgetMs) break;
     }
     this.lastRebuildMs = performance.now() - start;
@@ -427,30 +586,30 @@ export class ChunkManager {
   getOpaqueColumnTopAtWorld(worldX, worldZ) {
     const x = Math.trunc(worldX);
     const z = Math.trunc(worldZ);
-    const generatedTop = terrainSurfaceHeight(this.config, x, z);
     const coord = worldToChunk(x, 0, z, this.chunkSize);
     const chunk = this.chunks.get(coord.chunkId);
+    const column=coord.localX+coord.localZ*this.chunkSize;
+    let generatedTop = Math.min(this.minY+this.height-1,chunk?.baseProfile?.surfaceY?.[column] ?? terrainSurfaceHeight(this.config,x,z));
+    if(chunk?.baseBlocks) {
+      generatedTop=this.minY-1;
+      for(let y=this.minY+this.height-1;y>=this.minY;y--)if(isTerrainMeshBlock(chunk.getBaseBlock(coord.localX,y,coord.localZ))){generatedTop=y;break;}
+    }
     if (!chunk || !hasDeltas(chunk)) return generatedTop;
-
+    ensureRenderSections(chunk);
+    const columnRevision=chunk.renderColumnRevisions.get(column)??0;
     const cacheKey = `${coord.chunkId}:${coord.localX}:${coord.localZ}`;
     const cached = this.collisionColumnTopCache.get(cacheKey);
-    if (
-      cached?.chunk === chunk
-      && cached.version === chunk.version
-      && cached.chainRevision === chunk.chainRevision
-    ) {
-      return cached.top;
-    }
+    if(cached?.chunk===chunk && cached.columnEpoch===chunk.renderColumnEpoch && cached.columnRevision===columnRevision) return cached.top;
 
     let affected = false;
     let candidateY = generatedTop;
-    for (const delta of finalDeltaValues(chunk)) {
-      if (delta.localX !== coord.localX || delta.localZ !== coord.localZ) continue;
+    ensureRenderSections(chunk);
+    for (const delta of chunk.renderDeltaColumns.get(coord.localX+coord.localZ*this.chunkSize)?.values() ?? []) {
       affected = true;
       if (isTerrainMeshBlock(delta.blockId)) candidateY = Math.max(candidateY, delta.localY);
     }
     if (!affected) {
-      this.cacheCollisionColumnTop(cacheKey, chunk, generatedTop);
+      this.cacheCollisionColumnTop(cacheKey, chunk, generatedTop, columnRevision);
       return generatedTop;
     }
 
@@ -460,11 +619,11 @@ export class ChunkManager {
         ? chunk.getFinalBlock(coord.localX, y, coord.localZ)
         : this.getTerrainCollisionBlockAtWorld(x, y, z);
       if (!isTerrainMeshBlock(blockId)) continue;
-      this.cacheCollisionColumnTop(cacheKey, chunk, y);
+      this.cacheCollisionColumnTop(cacheKey, chunk, y, columnRevision);
       return y;
     }
     const top = this.minY - 1;
-    this.cacheCollisionColumnTop(cacheKey, chunk, top);
+    this.cacheCollisionColumnTop(cacheKey, chunk, top, columnRevision);
     return top;
   }
 
@@ -550,7 +709,7 @@ export class ChunkManager {
     return -Infinity;
   }
 
-  cacheCollisionColumnTop(key, chunk, top) {
+  cacheCollisionColumnTop(key, chunk, top, columnRevision = null) {
     if (this.collisionColumnTopCache.size >= COLLISION_COLUMN_CACHE_LIMIT && !this.collisionColumnTopCache.has(key)) {
       this.collisionColumnTopCache.delete(this.collisionColumnTopCache.keys().next().value);
     }
@@ -558,6 +717,8 @@ export class ChunkManager {
       chunk,
       version: chunk.version,
       chainRevision: chunk.chainRevision,
+      columnRevision,
+      columnEpoch: chunk.renderColumnEpoch,
       top,
     });
   }
@@ -613,6 +774,7 @@ export class ChunkManager {
   }
 
   applyChainDelta(chunkKeyOrDeltas, maybeDeltas) {
+    const startedAt=performance.now();
     const deltas = Array.isArray(chunkKeyOrDeltas) ? chunkKeyOrDeltas : maybeDeltas;
     const groups = groupDeltasByChunk(deltas, this);
     assertManagerResidentCapacity(groups, this, "chainDeltas");
@@ -621,8 +783,9 @@ export class ChunkManager {
       const chunk = this.ensureChunk(group.chunkX, group.chunkZ);
       const result = chunk.applyChainDelta(group.deltas);
       if (result.changed) changedChunks += 1;
-      this.markBoundaryNeighborsDirty(chunk, result.boundaryMask);
+      this.markBoundaryNeighborsDirty(chunk, result.boundaryMask, group.deltas);
     }
+    this.stageStats.record("delta-merge",performance.now()-startedAt);
     return { changedChunks };
   }
 
@@ -630,9 +793,41 @@ export class ChunkManager {
     const id = typeof idOrChunk === "string" ? idOrChunk : chunkId(idOrChunk?.chunkX ?? 0, idOrChunk?.chunkZ ?? 0);
     const chunk = this.chunks.get(id);
     if (!chunk) return { applied: false, reason: "chunk-unloaded", changed: false };
+    const previous = Array.from(chunk.getFinalDeltaMap().values());
     const result = chunk.replaceChainDeltas(deltas, options);
-    if (result.applied) this.markBoundaryNeighborsDirty(chunk, result.boundaryMask);
+    if (result.applied) this.markBoundaryNeighborsDirty(chunk, result.boundaryMask, [...previous,...deltas]);
     return result;
+  }
+
+  commitPreparedChainSnapshotForChunk(idOrChunk, preparation) {
+    const id=typeof idOrChunk==="string"?idOrChunk:chunkId(idOrChunk?.chunkX??0,idOrChunk?.chunkZ??0);
+    const chunk=this.chunks.get(id);
+    if(!chunk||chunk!==preparation?.chunk)return {applied:false,reason:"chunk-unloaded",changed:false};
+    const startedAt=performance.now();
+    const result=chunk.commitPreparedChainSnapshot(preparation);
+    this.stageStats.record("snapshot-commit",performance.now()-startedAt);
+    if(result.applied&&!preparation.renderPlan?.handlesNeighborhood)this.markBoundaryNeighborsDirty(chunk,result.boundaryMask,preparation.changes);
+    return result;
+  }
+
+  applyRemoteDelta(deltas, options={}) {
+    const groups=groupDeltasByChunk(deltas,this);
+    for(const group of groups.values()) {
+      const chunk=this.chunks.get(chunkId(group.chunkX,group.chunkZ));
+      if(!chunk)continue;
+      const result=chunk.applyRemoteDelta(group.deltas,options);
+      this.markBoundaryNeighborsDirty(chunk,result.boundaryMask,group.deltas);
+    }
+  }
+
+  expireRemoteDeltas(now=Date.now()) {
+    for(const chunk of this.remoteOverlayChunks) {
+      if(this.chunks.get(chunk.id)!==chunk||!chunk.remoteDeltas.size){this.remoteOverlayChunks.delete(chunk);continue;}
+      if(now<chunk.remoteDeltaExpiryAt)continue;
+      const changes=[...chunk.remoteDeltas.values()].filter(delta=>delta.expiresAt<=now);
+      const result=chunk.expireRemoteDeltas(now);
+      if(result.changed&&!chunk.onRemoteDeltasExpired)this.markBoundaryNeighborsDirty(chunk,result.boundaryMask,changes);
+    }
   }
 
   acknowledgeChainSnapshotForChunk(idOrChunk, options = {}) {
@@ -649,15 +844,17 @@ export class ChunkManager {
     const ids = chunkIds ? new Set(chunkIds) : null;
     for (const chunk of this.chunks.values()) {
       if (ids && !ids.has(chunk.id)) continue;
+      const previous = Array.from(chunk.chainDeltas.values());
       const result = chunk.clearChainDeltas();
       if (!result) continue;
       cleared += 1;
-      this.markBoundaryNeighborsDirty(chunk, result.boundaryMask);
+      this.markBoundaryNeighborsDirty(chunk, result.boundaryMask, previous);
     }
     return cleared;
   }
 
   applyPendingDelta(chunkKeyOrDeltas, maybeDeltas, maybeTxId) {
+    const startedAt=performance.now();
     const deltas = Array.isArray(chunkKeyOrDeltas) ? chunkKeyOrDeltas : maybeDeltas;
     const txId = Array.isArray(chunkKeyOrDeltas) ? maybeDeltas : maybeTxId;
     const groups = groupDeltasByChunk(deltas, this);
@@ -665,29 +862,35 @@ export class ChunkManager {
     for (const group of groups.values()) {
       const chunk = this.ensureChunk(group.chunkX, group.chunkZ);
       const result = chunk.applyPendingDelta(group.deltas, txId);
-      this.markBoundaryNeighborsDirty(chunk, result.boundaryMask);
+      this.markBoundaryNeighborsDirty(chunk, result.boundaryMask, group.deltas);
     }
+    this.stageStats.record("delta-merge",performance.now()-startedAt);
   }
 
-  confirmPendingDelta(txId) {
-    for (const chunk of this.chunks.values()) chunk.confirmPendingDelta(txId);
+  confirmPendingDelta(txId, confirmation = {}) {
+    for (const chunk of this.chunks.values()) chunk.confirmPendingDelta(txId, confirmation);
   }
 
   rollbackPendingDelta(txId) {
     for (const chunk of this.chunks.values()) {
+      const changes = [...chunk.pendingDeltas.values()].filter(delta => delta.txId === txId);
       const result = chunk.rollbackPendingDelta(txId);
-      if (result.rolledBack) this.markBoundaryNeighborsDirty(chunk, result.boundaryMask);
+      if (result.rolledBack) this.markBoundaryNeighborsDirty(chunk, result.boundaryMask, changes);
     }
   }
 
-  markBoundaryNeighborsDirty(chunk, boundaryMask = 0) {
+  markBoundaryNeighborsDirty(chunk, boundaryMask = 0, deltas = null) {
     const mask = Math.trunc(Number(boundaryMask) || 0);
-    if (!chunk || !mask) return 0;
+    if (!chunk) return 0;
+    const lit=deltas?.length?this.invalidateLightingDependencies(chunk,deltas):new Set();
+    if(!mask)return 0;
     let dirtied = 0;
     const mark = (chunkX, chunkZ) => {
       const neighbor = this.chunks.get(chunkId(chunkX, chunkZ));
       if (!neighbor) return;
-      neighbor.markDirty();
+      if(deltas?.length)invalidateRenderSections(neighbor,deltas.map(d=>({worldX:d.worldX,worldY:d.worldY,worldZ:d.worldZ,localY:d.localY??d.worldY})),"geometry-halo");
+      if(!lit.has(neighbor))neighbor.markDirty();
+      else neighbor.renderInvalidationPending=false;
       dirtied += 1;
     };
     if (mask & CHUNK_BOUNDARY_MASK.NEGATIVE_X) mark(chunk.chunkX - 1, chunk.chunkZ);
@@ -754,7 +957,25 @@ export class ChunkManager {
       workers: this.workers.length,
       lastBuildError: this.lastBuildError,
       failedBuilds: this.workerBuildFailures.size,
+      staleBuildResults: this.staleBuildResults,
+      sectionBuildVisits: this.sectionBuildVisits,
+      nearFieldRepairs: this.nearFieldRepairs,
+      remoteOverlayChunks: this.remoteOverlayChunks.size,
+      cpuStages: this.stageStats.snapshot(),
     };
+  }
+
+  diagnostics({maxEntries=64}={}) {
+    const entries=[],arrays=new Set();let cpuMeshBytes=0,oldestDirtyMs=0;
+    for(const chunk of this.chunks.values()) {
+    for(const summary of [chunk.mesh,chunk.visualMesh])for(const array of summary?.materializedArrays??[])if(!arrays.has(array.buffer)){arrays.add(array.buffer);cpuMeshBytes+=array.buffer.byteLength;}
+    for(const unit of chunk.renderSections?.values()??[chunk]) {
+      for(const mesh of [unit.mesh,unit.visualMesh])if(mesh&&!mesh.sectionSummary)for(const array of [mesh.vertices,mesh.indices])if(array&&!arrays.has(array.buffer)){arrays.add(array.buffer);cpuMeshBytes+=array.buffer.byteLength;}
+      const age=unit.oldestDirtyAt==null?0:performance.now()-unit.oldestDirtyAt;oldestDirtyMs=Math.max(oldestDirtyMs,age);
+      if(entries.length<Math.min(256,Math.max(0,maxEntries)))entries.push({id:unit.id,generation:unit.generation,worldVersion:chunk.version,authorityInputRevision:chunk.authorityInputRevision,dataRevision:unit.dataRevision,haloRevision:unit.haloRevision,lightRevision:unit.lightRevision,meshVersion:unit.meshVersion,visualMeshVersion:unit.visualMeshVersion,gpuUploaded:unit.gpuUploaded,visualGpuUploaded:unit.visualGpuUploaded,dirty:unit.dirty,visualDirty:unit.visualDirty,dirtyReason:unit.dirtyReason,ageMs:age,visualError:unit.visualError});
+    }
+    }
+    return {...this.stats(),cpuMeshBytes,oldestDirtyMs,columnTopCacheEntries:this.collisionColumnTopCache.size,entries};
   }
 
   dispose() {
@@ -771,8 +992,10 @@ export class ChunkManager {
     this.settledWorkerTaskIds = new WeakMap();
     this.completedBuilds.length = 0;
     this.workerBuildFailures.clear();
+    this.remoteOverlayChunks.clear();
     this.consecutiveWorkerFailures = 0;
     this.dispatchScheduled = false;
+    for(const chunk of this.chunks.values())for(const section of chunk.renderSections?.values()??[]){section.buildState="ready";section.buildTaskId=null;}
     this.useWorkers = false;
     this.workerCount = 0;
     this.activeBuildLimit = 0;
@@ -834,6 +1057,8 @@ export class ChunkManager {
     for (const [taskId, task] of Array.from(this.inFlightBuilds.entries())) {
       if (task.worker !== worker) continue;
       const chunk = this.chunks.get(task.id);
+      const section=chunk?.renderSections?.get(task.sectionIndex);
+      if(section&&section.buildTaskId===taskId){section.buildTaskId=null;section.buildState="ready";}
       const obsolete = task.cancelled
         || !chunk
         || (task.phase === "chunk" && chunk.buildTaskId !== taskId);
@@ -927,6 +1152,7 @@ export class ChunkManager {
     this.idleWorkers = [];
     this.buildQueue.length = 0;
     this.inFlightBuilds.clear();
+    for(const chunk of this.chunks.values())for(const section of chunk.renderSections?.values()??[]){section.buildState="ready";section.buildTaskId=null;}
     this.useWorkers = false;
     this.workerCount = 0;
     this.activeBuildLimit = 0;
@@ -954,6 +1180,7 @@ export class ChunkManager {
   }
 
   enqueueRemesh(chunk) {
+    if(chunk?.renderSections)return this.enqueueSectionBuilds(chunk);
     if (!this.useWorkers || !chunk?.baseBlocksReady || !chunk.dirty || chunk.buildState === "queued" || chunk.buildState === "building") return false;
     if (this.buildQueue.length >= this.maxQueuedBuilds) return false;
     chunk.markQueued();
@@ -982,7 +1209,7 @@ export class ChunkManager {
     if (!this.useWorkers || !this.idleWorkers.length || !this.buildQueue.length) return;
     const activeLimit = Math.max(0, Math.min(this.workerCount, Math.trunc(this.activeBuildLimit || 0)));
     if (this.inFlightBuilds.size >= activeLimit) return;
-    if (this.buildQueueNeedsSort) {
+    if (this.buildQueueNeedsSort || this.buildQueue.length) {
       this.buildQueue.sort((a, b) => taskPriority(a, this) - taskPriority(b, this));
       this.buildQueueNeedsSort = false;
     }
@@ -990,8 +1217,12 @@ export class ChunkManager {
       const worker = this.idleWorkers.pop();
       const task = this.buildQueue.shift();
       const chunk = this.chunks.get(task.id);
+      if(task.mode==="section") {
+        if(!chunk||chunk!==task.chunk||!this.dispatchSectionBuild(worker,task,chunk))this.idleWorkers.push(worker);
+        continue;
+      }
       const staleBase = task.mode !== "remesh" && chunk?.baseBlocksReady;
-      const staleRemesh = task.mode === "remesh" && (!chunk?.baseBlocksReady || !chunk.dirty || chunk.version !== task.version);
+      const staleRemesh = task.mode === "remesh" && (!chunk?.baseBlocksReady || !chunk.dirty);
       if (!chunk || staleBase || staleRemesh) {
         if (chunk && staleRemesh && chunk.buildState === "queued") chunk.markBuildStale();
         this.idleWorkers.push(worker);
@@ -1000,7 +1231,7 @@ export class ChunkManager {
       // A base build may wait in the queue while initial world deltas arrive.
       // Snapshot the latest revision at dispatch so the first mesh can include
       // those deltas instead of immediately scheduling an identical remesh.
-      if (task.mode !== "remesh") task.version = chunk.version;
+      task.version = chunk.version;
       let finalDeltas;
       let neighborDeltas;
       let treeDeltas;
@@ -1021,6 +1252,7 @@ export class ChunkManager {
       chunk.markBuilding(taskId);
       this.inFlightBuilds.set(taskId, {
         worker,
+        chunk,
         id: chunk.id,
         chunkX: chunk.chunkX,
         chunkZ: chunk.chunkZ,
@@ -1056,11 +1288,15 @@ export class ChunkManager {
         finalDeltas,
         neighborDeltas,
         treeDeltas,
+        lightingDeltas: this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,8),
+        columnTopHalo: this.captureColumnTopHalo(chunk),
       };
       const transfer = [];
       if (finalDeltas.byteLength) transfer.push(finalDeltas.buffer);
       if (neighborDeltas.byteLength) transfer.push(neighborDeltas.buffer);
       if (treeDeltas.byteLength) transfer.push(treeDeltas.buffer);
+      if (message.columnTopHalo) transfer.push(message.columnTopHalo.tops.buffer);
+      if (message.lightingDeltas.byteLength) transfer.push(message.lightingDeltas.buffer);
       try {
         worker.postMessage(message, transfer);
       } catch (error) {
@@ -1097,7 +1333,7 @@ export class ChunkManager {
     }
     const task = validation.task;
     const chunk = this.chunks.get(task.id);
-    if (task.phase === "chunk" && (!chunk || chunk.buildTaskId !== message.taskId)) task.cancelled = true;
+    if (task.phase === "chunk" && (!chunk || (task.sectionIndex!==undefined ? chunk!==task.chunk||chunk.renderSections?.get(task.sectionIndex)?.buildTaskId!==message.taskId : chunk.buildTaskId!==message.taskId))) task.cancelled = true;
 
     if (message.type === "chunkBuildError" || message.type === "visualBuildError") {
       const error = new Error(message.error || (message.type === "visualBuildError" ? "Visual build failed." : "Chunk build failed."));
@@ -1178,7 +1414,24 @@ export class ChunkManager {
 
   applyWorkerBuildResult(message, timingTask = null) {
     const chunk = this.chunks.get(chunkId(message.chunkX, message.chunkZ));
+    if(timingTask?.sectionIndex!==undefined) {
+      const section=chunk?.renderSections?.get(timingTask.sectionIndex);
+      if(!section||chunk!==timingTask.chunk||section.buildTaskId!==message.taskId)return;
+      if(message.sectionRevision!==timingTask.sectionRevision||!commitRenderSection(chunk,section,message,timingTask.sectionRevision)) {
+        section.buildState="ready";section.buildTaskId=null;this.staleBuildResults++;
+      } else this.completedBuilds.push(chunk);
+      return;
+    }
     if (!chunk || chunk.buildTaskId !== message.taskId) return;
+    if(message.sectionResults) {
+      if(message.baseProfile)chunk.setBaseProfile(message.baseProfile,message.treeInstances,this.baseBlockResolverForChunk(message.chunkX,message.chunkZ,message.baseProfile));
+      const sections=ensureRenderSections(chunk);
+      if(!timingTask || (chunk===timingTask.chunk&&chunk.version===timingTask.version&&message.materialVersion===this.materialVersion)) {
+        for(const result of message.sectionResults){const section=sections.get(result.sectionIndex);if(section)commitRenderSection(chunk,section,result,sectionRevision(section,this.materialVersion));}
+        this.completedBuilds.push(chunk);
+      } else {chunk.markBuildStale();this.staleBuildResults++;}
+      return;
+    }
     this.workerBuildFailures.delete(chunk.id);
     if (timingTask && (chunk.version !== timingTask.version || message.taskVersion !== timingTask.version || message.materialVersion !== this.materialVersion)) {
       if (!chunk.baseBlocksReady && message.baseProfile) {
@@ -1193,7 +1446,7 @@ export class ChunkManager {
         return;
       }
       this.lastWorkerBuildMs = Number(message.elapsedMs) || 0;
-      chunk.setMeshes(message.mesh, message.visualMesh ?? null, timingTask.version);
+      this.commitLegacyWorkerMeshes(chunk,message,timingTask.version);
       this.logWorkerBuildDone("chunk-remesh-done", chunk, message, timingTask);
       this.completedBuilds.push(chunk);
       return;
@@ -1205,7 +1458,7 @@ export class ChunkManager {
       chunk.markDirty();
       return;
     }
-    chunk.setMeshes(message.mesh, message.visualMesh ?? null, timingTask?.version ?? message.taskVersion);
+    this.commitLegacyWorkerMeshes(chunk,message,timingTask?.version ?? message.taskVersion);
     this.logWorkerBuildDone("chunk-build-done", chunk, message, timingTask);
     this.completedBuilds.push(chunk);
   }
@@ -1326,41 +1579,52 @@ export class ChunkManager {
       maxBuildY: this.maxBuildY,
       seaLevel: this.seaLevel,
       maxTerrainHeight: this.maxTerrainHeight,
+      renderSections: true,
       generationVersion: this.generationVersion,
       resourceRuleVersion: this.resourceRuleVersion,
     };
   }
 
-  neighborDeltasForWorker(chunkX, chunkZ) {
-    const deltas = [];
-    for (let dz = -1; dz <= 1; dz += 1) {
-      for (let dx = -1; dx <= 1; dx += 1) {
-        if (dx === 0 && dz === 0) continue;
-        const chunk = this.chunks.get(chunkId(chunkX + dx, chunkZ + dz));
-        if (!chunk) continue;
-        for (const delta of finalDeltaValues(chunk)) {
-          if (!deltaTouchesTargetBoundary(delta, dx, dz, this.chunkSize)) continue;
-          appendWorkerDelta(deltas, delta);
-        }
-      }
-    }
-    return packDeltaValues(deltas);
+  neighborDeltasForWorker(chunkX, chunkZ, sectionIndex = null) {
+    const values=[];
+    for(const delta of this.neighborDeltaValues(chunkX,chunkZ,sectionIndex))appendWorkerDelta(values,delta);
+    return packDeltaValues(values);
   }
 
-  treeNeighborDeltasForWorker(chunkX, chunkZ) {
+  neighborDeltaValues(chunkX, chunkZ, sectionIndex = null) {
     const deltas = [];
     for (let dz = -1; dz <= 1; dz += 1) {
       for (let dx = -1; dx <= 1; dx += 1) {
         if (dx === 0 && dz === 0) continue;
         const chunk = this.chunks.get(chunkId(chunkX + dx, chunkZ + dz));
         if (!chunk) continue;
-        for (const delta of finalDeltaValues(chunk)) {
-          if (deltaTouchesTargetVisualMargin(delta, dx, dz, this.chunkSize, 2)) appendWorkerDelta(deltas, delta);
+        for (const delta of sectionIndex===null?finalDeltaValues(chunk):sectionDeltaValues(chunk,sectionIndex)) {
+          if (!deltaTouchesTargetBoundary(delta, dx, dz, this.chunkSize)) continue;
+          if(deltas.length>=DELTA_RESOURCE_LIMITS.maxWorkerPayloadEntries)throw workerDeltaLimitError();
+          deltas.push(delta);
         }
       }
     }
-    return packDeltaValues(deltas);
+    return deltas;
   }
+
+  treeNeighborDeltasForWorker(chunkX, chunkZ, sectionIndex = null) {
+    return this.visualDeltasForWorker(chunkX,chunkZ,6,sectionIndex);
+  }
+
+  visualDeltasForWorker(chunkX,chunkZ,margin,sectionIndex = null) {
+    const values=[],radius=Math.ceil(margin/this.chunkSize);
+    for(let dz=-radius;dz<=radius;dz++)for(let dx=-radius;dx<=radius;dx++) {
+      if(dx===0&&dz===0)continue;
+      const chunk=this.chunks.get(chunkId(chunkX+dx,chunkZ+dz));if(!chunk)continue;
+      for(const delta of sectionIndex===null?finalDeltaValues(chunk):sectionDeltaValues(chunk,sectionIndex)) {
+        const x=delta.worldX-chunkX*this.chunkSize,z=delta.worldZ-chunkZ*this.chunkSize;
+        if(x>=-margin&&z>=-margin&&x<this.chunkSize+margin&&z<this.chunkSize+margin)appendWorkerDelta(values,delta);
+      }
+    }
+    return packDeltaValues(values);
+  }
+
 }
 
 function chunkDistance(chunk, center) {
@@ -1438,8 +1702,10 @@ function buildLoadOffsets(viewDistance, dirX, dirZ) {
 }
 
 function taskPriority(task, manager) {
-  const remeshPriority = task.mode === "remesh" ? -20000 : 0;
-  return remeshPriority + offsetPriority(task.chunkX - manager.centerChunkX, task.chunkZ - manager.centerChunkZ, manager.loadDirX, manager.loadDirZ);
+  const age = Math.max(0, performance.now() - (task.queuedAt ?? performance.now()));
+  const near = Math.max(Math.abs(task.chunkX-manager.centerChunkX),Math.abs(task.chunkZ-manager.centerChunkZ)) <= 1;
+  const remeshPriority = near && (task.mode === "remesh" || task.mode === "section") ? -2000 : 0;
+  return remeshPriority + offsetPriority(task.chunkX - manager.centerChunkX, task.chunkZ - manager.centerChunkZ, manager.loadDirX, manager.loadDirZ) - Math.min(40000, age * 4);
 }
 
 function offsetPriority(dx, dz, dirX, dirZ) {
@@ -1458,7 +1724,7 @@ function directionBucketKey(directionX, directionZ) {
 }
 
 function hasDeltas(chunk) {
-  return Boolean(chunk?.chainDeltas?.size || chunk?.pendingDeltas?.size);
+  return Boolean(chunk?.chainDeltas?.size || chunk?.pendingDeltas?.size || chunk?.remoteDeltas?.size);
 }
 
 function groupDeltasByChunk(deltas, manager) {

@@ -173,7 +173,7 @@ test("replaceChainDeltas rejects malformed revision, token, and slot metadata wi
   const cases = [
     ...invalidValues.map((value) => ({ field: "expectedChainRevision", value, message: /Expected chain revision/ })),
     ...[null, ...invalidValues].map((value) => ({ field: "snapshotToken", value, message: /Snapshot token/ })),
-    ...[null, ...invalidValues].map((value) => ({ field: "snapshotSlot", value, message: /Snapshot slot/ })),
+    ...invalidValues.map((value) => ({ field: "snapshotSlot", value, message: /Snapshot slot/ })),
   ];
 
   for (const { field, value, message } of cases) {
@@ -204,6 +204,8 @@ test("acknowledgeChainSnapshot applies the same strict metadata contract atomica
   const invalidValues = [null, "17", 1.5, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1];
   for (const field of ["snapshotToken", "snapshotSlot"]) {
     for (const value of invalidValues) {
+      // null is the explicit unknown-slot representation, never a fabricated zero.
+      if (field === "snapshotSlot" && value === null) continue;
       const options = {
         snapshotToken: chunk.chainSnapshotToken,
         snapshotSlot: chunk.chainSnapshotSlot,

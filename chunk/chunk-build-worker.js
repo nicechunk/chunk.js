@@ -9,6 +9,7 @@ import {
   waterLevelAt,
 } from "../world/world-generator.js";
 import { ChunkState } from "./chunk-state.js";
+import { ensureRenderSections,buildRenderSection } from "./render-sections.js";
 import { meshChunkOpaqueFast, meshChunkVisual } from "./chunk-mesher.js";
 import { compileSurfaceDecorationRules } from "../world/surface-decoration-rules.js";
 import { BLOCK_ID, isOpaqueSolidBlock } from "../world/block-registry.js";
@@ -35,10 +36,10 @@ self.onmessage = (event) => {
     const options = task.options || {};
     const config = configForTask(task, options);
     const baseStartedAt = performance.now();
-    const baseProfile = generateBaseChunkProfileFromConfig(config, task.chunkX, task.chunkZ, { cacheTreeCandidates: true });
+    const baseProfile = task.baseProfile || generateBaseChunkProfileFromConfig(config, task.chunkX, task.chunkZ, { cacheTreeCandidates: true });
     const baseMs = performance.now() - baseStartedAt;
     const treeStartedAt = performance.now();
-    const treeInstances = generateTreeInstancesForChunkFromConfig(config, task.chunkX, task.chunkZ, baseProfile);
+    const treeInstances = task.treeInstances || generateTreeInstancesForChunkFromConfig(config, task.chunkX, task.chunkZ, baseProfile);
     const treeMs = performance.now() - treeStartedAt;
     const chunk = new ChunkState({
       chunkX: task.chunkX,
@@ -61,16 +62,27 @@ self.onmessage = (event) => {
     const deltaColumns = new Map();
     appendPackedDeltaOverrides(deltaOverrides, task.finalDeltas, deltaColumns);
     appendPackedDeltaOverrides(deltaOverrides, task.neighborDeltas, deltaColumns);
+    appendPackedDeltaOverrides(deltaOverrides, task.lightingDeltas, deltaColumns);
     const treeDeltaOverrides = new Map();
     appendPackedDeltaOverrides(treeDeltaOverrides, task.finalDeltas);
     appendPackedDeltaOverrides(treeDeltaOverrides, task.treeDeltas);
     const access = {
       getBlockAtWorld: (x, y, z) => deltaOverrides.get(`${x}:${y}:${z}`) ?? generatedBlockAt(config, x, y, z),
       getDeltaAtWorld: (x, y, z) => treeDeltaOverrides.get(`${x}:${y}:${z}`) ?? null,
-      getColumnTopAtWorld: (x, z) => deltaAwareGeneratedColumnTop(config, x, z, deltaOverrides, deltaColumns, options),
+      getColumnTopAtWorld: (x,z) => capturedColumnTop(task.columnTopHalo,x,z) ?? deltaAwareGeneratedColumnTop(config,x,z,deltaOverrides,deltaColumns,options),
       getWaterLevelAtWorld: (x, z) => generatedColumnAt(config, x, z).water,
       treeDeltaCandidateCount: treeDeltaOverrides.size,
+      neighborDeltas: unpackPackedDeltas(task.neighborDeltas),
     };
+    if(task.sectionIndex !== undefined || options.renderSections) {
+      const sections=ensureRenderSections(chunk);
+      const indices=task.sectionIndex!==undefined?[task.sectionIndex]:[...sections.keys()];
+      const results=indices.map(index=>({sectionIndex:index,...buildRenderSection(chunk,sections.get(index),access,{visualOnly:Boolean(task.visualOnly)})}));
+      const response={type:"chunkBuilt",taskId:task.taskId,chunkX:task.chunkX,chunkZ:task.chunkZ,mode:task.mode||"base",taskVersion:task.taskVersion,materialVersion:task.materialVersion,
+        sectionRevision:task.sectionRevision,baseProfile:task.mode==="base"?baseProfile:null,treeInstances:task.mode==="base"?treeInstances:null,
+        ...(task.sectionIndex!==undefined?results[0]:{sectionResults:results}),visualPending:false,elapsedMs:performance.now()-startedAt};
+      self.postMessage(response,transferablesForBuild(response));return;
+    }
     const opaqueStartedAt = performance.now();
     const mesh = meshChunkOpaqueFast(chunk, access);
     const opaqueMeshMs = performance.now() - opaqueStartedAt;
@@ -193,8 +205,8 @@ function isTerrainMeshBlock(blockId) {
 }
 
 function transferablesForBuild(message) {
-  const transfer = [message.mesh.vertices.buffer, message.mesh.indices.buffer];
-  if (message.visualMesh) transfer.push(message.visualMesh.vertices.buffer, message.visualMesh.indices.buffer);
+  const transfer = [];
+  for(const result of message.sectionResults ?? [message]) for(const mesh of [result.mesh,result.visualMesh]) if(mesh)transfer.push(mesh.vertices.buffer,mesh.indices.buffer);
   const profile = message.baseProfile;
   if (profile) {
     for (const field of ["surfaceY", "waterY", "surfaceBlock"]) {
@@ -262,4 +274,15 @@ function localProfileBlockResolver(config, task, options, profile) {
     const water = storedWater === profile.noWater ? null : storedWater;
     return getBaseBlockAtColumnConfig(config, worldX, localY, worldZ, surface, water, profile.surfaceBlock?.[columnIndex]);
   };
+}
+
+function unpackPackedDeltas(packed) {
+  if(!packed)return [];
+  if(!(packed instanceof Int32Array))return packed;
+  const values=[];for(let i=0;i<packed.length;i+=4)values.push({worldX:packed[i],worldY:packed[i+1],worldZ:packed[i+2],blockId:packed[i+3]});return values;
+}
+
+function capturedColumnTop(halo,x,z) {
+  if(!halo)return null;const lx=x-halo.originX,lz=z-halo.originZ;
+  return lx>=0&&lz>=0&&lx<halo.width&&lz<halo.width?halo.tops[lx+lz*halo.width]:null;
 }

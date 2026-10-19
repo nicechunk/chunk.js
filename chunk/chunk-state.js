@@ -11,6 +11,8 @@ import {
 } from "../world/world-generator.js";
 import { DELTA_RESOURCE_LIMITS, deltaKey, normalizeDelta } from "./chunk-delta.js";
 
+import { confirmationProtection, mayReplaceProtectedDelta, optionalSnapshotSlot, REMOTE_DELTA_TTL_MS } from "./chunk-authority.js";
+
 const chunkStateWorldSeeds = new WeakMap();
 
 export const CHUNK_BOUNDARY_MASK = Object.freeze({
@@ -66,6 +68,9 @@ export class ChunkState {
     });
     this.surfaceDecorationRules = surfaceDecorationRules;
     this.version = 0;
+    // Authority preparation depends on actual voxel/overlay/base inputs, not
+    // render-only neighbour halo and lighting invalidations of `version`.
+    this.authorityInputRevision = 0;
     // World edits can advance while the previous mesh is still on the GPU.
     // These revisions only advance when a replacement mesh has finished.
     this.meshVersion = -1;
@@ -77,11 +82,16 @@ export class ChunkState {
     this.treeInstances = treeInstances;
     this.chainDeltas = new Map();
     this.unobservedChainDeltaKeys = new Set();
+    this.confirmedDeltaProtection = new Map();
+    this.remoteDeltas = new Map();
+    this.remoteDeltaExpiryAt = Infinity;
+    this.authorityEpoch = 1;
+    this.authorityNow = () => Date.now();
     this.pendingDeltas = new Map();
     this.finalDeltaMapCache = null;
     this.chainRevision = 0;
     this.chainSnapshotToken = 0;
-    this.chainSnapshotSlot = 0;
+    this.chainSnapshotSlot = null;
     this.finalBlocks = null;
     this.mesh = null;
     this.visualMesh = null;
@@ -128,10 +138,13 @@ export class ChunkState {
 
   getFinalBlock(localX, localY, localZ) {
     if (!containsLocal(localX, localY, localZ, this)) return BLOCK_ID.air;
-    if (!this.pendingDeltas.size && !this.chainDeltas.size) return this.getBaseBlock(localX, localY, localZ);
+    this.expireRemoteDeltas();
+    if (!this.pendingDeltas.size && !this.chainDeltas.size && !this.remoteDeltas.size) return this.getBaseBlock(localX, localY, localZ);
     const key = deltaKey(localX, localY, localZ, this.chunkSize);
     const pending = this.pendingDeltas.get(key);
     if (pending) return pending.blockId;
+    const remote = this.remoteDeltas.get(key);
+    if (remote) return remote.blockId;
     const chain = this.chainDeltas.get(key);
     if (chain) return chain.blockId;
     return this.getBaseBlock(localX, localY, localZ);
@@ -140,27 +153,75 @@ export class ChunkState {
   revealStateAt(localX, localY, localZ) {
     const key = deltaKey(localX, localY, localZ, this.chunkSize);
     if (this.pendingDeltas.has(key)) return REVEAL_STATE.DIRTY;
+    if (this.remoteDeltas.has(key)) return REVEAL_STATE.MODIFIED;
     if (this.chainDeltas.has(key)) return REVEAL_STATE.CONFIRMED;
     return this.blockRevealStates.get(key) ?? this.revealState;
   }
 
   hasDeltaAt(localX, localY, localZ) {
-    if (!this.pendingDeltas.size && !this.chainDeltas.size) return false;
+    this.expireRemoteDeltas();
+    if (!this.pendingDeltas.size && !this.chainDeltas.size && !this.remoteDeltas.size) return false;
     const key = deltaKey(localX, localY, localZ, this.chunkSize);
-    return this.pendingDeltas.has(key) || this.chainDeltas.has(key);
+    return this.pendingDeltas.has(key) || this.remoteDeltas.has(key) || this.chainDeltas.has(key);
   }
 
   getFinalDeltaMap() {
-    if (!this.pendingDeltas.size) return this.chainDeltas;
-    if (!this.chainDeltas.size) return this.pendingDeltas;
+    this.expireRemoteDeltas();
+    if (!this.pendingDeltas.size && !this.remoteDeltas.size) return this.chainDeltas;
     if (this.finalDeltaMapCache) return this.finalDeltaMapCache;
     const merged = new Map(this.chainDeltas);
+    for (const [key, delta] of this.remoteDeltas) merged.set(key, delta);
     for (const [key, delta] of this.pendingDeltas) merged.set(key, delta);
     this.finalDeltaMapCache = merged;
     return merged;
   }
 
-  applyChainDelta(deltas = [], { protectUntilSnapshot = true } = {}) {
+  applyRemoteDelta(deltas = [], { ttlMs = REMOTE_DELTA_TTL_MS, now = this.authorityNow() } = {}) {
+    const normalized = normalizeDeltaBatch(deltas, this);
+    const next = new Map(this.remoteDeltas);
+    let boundaryMask = 0;
+    const expiresAt = now + Math.max(1, Math.min(REMOTE_DELTA_TTL_MS, Number(ttlMs) || REMOTE_DELTA_TTL_MS));
+    for (const delta of normalized) {
+      if (delta.chunkX !== this.chunkX || delta.chunkZ !== this.chunkZ) continue;
+      const key = deltaKey(delta.localX, delta.localY, delta.localZ, this.chunkSize);
+      // Unverified hints never replace a newer local confirmed/pending change.
+      if (this.pendingDeltas.has(key) || this.confirmedDeltaProtection.has(key)) continue;
+      if (next.size >= 2048 && !next.has(key)) continue;
+      next.set(key, { ...delta, source: "remote", expiresAt });
+      boundaryMask |= boundaryMaskForDelta(delta, this.chunkSize);
+    }
+    if (next.size === 0) return { applied: false, changed: false, boundaryMask: 0 };
+    this.remoteDeltas = next;
+    this.authorityInputRevision++;
+    this.onRemoteDeltasChanged?.();
+    this.remoteDeltaExpiryAt = Math.min(this.remoteDeltaExpiryAt, expiresAt);
+    this.finalDeltaMapCache = null;
+    this.invalidateRenderSections?.(normalized);
+    this.markDirty(REVEAL_STATE.MODIFIED, normalized);
+    return { applied: true, changed: true, boundaryMask };
+  }
+
+  expireRemoteDeltas(now = this.authorityNow()) {
+    if (now < this.remoteDeltaExpiryAt) return { changed: false, boundaryMask: 0 };
+    const expired = [];
+    let nextExpiry = Infinity;
+    for (const [key, delta] of this.remoteDeltas) {
+      if (delta.expiresAt <= now) { this.remoteDeltas.delete(key); expired.push(delta); }
+      else nextExpiry = Math.min(nextExpiry, delta.expiresAt);
+    }
+    this.remoteDeltaExpiryAt = nextExpiry;
+    this.onRemoteDeltasChanged?.();
+    if (!expired.length) return { changed: false, boundaryMask: 0 };
+    this.authorityInputRevision++;
+    this.finalDeltaMapCache = null;
+    this.invalidateRenderSections?.(expired);
+    this.markDirty(REVEAL_STATE.MODIFIED, expired);
+    const boundaryMask = expired.reduce((mask, delta) => mask | boundaryMaskForDelta(delta, this.chunkSize), 0);
+    this.onRemoteDeltasExpired?.(expired, boundaryMask);
+    return { changed: true, boundaryMask, deltas: expired };
+  }
+
+  applyChainDelta(deltas = [], { protectUntilSnapshot = true, confirmation = null } = {}) {
     const normalizedDeltas = normalizeDeltaBatch(deltas, this);
     assertProjectedResidentDeltaCapacity(this, normalizedDeltas, "chainDeltas");
     const nextChainDeltas = new Map(this.chainDeltas);
@@ -200,133 +261,167 @@ export class ChunkState {
       };
     }
     this.chainDeltas = nextChainDeltas;
+    this.authorityInputRevision++;
     this.unobservedChainDeltaKeys = nextUnobservedChainDeltaKeys;
+    for (const delta of normalizedDeltas) {
+      if (delta.chunkX !== this.chunkX || delta.chunkZ !== this.chunkZ) continue;
+      const key = deltaKey(delta.localX, delta.localY, delta.localZ, this.chunkSize);
+      if (protectUntilSnapshot) this.confirmedDeltaProtection.set(key, confirmationProtection(confirmation || {}, this.authorityNow()));
+      else this.confirmedDeltaProtection.delete(key);
+      this.remoteDeltas.delete(key);
+    }
+    this.onRemoteDeltasChanged?.();
+    this.invalidateRenderSections?.(normalizedDeltas);
     this.finalDeltaMapCache = null;
     this.chainRevision += 1;
     this.chainSnapshotToken = 0;
-    if (meshChanged || deltaChanged) this.markDirty(REVEAL_STATE.MODIFIED);
+    if (meshChanged || deltaChanged) this.markDirty(REVEAL_STATE.MODIFIED, normalizedDeltas);
     else this.revealState = REVEAL_STATE.MODIFIED;
     return { applied: accepted > 0, accepted, changed: meshChanged || deltaChanged, boundaryMask, chainRevision: this.chainRevision };
   }
 
-  replaceChainDeltas(deltas = [], { expectedChainRevision = null, snapshotToken = 0, snapshotSlot = 0 } = {}) {
-    const expected = expectedChainRevision === null
-      ? null
-      : nonNegativeSafeInteger(expectedChainRevision, "Expected chain revision");
-    const nextSnapshotToken = nonNegativeSafeInteger(snapshotToken, "Snapshot token");
-    const incomingSlot = nonNegativeSafeInteger(snapshotSlot, "Snapshot slot");
-    const normalizedDeltas = normalizeDeltaBatch(deltas ?? [], this);
-    for (const delta of normalizedDeltas) {
-      if (delta.chunkX !== this.chunkX || delta.chunkZ !== this.chunkZ) {
-        throw new RangeError(
-          `Chain snapshot delta belongs to chunk ${delta.chunkX},${delta.chunkZ}; expected ${this.id}.`,
-        );
-      }
-    }
+  replaceChainDeltas(deltas = [], options = {}) {
+    const preparation = this.prepareChainSnapshot(deltas, options);
+    while (!preparation.done) preparation.step({ maxEntries: 512, budgetMs: Infinity });
+    return this.commitPreparedChainSnapshot(preparation);
+  }
 
-    if (expected !== null && expected !== this.chainRevision) {
-      return { applied: false, reason: "stale-chain-revision", changed: false, chainRevision: this.chainRevision };
-    }
-    if (this.chainSnapshotSlot > 0 && incomingSlot < this.chainSnapshotSlot) {
-      return {
-        applied: false,
-        reason: "stale-chain-slot",
-        changed: false,
-        chainRevision: this.chainRevision,
-        chainSnapshotSlot: this.chainSnapshotSlot,
-      };
-    }
-
+  prepareChainSnapshot(deltas = [], options = {}) {
+    const expected = options.expectedChainRevision == null ? null : nonNegativeSafeInteger(options.expectedChainRevision, "Expected chain revision");
+    const token = nonNegativeSafeInteger(options.snapshotToken === undefined ? 0 : options.snapshotToken, "Snapshot token");
+    const slot = optionalSnapshotSlot(options.snapshotSlot);
+    const source = options.source || "rpc";
+    const snapshotCommitment = options.snapshotCommitment || "confirmed";
+    const now = this.authorityNow();
+    const metadata = { snapshotSlot: slot, snapshotCommitment, source, readStartedAt: options.readStartedAt ?? now, now };
+    const revision = this.chainRevision;
+    const worldVersion = this.version;
+    const inputRevision = this.authorityInputRevision;
+    const baseIdentity = { baseBlocks: this.baseBlocks, baseProfile: this.baseProfile, baseBlockResolver: this.baseBlockResolver, baseBlocksReady: this.baseBlocksReady, treeInstances: this.treeInstances, materialVersion: this.materialVersion, generationVersion: this.generationVersion, resourceRuleVersion: this.resourceRuleVersion, minY: this.minY, height: this.height, maxBuildY: this.maxBuildY, surfaceDecorationRules: this.surfaceDecorationRules };
+    const epoch = this.authorityEpoch;
+    const chunk = this;
     const next = new Map();
-    for (const normalized of normalizedDeltas) {
-      const delta = { ...normalized, source: "chain" };
-      next.set(deltaKey(delta.localX, delta.localY, delta.localZ, this.chunkSize), delta);
-    }
-
-    // A confirmed transaction can be newer than a lagging RPC node. Keep its
-    // delta until a full account snapshot has observed the same value once.
-    const nextUnobservedChainDeltaKeys = new Set(this.unobservedChainDeltaKeys);
-    for (const key of nextUnobservedChainDeltaKeys) {
-      const protectedDelta = this.chainDeltas.get(key);
-      if (!protectedDelta) {
-        nextUnobservedChainDeltaKeys.delete(key);
-        continue;
-      }
-      const observed = next.get(key);
-      if (observed?.blockId === protectedDelta.blockId) {
-        nextUnobservedChainDeltaKeys.delete(key);
-      } else {
-        next.set(key, protectedDelta);
-      }
-    }
-    assertResidentDeltaCapacity(next, this.pendingDeltas, this.id);
-
-    let meshChanged = false;
-    let deltaChanged = false;
+    const protections = new Map();
+    const protectedKeys = new Set();
+    const changes = [];
+    let renderPlan = null;
     let boundaryMask = 0;
-    for (const [key, beforeDelta] of this.chainDeltas) {
-      if (this.pendingDeltas.has(key)) continue;
-      const afterDelta = next.get(key);
-      if (beforeDelta?.blockId === afterDelta?.blockId) continue;
-      const sample = afterDelta ?? beforeDelta;
-      if (!sample) continue;
-      deltaChanged = true;
-      boundaryMask |= boundaryMaskForDelta(sample, this.chunkSize);
-      if (!meshChanged) {
-        const base = this.getBaseBlock(sample.localX, sample.localY, sample.localZ);
-        const before = beforeDelta?.blockId ?? base;
-        const after = afterDelta?.blockId ?? base;
-        if (before !== after) meshChanged = true;
+    let retained = 0;
+    let done = false;
+    let result = null;
+    const sourceDeltas = deltas ?? [];
+    const packed = sourceDeltas instanceof Int32Array;
+    if (packed && sourceDeltas.length % 4) throw new RangeError("Packed chunk deltas must contain four integers per entry.");
+    if ((packed ? sourceDeltas.length / 4 : sourceDeltas.length) > DELTA_RESOURCE_LIMITS.maxBatchEntries) throw deltaBatchEntryLimitError();
+    function *prepare() {
+      if (expected !== null && expected !== revision) { result = { applied: false, reason: "stale-chain-revision", changed: false }; return; }
+      if (chunk.chainSnapshotSlot !== null && (slot === null || slot < chunk.chainSnapshotSlot)) {
+        result = { applied: false, reason: "stale-chain-slot", changed: false }; return;
       }
+      for (let index = 0; index < sourceDeltas.length; index += packed ? 4 : 1) {
+        const raw = packed ? { worldX: sourceDeltas[index], worldY: sourceDeltas[index + 1], worldZ: sourceDeltas[index + 2], blockId: sourceDeltas[index + 3] } : sourceDeltas[index];
+        const delta = normalizeDelta(raw, chunk.chunkSize);
+        if (delta.worldY < chunk.minY || delta.worldY > chunk.maxBuildY) throw new RangeError(`Delta world Y must be an integer from the configured build minimum ${chunk.minY} to maximum ${chunk.maxBuildY}.`);
+        if (delta.chunkX !== chunk.chunkX || delta.chunkZ !== chunk.chunkZ) throw new RangeError(`Chain snapshot delta belongs to chunk ${delta.chunkX},${delta.chunkZ}; expected ${chunk.id}.`);
+        next.set(deltaKey(delta.localX, delta.localY, delta.localZ, chunk.chunkSize), { ...delta, source: "chain" });
+        yield;
+      }
+      for (const [key, protection] of chunk.confirmedDeltaProtection) {
+        const before = chunk.chainDeltas.get(key);
+        const after = next.get(key);
+        if (before && before.blockId !== (after?.blockId ?? chunk.getBaseBlock(before.localX, before.localY, before.localZ))
+            && !mayReplaceProtectedDelta(protection, metadata)) {
+          next.set(key, before); protections.set(key, protection); protectedKeys.add(key); retained += 1;
+        }
+        yield;
+      }
+      assertResidentDeltaCapacity(next, chunk.pendingDeltas, chunk.id);
+      for (const [key, before] of chunk.chainDeltas) {
+        const after = next.get(key);
+        if (before.blockId !== after?.blockId) { const delta = after ?? before; changes.push(delta); boundaryMask |= boundaryMaskForDelta(delta, chunk.chunkSize); }
+        yield;
+      }
+      for (const [key, after] of next) {
+        if (!chunk.chainDeltas.has(key)) { changes.push(after); boundaryMask |= boundaryMaskForDelta(after, chunk.chunkSize); }
+        yield;
+      }
+      // A complete RPC snapshot supersedes hints, including hints for records
+      // absent in the new account pair. Persistent cache is only a preview.
+      if (source === "rpc") for (const delta of chunk.remoteDeltas.values()) { changes.push(delta); boundaryMask |= boundaryMaskForDelta(delta, chunk.chunkSize); yield; }
+      if (chunk.prepareRenderSnapshotInvalidation) renderPlan = yield* chunk.prepareRenderSnapshotInvalidation(next, changes, { dropRemote: source === "rpc" });
+      result = { applied: true, changed: changes.length > 0, boundaryMask, deltaCount: next.size, retainedUnobserved: retained, chainRevision: revision + 1, snapshotToken: token, chainSnapshotSlot: slot };
     }
-    for (const [key, afterDelta] of next) {
-      if (this.chainDeltas.has(key) || this.pendingDeltas.has(key)) continue;
-      deltaChanged = true;
-      boundaryMask |= boundaryMaskForDelta(afterDelta, this.chunkSize);
-      if (!meshChanged && this.getBaseBlock(afterDelta.localX, afterDelta.localY, afterDelta.localZ) !== afterDelta.blockId) meshChanged = true;
-    }
-
-    this.chainDeltas = next;
-    this.unobservedChainDeltaKeys = nextUnobservedChainDeltaKeys;
-    this.finalDeltaMapCache = null;
-    this.chainRevision += 1;
-    this.chainSnapshotToken = nextSnapshotToken;
-    this.chainSnapshotSlot = Math.max(this.chainSnapshotSlot, incomingSlot);
-    if (meshChanged || deltaChanged) this.markDirty(REVEAL_STATE.MODIFIED);
-    else this.revealState = next.size ? REVEAL_STATE.CONFIRMED : (this.pendingDeltas.size ? REVEAL_STATE.DIRTY : REVEAL_STATE.REVEALED);
+    const iterator = prepare();
     return {
-      applied: true,
-      changed: meshChanged || deltaChanged,
-      boundaryMask,
-      deltaCount: next.size,
-      retainedUnobserved: this.unobservedChainDeltaKeys.size,
-      effectiveDeltas: Array.from(next.values()),
-      chainRevision: this.chainRevision,
-      snapshotToken: this.chainSnapshotToken,
-      chainSnapshotSlot: this.chainSnapshotSlot,
+      chunk, revision, worldVersion, inputRevision, baseIdentity, epoch, expected, options, next, protections, protectedKeys, changes,
+      get renderPlan() { return renderPlan; },
+      get done() { return done; },
+      get result() { return result; },
+      step({ maxEntries = 64, budgetMs = 1 } = {}) {
+        if (!done && (chunk.chainRevision !== revision || chunk.authorityEpoch !== epoch)) { done = true; result = { applied: false, reason: "stale-chain-revision", changed: false }; }
+        if (!done && (chunk.authorityInputRevision !== inputRevision || Object.entries(baseIdentity).some(([key, value]) => chunk[key] !== value))) { done = true; result = { applied: false, reason: "stale-world-revision", changed: false }; }
+        const started = performance.now();
+        let processed = 0;
+        while (!done && processed < Math.max(1, maxEntries)) {
+          const part = iterator.next(); done = part.done; processed += 1;
+          if (performance.now() - started >= budgetMs) break;
+        }
+        return { done, processed, elapsedMs: performance.now() - started };
+      },
     };
   }
 
-  acknowledgeChainSnapshot({ snapshotToken = 0, snapshotSlot = 0 } = {}) {
+  commitPreparedChainSnapshot(preparation) {
+    if (preparation.chunk !== this || preparation.epoch !== this.authorityEpoch || preparation.revision !== this.chainRevision) return { applied: false, reason: "stale-chain-revision", changed: false };
+    if (preparation.inputRevision !== this.authorityInputRevision || Object.entries(preparation.baseIdentity).some(([key, value]) => this[key] !== value)) return { applied: false, reason: "stale-world-revision", changed: false };
+    if (preparation.renderPlan?.isCurrent && !preparation.renderPlan.isCurrent()) return { applied: false, reason: "stale-world-revision", changed: false };
+    if (!preparation.done) return { applied: false, reason: "snapshot-not-prepared", changed: false };
+    const result = preparation.result;
+    if (!result?.applied) return result;
+    assertResidentDeltaCapacity(preparation.next, this.pendingDeltas, this.id);
+    this.chainDeltas = preparation.next;
+    this.authorityInputRevision++;
+    this.confirmedDeltaProtection = preparation.protections;
+    this.unobservedChainDeltaKeys = preparation.protectedKeys;
+    if ((preparation.options.source || "rpc") === "rpc") { this.remoteDeltas = new Map(); this.remoteDeltaExpiryAt = Infinity; this.onRemoteDeltasChanged?.(); }
+    this.finalDeltaMapCache = null;
+    this.chainRevision += 1;
+    this.chainSnapshotToken = result.snapshotToken;
+    this.chainSnapshotSlot = result.chainSnapshotSlot;
+    if (result.changed) {
+      if (preparation.renderPlan) preparation.renderPlan.commit();
+      else this.invalidateRenderSections?.(preparation.changes);
+      this.markDirty(REVEAL_STATE.MODIFIED, preparation.changes);
+    } else { preparation.renderPlan?.commit(); this.revealState = this.chainDeltas.size ? REVEAL_STATE.CONFIRMED : (this.pendingDeltas.size ? REVEAL_STATE.DIRTY : REVEAL_STATE.REVEALED); }
+    // Keep the old public result shape for callers that need final geometry;
+    // do not persist these effective values as a verified RPC account snapshot.
+    return Object.defineProperty({ ...result }, "effectiveDeltas", { enumerable: true, get: () => Array.from(this.chainDeltas.values()) });
+  }
+
+  acknowledgeChainSnapshot({ snapshotToken = 0, snapshotSlot = null } = {}) {
     const token = nonNegativeSafeInteger(snapshotToken, "Snapshot token");
-    const slot = nonNegativeSafeInteger(snapshotSlot, "Snapshot slot");
-    if (!token || token !== this.chainSnapshotToken || slot < this.chainSnapshotSlot) return false;
-    this.chainSnapshotSlot = Math.max(this.chainSnapshotSlot, slot);
+    const slot = optionalSnapshotSlot(snapshotSlot);
+    if (!token || token !== this.chainSnapshotToken || this.confirmedDeltaProtection.size || this.remoteDeltas.size || (this.chainSnapshotSlot !== null && (slot === null || slot < this.chainSnapshotSlot))) return false;
+    if(this.chainSnapshotSlot!==slot)this.authorityInputRevision++;
+    this.chainSnapshotSlot = slot;
     return true;
   }
 
   resetChainSnapshotAuthority() {
+    this.authorityEpoch += 1;
     this.chainSnapshotToken = 0;
-    this.chainSnapshotSlot = 0;
-    this.unobservedChainDeltaKeys.clear();
+    this.chainSnapshotSlot = null;
+    // Do not erase unobserved local confirmations when changing RPC endpoint.
   }
 
   clearChainDeltas() {
     if (!this.chainDeltas.size) {
       if (!this.chainSnapshotToken && !this.chainSnapshotSlot && !this.unobservedChainDeltaKeys.size) return false;
       this.unobservedChainDeltaKeys.clear();
+      this.confirmedDeltaProtection.clear();
       this.chainSnapshotToken = 0;
-      this.chainSnapshotSlot = 0;
+      this.chainSnapshotSlot = null;
+      this.authorityInputRevision++;
       return { cleared: true, changed: false, boundaryMask: 0 };
     }
     let meshChanged = false;
@@ -339,11 +434,13 @@ export class ChunkState {
       meshChanged ||= this.getFinalBlock(delta.localX, delta.localY, delta.localZ) !== this.getBaseBlock(delta.localX, delta.localY, delta.localZ);
     }
     this.chainDeltas.clear();
+    this.authorityInputRevision++;
     this.unobservedChainDeltaKeys.clear();
+    this.confirmedDeltaProtection.clear();
     this.finalDeltaMapCache = null;
     this.chainRevision += 1;
     this.chainSnapshotToken = 0;
-    this.chainSnapshotSlot = 0;
+    this.chainSnapshotSlot = null;
     if (meshChanged || deltaChanged) this.markDirty(this.pendingDeltas.size ? REVEAL_STATE.DIRTY : REVEAL_STATE.REVEALED);
     else this.revealState = this.pendingDeltas.size ? REVEAL_STATE.DIRTY : REVEAL_STATE.REVEALED;
     return { cleared: true, changed: meshChanged || deltaChanged, boundaryMask };
@@ -378,23 +475,28 @@ export class ChunkState {
     assertResidentDeltaCapacity(this.chainDeltas, nextPendingDeltas, this.id);
     if (!accepted) return { applied: false, accepted: 0, changed: false, boundaryMask: 0 };
     this.pendingDeltas = nextPendingDeltas;
+    this.authorityInputRevision++;
     this.finalDeltaMapCache = null;
-    if (meshChanged || deltaChanged) this.markDirty(REVEAL_STATE.DIRTY);
+    if (meshChanged || deltaChanged) { this.invalidateRenderSections?.(normalizedDeltas); this.markDirty(REVEAL_STATE.DIRTY, normalizedDeltas); }
     else this.revealState = REVEAL_STATE.DIRTY;
     return { applied: accepted > 0, accepted, changed: meshChanged || deltaChanged, boundaryMask };
   }
 
-  confirmPendingDelta(txId) {
+  confirmPendingDelta(txId, confirmation = {}) {
     let changed = false;
     for (const [key, delta] of Array.from(this.pendingDeltas.entries())) {
       if (delta.txId !== txId) continue;
       this.pendingDeltas.delete(key);
       this.chainDeltas.set(key, { ...delta, source: "chain" });
       this.unobservedChainDeltaKeys.add(key);
+      this.confirmedDeltaProtection.set(key, confirmationProtection(confirmation, this.authorityNow()));
+      this.remoteDeltas.delete(key);
       changed = true;
     }
     if (changed) this.revealState = REVEAL_STATE.CONFIRMED;
     if (changed) {
+      this.onRemoteDeltasChanged?.();
+      this.authorityInputRevision++;
       this.finalDeltaMapCache = null;
       this.chainRevision += 1;
       this.chainSnapshotToken = 0;
@@ -421,11 +523,13 @@ export class ChunkState {
     }
     if (meshChanged || deltaChanged) this.markDirty(REVEAL_STATE.CONFLICT);
     else if (changed) this.revealState = REVEAL_STATE.CONFLICT;
-    if (changed) this.finalDeltaMapCache = null;
+    if (changed) { this.finalDeltaMapCache = null; this.authorityInputRevision++; }
     return { rolledBack: changed, changed: meshChanged || deltaChanged, boundaryMask };
   }
 
   markDirty(state = REVEAL_STATE.DIRTY) {
+    if (this.renderSections && !this.renderInvalidationPending) this.invalidateRenderSections?.(null, "dependency");
+    this.renderInvalidationPending = false;
     this.dirty = true;
     this.version += 1;
     this.revealState = state;
@@ -457,6 +561,7 @@ export class ChunkState {
   }
 
   setBaseBlocks(baseBlocks, treeInstances = this.treeInstances) {
+    this.authorityInputRevision++;
     this.baseBlocks = baseBlocks ?? new Uint16Array(this.chunkSize * this.height * this.chunkSize);
     this.baseProfile = null;
     this.baseBlockResolver = null;
@@ -465,9 +570,11 @@ export class ChunkState {
     this.buildState = "ready";
     this.buildTaskId = null;
     this.buildError = null;
+    this.invalidateRenderSections?.(null,"base-blocks");
   }
 
   setBaseProfile(baseProfile, treeInstances = this.treeInstances, baseBlockResolver = null) {
+    this.authorityInputRevision++;
     this.baseBlocks = null;
     this.baseProfile = baseProfile ?? null;
     this.baseBlockResolver = typeof baseBlockResolver === "function" ? baseBlockResolver : null;
@@ -476,6 +583,7 @@ export class ChunkState {
     this.buildState = this.baseBlocksReady ? "ready" : "empty";
     this.buildTaskId = null;
     this.buildError = null;
+    this.invalidateRenderSections?.(null,"base-profile");
   }
 
   setMesh(mesh, meshVersion = this.version) {
@@ -605,6 +713,7 @@ function finalBlockFromMaps(chunk, delta, chainDeltas, pendingDeltas) {
   if (!containsLocal(delta.localX, delta.localY, delta.localZ, chunk)) return BLOCK_ID.air;
   const key = deltaKey(delta.localX, delta.localY, delta.localZ, chunk.chunkSize);
   return pendingDeltas.get(key)?.blockId
+    ?? chunk.remoteDeltas.get(key)?.blockId
     ?? chainDeltas.get(key)?.blockId
     ?? chunk.getBaseBlock(delta.localX, delta.localY, delta.localZ);
 }
@@ -631,4 +740,5 @@ function boundaryMaskForDelta(delta, chunkSize) {
 
 function setChunkStateWorldSeed(chunk, value) {
   chunkStateWorldSeeds.set(chunk, value == null ? null : normalizeSeedBytes(value));
+  if(Number.isSafeInteger(chunk.authorityInputRevision))chunk.authorityInputRevision++;
 }
