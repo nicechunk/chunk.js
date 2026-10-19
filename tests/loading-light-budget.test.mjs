@@ -5,6 +5,7 @@ import { bakeSectionLighting } from "../chunk/baked-light-field.js";
 import { buildRenderSection, ensureRenderSections, sectionDeltaValues } from "../chunk/render-sections.js";
 import { BLOCK_ID } from "../world/block-registry.js";
 import { createActualBuildWorker } from "./helpers/actual-build-worker.mjs";
+import { DEFAULT_SURFACE_DECORATION_RULES } from "../world/surface-decoration-rules.js";
 
 function sameMesh(actual,expected,label) {
   assert.equal(actual.originY,expected.originY,label+" origin");
@@ -13,8 +14,8 @@ function sameMesh(actual,expected,label) {
   assert.deepEqual(actual.indices,expected.indices,label+" topology");
 }
 
-for(const [cx,cz]of [[66,29],[0,0],[0,32],[-1,-1]])test(`generated section plan exactly matches the complete mesher at ${cx},${cz}`,()=>{
-  const manager=new ChunkManager({useWorkers:false,shadows:false});
+for(const [cx,cz]of [[66,29],[0,0],[0,32],[-1,-1],[72,28],[-32,32]])test(`generated section plan exactly matches the complete mesher at ${cx},${cz}`,()=>{
+  const manager=new ChunkManager({useWorkers:false,shadows:false,surfaceDecorationRules:DEFAULT_SURFACE_DECORATION_RULES});
   try {
     const chunk=manager.ensureChunk(cx,cz);
     for(const [dx,dz]of [[-1,0],[0,-1],[1,0],[0,1]])manager.ensureChunk(cx+dx,cz+dz);
@@ -24,6 +25,9 @@ for(const [cx,cz]of [[66,29],[0,0],[0,32],[-1,-1]])test(`generated section plan 
       {worldX:ox-1,worldY:-8,worldZ:oz+1,blockId:BLOCK_ID.air},
       {worldX:ox+3,worldY:299,worldZ:oz+3,blockId:BLOCK_ID.stone},
       {worldX:ox+4,worldY:299,worldZ:oz+3,blockId:BLOCK_ID.lava},
+      {worldX:ox+6,worldY:-7,worldZ:oz+5,blockId:BLOCK_ID.water},
+      {worldX:ox+7,worldY:-7,worldZ:oz+5,blockId:BLOCK_ID.ice},
+      {worldX:ox+8,worldY:-7,worldZ:oz+5,blockId:BLOCK_ID.moss},
     ],"cold-geometry-oracle");
     const access=manager.meshAccessForChunk(chunk),full={...access,generatedTerrain:false,noLocalLightSources:false};
     let skipped=0;

@@ -43,6 +43,9 @@ const WORKER_BUILD_RETRY_MAX_MS = 5000;
 const MAX_CONSECUTIVE_WORKER_FAILURES = 3;
 const COLLISION_COLUMN_CACHE_LIMIT = 4096;
 const MAX_GENERATED_TREE_TRUNK_HEIGHT = 7;
+const BUILD_CAMERA_FIELDS = ["worldX","worldY","worldZ","localOffsetX","localOffsetY","localOffsetZ",
+  "targetWorldX","targetWorldY","targetWorldZ","targetLocalOffsetX","targetLocalOffsetY","targetLocalOffsetZ",
+  "yaw","pitch","fov","aspect","near","far"];
 const managerWorldSeeds = new WeakMap();
 
 function isCameraOccluderBlock(blockId) {
@@ -110,6 +113,9 @@ export class ChunkManager {
     this.loadDirX = 0;
     this.loadDirZ = 1;
     this.loadDirectionKey = directionBucketKey(this.loadDirX, this.loadDirZ);
+    this.buildCamera = null;
+    this.buildFrustum = null;
+    this.buildVisibilityCache = new WeakMap();
     this.lastEnsuredRangeKey = "";
     this.lastRebuildMs = 0;
     this.lastWorkerBuildMs = 0;
@@ -253,6 +259,24 @@ export class ChunkManager {
     const nextDirectionKey = directionBucketKey(this.loadDirX, this.loadDirZ);
     if (nextDirectionKey !== this.loadDirectionKey) this.buildQueueNeedsSort = true;
     this.loadDirectionKey = nextDirectionKey;
+  }
+
+  setBuildCamera(cameraState = null) {
+    // This changes task order only. Frustum/radius checks for drawing and all
+    // background identities stay intact; turning reprioritizes queued work.
+    if(cameraState && this.buildCamera && BUILD_CAMERA_FIELDS.every(key=>Object.is(this.buildCamera[key],cameraState[key])))return;
+    if(!cameraState&&!this.buildCamera)return;
+    this.buildCamera = cameraState ? Object.fromEntries(BUILD_CAMERA_FIELDS.map(key=>[key,cameraState[key]])) : null;
+    this.buildFrustum = cameraState ? prepareCameraFrustum(cameraState) : null;
+    this.buildQueueNeedsSort = true;
+  }
+
+  chunkInBuildFrustum(chunk) {
+    const prior=this.buildVisibilityCache.get(chunk);
+    if(prior&&prior.frustum===this.buildFrustum&&prior.mesh===chunk.mesh&&prior.visualMesh===chunk.visualMesh)return prior.visible;
+    const visible=chunkIntersectsCameraFrustum(chunk,this.buildCamera,this.buildFrustum);
+    this.buildVisibilityCache.set(chunk,{frustum:this.buildFrustum,mesh:chunk.mesh,visualMesh:chunk.visualMesh,visible});
+    return visible;
   }
 
   setBuildConcurrencyLimit(limit = this.workerCount) {
@@ -1232,7 +1256,10 @@ export class ChunkManager {
   }
 
   enqueueRemesh(chunk) {
-    if(chunk?.renderSections)return this.enqueueSectionBuilds(chunk);
+    // If authority/material inputs supersede the first base build, none of its
+    // sections has ever been published. Rebuild that initial snapshot as one
+    // batch instead of paying one Worker round trip for every empty height layer.
+    if(chunk?.renderSections && chunk.mesh)return this.enqueueSectionBuilds(chunk);
     if (!this.useWorkers || !chunk?.baseBlocksReady || !chunk.dirty || chunk.buildState === "queued" || chunk.buildState === "building") return false;
     if (this.buildQueue.length >= this.maxQueuedBuilds) return false;
     chunk.markQueued();
@@ -1339,6 +1366,8 @@ export class ChunkManager {
         options: this.workerOptions(),
         mode: task.mode || "base",
         taskVersion: task.version,
+        baseProfile: task.mode === "remesh" ? chunk.baseProfile : null,
+        treeInstances: task.mode === "remesh" && chunk.baseProfile ? chunk.treeInstances : null,
         finalDeltas,
         pickedSurfaceColumns: chunk.pickedSurfaceColumns,
         neighborDeltas,
@@ -1765,7 +1794,12 @@ function taskPriority(task, manager, now) {
   // Nearby edits must reach a Worker before an old background streaming ring;
   // they no longer receive an unbudgeted main-thread compensation build.
   const remeshPriority = near && (task.mode === "remesh" || task.mode === "section") ? -50000 : 0;
-  return remeshPriority + offsetPriority(task.chunkX - manager.centerChunkX, task.chunkZ - manager.centerChunkZ, manager.loadDirX, manager.loadDirZ) - Math.min(40000, age * 4);
+  const chunk=manager.chunks.get(task.id);
+  const inView=manager.buildCamera && chunk
+    && Math.max(Math.abs(task.chunkX-manager.centerChunkX),Math.abs(task.chunkZ-manager.centerChunkZ))<=manager.viewDistance
+    && (near || manager.chunkInBuildFrustum(chunk));
+  const visiblePriority=manager.buildCamera && (near||inView) ? -20000 : 0;
+  return remeshPriority + visiblePriority + offsetPriority(task.chunkX - manager.centerChunkX, task.chunkZ - manager.centerChunkZ, manager.loadDirX, manager.loadDirZ) - Math.min(40000, age * 4);
 }
 
 function offsetPriority(dx, dz, dirX, dirZ) {

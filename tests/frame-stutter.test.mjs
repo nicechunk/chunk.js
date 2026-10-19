@@ -163,7 +163,7 @@ test('byte-limited asynchronous transfers remain atomic and pruning releases unp
     for(const bytes of [32,32,28]) {
       const start=prepare(r, [c],{maxUploads:1});assert.equal(start.uploadedBytes,bytes);
       assert.equal(c.gpuUploaded,false);
-      control.ready=true;const done=prepare(r, [c],{maxUploads:1});
+      control.ready=true;const done=prepare(r, [c],{maxUploads:0});
       assert.equal(done.uploaded,bytes===28?1:0);control.ready=false;
     }
     assert.equal(c.gpuUploaded,true);
@@ -200,4 +200,23 @@ test('GPU frame pacing bounds in-flight work with zero-time polling and disposes
     r.fenceSubmittedFrame();
   } finally { r.dispose(); }
   assert.equal(control.syncDeleted.length,3);
+});
+
+test('validated startup batches immediately feed the next bounded transfer and complete nearer water first',()=>{
+  const {renderer:r,chunk:near,control}=fixture();
+  near.visualMesh=mesh();near.visualMeshVersion=1;
+  const far={...near,id:'0,3',chunkZ:3,visualMesh:null};
+  try {
+    const first=prepare(r,[near,far],{maxUploads:1});
+    assert.equal(first.uploadedBytes,92);assert.equal(r.entryForChunk(near),null);
+    control.ready=true;
+    const next=prepare(r,[near,far],{maxUploads:1});
+    assert.equal(next.uploaded,1);assert.equal(next.uploadedBytes,92);
+    assert.ok(r.entryForChunk(near));assert.equal(r.entryForChunk(near,true),null);
+    assert.ok(r.uploadStaging.has('visual:0,0'),'near water must precede distant opaque geometry');
+    assert.equal(r.entryForChunk(far),null);
+    prepare(r,[near,far],{maxUploads:0});
+    assert.ok(r.entryForChunk(near,true));
+    assert.equal(r.entryForChunk(far),null);
+  }finally{r.dispose();}
 });

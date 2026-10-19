@@ -608,7 +608,7 @@ export class WebGL2VoxelRenderer {
   prepareChunksForRender(visibleChunks = [], { maxUploads = this.options.maxChunkUploadsPerFrame, cameraState = null } = {}) {
     if (!this.gpuReady()) return { uploaded: 0, pendingUploads: 0, paused: true };
     const settlement = this.settleDeferredUploads();
-    if(settlement.waiting || settlement.validated) return { uploaded: settlement.uploaded,
+    if(settlement.waiting) return { uploaded: settlement.uploaded,
       pendingUploads: this.pendingUploadSince.size, uploadedBytes: 0, validationPending: settlement.waiting };
     if(this.deferredUploadsSupported()) {
       this.pollFrameCompletion();
@@ -621,9 +621,12 @@ export class WebGL2VoxelRenderer {
     // above, then keep them out of repeated frustum/pass traversal.
     const chunks = this.filterChunksForCamera(sections.filter(chunk=>chunk?.mesh?.indexCount || chunk?.visualMesh?.indexCount), cameraState);
     const startedAt = performance.now(), limit = Math.max(0, Math.trunc(maxUploads ?? 0));
-    let uploaded=0, bytes=0, attempts=0,pendingUploads=0, oldestPendingMs=0;
+    let uploaded=settlement.uploaded, bytes=0, attempts=0,pendingUploads=0, oldestPendingMs=0;
     // A task is one chunk/section channel. Region membership never causes repacking.
-    for (const visual of [false,true]) for (const chunk of chunks) {
+    // Finish both channels of nearer sections before distant opaque work. A
+    // completed validation can feed this frame's bounded batch immediately;
+    // no draw/upload occurs behind an outstanding validation fence.
+    for (const chunk of chunks) for (const visual of [false,true]) {
       const mesh=chunk?.[visual?'visualMesh':'mesh']; if(!mesh?.indexCount)continue;
       const existing=this.entryForChunk(chunk,visual);
       if(existing?.token===meshIdentity(chunk,visual) && chunk[visual?'visualGpuUploaded':'gpuUploaded'])continue;
@@ -1503,6 +1506,7 @@ function committedMeshVersion(chunk, visual = false) {
 }
 
 function retireCommittedEmptyChunkBuffers(renderer, chunks) {
+  const retired=renderer.emptyChannelRetirements??=new WeakMap();
   for (const chunk of chunks) {
     if (!chunk) continue;
     retire(false);
@@ -1511,7 +1515,12 @@ function retireCommittedEmptyChunkBuffers(renderer, chunks) {
     function retire(visual) {
       const mesh = visual ? chunk?.visualMesh : chunk?.mesh;
       const revision = committedMeshVersion(chunk, visual);
-      if (revision < 0 || mesh?.indexCount) return;
+      if (revision < 0 || mesh?.indexCount) {const prior=retired.get(chunk);if(prior)prior[visual?1:0]=null;return;}
+      let state=retired.get(chunk);
+      const prior=state?.[visual?1:0];
+      if(prior&&prior.mesh===mesh&&prior.revision===revision&&prior.generation===renderer.contextGeneration)return;
+      if(!state){state=[];retired.set(chunk,state);}
+      state[visual?1:0]={mesh,revision,generation:renderer.contextGeneration};
       const buffers = visual ? renderer.visualChunkBuffers : renderer.chunkBuffers;
       const regions=visual?renderer.visualRegionBuffers:renderer.regionBuffers;
       const key=`${visual?'visual':'opaque'}:${chunk.id}`;

@@ -358,9 +358,11 @@ export function meshChunkVisual(chunkState, { getBlockAtWorld = null, getColumnT
     quadCount += appendTreeInstanceShadowQuads(chunkState, positions, indices);
     quadCount += appendGroundDetailLayerProfile(chunkState, positions, indices, getBlockAtWorld);
   } else {
+    const candidates=chunkState.generatedVisualProfile?.mask;
     for (let z = 0; z < size; z += 1) {
       for (let y = minY; y < minY + height; y += 1) {
         for (let x = 0; x < size; x += 1) {
+          if(candidates && !candidates[x+z*size+(y-minY)*size*size])continue;
           const blockId = chunkState.getFinalBlock(x, y, z);
           if (!isVisualBlock(blockId)) continue;
           if (isLowVegetationBlock(blockId)) {
@@ -1489,7 +1491,15 @@ function appendGroundDetailLayer(chunkState, vertices, indices, getBlockAtWorld)
   const maxY = minY + chunkState.height - 1;
   for (let z = 0; z < size; z += 1) {
     for (let x = 0; x < size; x += 1) {
-      for (let y = maxY; y >= minY; y -= 1) {
+      const generated=chunkState.generatedVisualProfile;
+      const unchanged=generated&&!generated.editedColumns.has(x+z*size);
+      const surface=unchanged?generated.profile.surfaceY[x+z*size]:maxY;
+      // In an unchanged generated column every lower cell is covered. The
+      // ordinary loop can only emit details on this one surface. Edited and
+      // custom columns retain the complete scan, including cave floors.
+      if(unchanged&&(surface<minY||surface>maxY))continue;
+      const lower=unchanged?surface:minY;
+      for (let y = surface; y >= lower; y -= 1) {
         const blockId = chunkState.getFinalBlock(x, y, z);
         if (!hasSurfaceDecorationRule(chunkState, blockId)) continue;
         const above = neighborBlock(chunkState, x, y + 1, z, getBlockAtWorld);
