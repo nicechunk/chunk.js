@@ -1,6 +1,7 @@
 import { DEFAULT_CHUNK_HEIGHT, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_TERRAIN_HEIGHT, DEFAULT_MESH_BUDGET_MS, DEFAULT_MIN_WORLD_Y, DEFAULT_SEA_LEVEL, DEFAULT_VIEW_DISTANCE } from "../core/constants.js";
 import { chunkId, worldToChunk } from "../core/coordinates.js";
-import { isBlockingBlock, isOpaqueSolidBlock, BLOCK_ID } from "../world/block-registry.js";
+import { isBlockingBlock, isOpaqueSolidBlock, blockFlags, BLOCK_ID } from "../world/block-registry.js";
+import { BLOCK_FLAGS } from "../core/constants.js";
 import { compileSurfaceDecorationRules } from "../world/surface-decoration-rules.js";
 import { SUNLIGHT_HORIZONTAL_REACH, SUNLIGHT_VERTICAL_REACH } from "../world/sunlight.js";
 import {
@@ -385,6 +386,19 @@ export class ChunkManager {
 
   meshAccessForChunk(chunk) {
     return {
+      generatedTerrain:Boolean(chunk.baseProfile&&!chunk.baseBlocks),
+      generatedSurfaceAtWorld:(x,z)=>terrainSurfaceHeight(this.config,x,z),
+      noLocalLightSources:()=>{
+        if(this.generationVersion!==5||!chunk.baseProfile||chunk.baseBlocks)return false;
+        const radius=Math.ceil(8/this.chunkSize);
+        for(let dz=-radius;dz<=radius;dz++)for(let dx=-radius;dx<=radius;dx++) {
+          const neighbor=this.chunks.get(chunkId(chunk.chunkX+dx,chunk.chunkZ+dz));
+          if(neighbor?.baseBlocks||neighbor?.baseProfile?.surfaceBlock?.some(id=>blockFlags(id)&BLOCK_FLAGS.EMISSIVE))return false;
+          if(!neighbor||!hasDeltas(neighbor))continue;
+          for(const delta of neighbor.getFinalDeltaMap().values())if(blockFlags(delta.blockId)&BLOCK_FLAGS.EMISSIVE)return false;
+        }
+        return true;
+      },
       getBlockAtWorld:(x,y,z)=>this.getBlockAtWorld(x,y,z),
       getDeltaAtWorld:(x,y,z)=>this.getDeltaAtWorld(x,y,z),
       getColumnTopAtWorld:(x,z)=>this.getOpaqueColumnTopAtWorld(x,z),

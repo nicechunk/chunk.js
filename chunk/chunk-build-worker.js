@@ -12,7 +12,8 @@ import { ChunkState } from "./chunk-state.js";
 import { ensureRenderSections,buildRenderSection } from "./render-sections.js";
 import { meshChunkOpaqueFast, meshChunkVisual } from "./chunk-mesher.js";
 import { compileSurfaceDecorationRules } from "../world/surface-decoration-rules.js";
-import { BLOCK_ID, isOpaqueSolidBlock } from "../world/block-registry.js";
+import { BLOCK_ID, isOpaqueSolidBlock, blockFlags } from "../world/block-registry.js";
+import { BLOCK_FLAGS } from "../core/constants.js";
 
 let surfaceDecorationRules = compileSurfaceDecorationRules([]);
 let surfaceDecorationRulesRevision = 0;
@@ -69,6 +70,11 @@ self.onmessage = (event) => {
     appendPackedDeltaOverrides(treeDeltaOverrides, task.finalDeltas);
     appendPackedDeltaOverrides(treeDeltaOverrides, task.treeDeltas);
     const access = {
+      generatedTerrain: true,
+      generatedSurfaceAtWorld: (x,z) => generatedColumnAt(config,x,z).surface,
+      noLocalLightSources: config.generationVersion===5
+        && !baseProfile.surfaceBlock?.some(id => blockFlags(id) & BLOCK_FLAGS.EMISSIVE)
+        && !Array.from(deltaOverrides.values()).some(id => blockFlags(id) & BLOCK_FLAGS.EMISSIVE),
       getBlockAtWorld: (x, y, z) => deltaOverrides.get(`${x}:${y}:${z}`) ?? generatedBlockAt(config, x, y, z),
       getDeltaAtWorld: (x, y, z) => treeDeltaOverrides.get(`${x}:${y}:${z}`) ?? null,
       getColumnTopAtWorld: (x,z) => capturedColumnTop(task.columnTopHalo,x,z) ?? deltaAwareGeneratedColumnTop(config,x,z,deltaOverrides,deltaColumns,options),

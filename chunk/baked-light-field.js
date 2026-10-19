@@ -39,26 +39,32 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     if(emissive[i])localSeeds++;
   };
   const maxDistance=Math.floor(14/attenuation);
+  const noLocalLightSources=(typeof access.noLocalLightSources==="function"?access.noLocalLightSources():access.noLocalLightSources)===true;
   const sunlight=chunk.shadows===false?null:createDirectionalSunlight({
     getColumnTopAtWorld:(x,z)=>access.getColumnTopAtWorld?.(x,z)??chunk.minY+chunk.height,
     getBlockAtWorld:access.getBlockAtWorld,
   });
   // Cache finite-radius transport by cell and remaining distance. Adjacent wall
   // corners reuse the same subproblems instead of each walking the air volume.
-  const transportCache=Array.from({length:maxDistance+1},()=>new Uint16Array(count));
+  let transportCache=null;
   const transport=(i,x,y,z,remaining)=>{
-    const cached=transportCache[remaining][i];
+    const cached=transportCache?.[remaining]?.[i];
     if(cached)return cached-1;
     readCell(i,x,y,z);
     let sky=!solid[i]&&oy+y>columnTop(x,z)?15:0,local=emissive[i]?15:0;
+    // Canonical generated terrain has no emissive blocks. The immutable edit
+    // snapshot can prove this too. An outdoor sky seed is then already final;
+    // do not walk six neighbours to search for a source that does not exist.
+    if(noLocalLightSources&&sky===15)return 240;
     if(remaining>0&&!solid[i])for(const [dx,dy,dz]of STEPS){
       const nx=x+dx,ny=y+dy,nz=z+dz;
       if(nx<0||ny<0||nz<0||nx>=width||nz>=width||ny>=height)continue;
       const value=transport(index(nx,ny,nz),nx,ny,nz,remaining-1);
       sky=Math.max(sky,(value>>>4)-attenuation);local=Math.max(local,(value&15)-attenuation);
-      if(sky===15&&local===15)break;
+      if((sky===15&&local===15)||(noLocalLightSources&&sky>=15-attenuation))break;
     }
     const encoded=(sky<<4)|local;
+    transportCache??=Array.from({length:maxDistance+1},()=>new Uint16Array(count));
     transportCache[remaining][i]=encoded+1;
     return encoded;
   };
@@ -97,5 +103,6 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     }
     mesh.lightEncoding="sun4-sky4-local4-v1";
   }
-  return {cells:sampledCells,domainCells:count,radius,skySeeds,localSeeds,samples:samples.size,sunlight:sunlight?.stats??null};
+  return {cells:sampledCells,domainCells:count,radius,skySeeds,localSeeds,samples:samples.size,sunlight:sunlight?.stats??null,
+    transportCacheBytes:transportCache?.reduce((total,field)=>total+field.byteLength,0)??0};
 }

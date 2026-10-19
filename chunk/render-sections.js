@@ -8,6 +8,45 @@ import { SUNLIGHT_HORIZONTAL_REACH, SUNLIGHT_VERTICAL_REACH } from "../world/sun
 export const RENDER_SECTION_HEIGHT = 16;
 let generationSerial = 1;
 let submissionSerial = 1;
+const generatedPlans = new WeakMap();
+
+// Canonical generated terrain has no buried cavities. Chain/halo edits still
+// enumerate their exact affected sections; custom/dense worlds use the full path.
+function generatedSectionPlan(chunk, access) {
+  if (!access.generatedTerrain || typeof access.generatedSurfaceAtWorld!=="function" || !chunk.baseProfile || chunk.baseBlocks) return null;
+  const cached = generatedPlans.get(access);
+  if (cached?.chunk === chunk && cached.version === chunk.version && cached.profile === chunk.baseProfile) return cached.sections;
+  let lower = Infinity, upper = -Infinity;
+  const profile = chunk.baseProfile;
+  for (let i = 0; i < chunk.chunkSize * chunk.chunkSize; i++) {
+    lower = Math.min(lower, profile.surfaceY[i]);
+    upper = Math.max(upper, profile.surfaceY[i] + 1);
+    if (profile.waterY[i] !== profile.noWater) upper = Math.max(upper, profile.waterY[i] + 1);
+  }
+  // A lower adjacent column can expose a chunk-edge cliff. Include the complete
+  // one-cell geometry halo, using generated height rather than edited column tops.
+  const ox = chunk.chunkX * chunk.chunkSize, oz = chunk.chunkZ * chunk.chunkSize;
+  for (let offset = -1; offset <= chunk.chunkSize; offset++) {
+    for (const [x,z] of [[offset,-1],[offset,chunk.chunkSize],[-1,offset],[chunk.chunkSize,offset]]) {
+      const surface = access.generatedSurfaceAtWorld(ox+x,oz+z);
+      if (!Number.isFinite(surface)) return null;
+      lower = Math.min(lower,surface);
+    }
+  }
+  // The first three subsurface cells may use biome-specific non-opaque material.
+  const sections = new Set([0]);
+  const first=Math.max(0,sectionIndexAt(chunk,lower-4));
+  const last=Math.min(Math.ceil(chunk.height/RENDER_SECTION_HEIGHT)-1,sectionIndexAt(chunk,upper));
+  for (let index = first; index <= last; index++) sections.add(index);
+  for (const tree of chunk.treeInstances ?? []) sections.add(sectionIndexAt(chunk,tree.baseY));
+  const deltas = [...chunk.getFinalDeltaMap().values(), ...(access.neighborDeltas ?? access.getNeighborDeltas?.() ?? [])];
+  for (const delta of deltas) {
+    const y = delta.localY ?? delta.worldY;
+    for (const sample of [y-1,y,y+1]) sections.add(sectionIndexAt(chunk,sample));
+  }
+  generatedPlans.set(access,{chunk,version:chunk.version,profile:chunk.baseProfile,sections});
+  return sections;
+}
 
 export function sectionIndexAt(chunk, y) {
   return Math.floor((y - chunk.minY) / RENDER_SECTION_HEIGHT);
@@ -183,6 +222,13 @@ export function sectionDeltaValues(chunk, index, marginSections = 1) {
 
 export function buildRenderSection(chunk, section, access = {}, { visualOnly = false } = {}) {
   const startedAt=performance.now();
+  const plan=generatedSectionPlan(chunk,access);
+  if (plan && !plan.has(section.sectionIndex)) {
+    const empty=()=>prepareMeshDrawRanges({...emptySectionMesh(chunk,section),sectionIndex:section.sectionIndex});
+    return {mesh:visualOnly?null:empty(),visualMesh:empty(),visualError:null,lighting:undefined,
+      skippedGeneratedEmpty:true,voxelQueries:0,voxelVisits:0,voxelCacheBytes:0,
+      opaqueCellBudget:0,elapsedMs:performance.now()-startedAt};
+  }
   const view=Object.create(chunk);
   view.minY=section.originY; view.height=section.height; view.renderOriginY=section.originY;
   view.baseProfile=null;
