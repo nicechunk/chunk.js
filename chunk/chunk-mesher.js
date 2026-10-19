@@ -634,6 +634,12 @@ export function buildDebugVisualModelAssets() {
 const RESOURCE_DROP_PREVIEW_CACHE_LIMIT = 48;
 const resourceDropPreviewCache = new Map();
 const RESOURCE_DROP_MODEL_DEFS = Object.freeze({
+  [BLOCK_ID.stoneFragment]: resourceDropModel("stone_fragment", "loose stone fragment", "A single angular gray stone with a broad broken face and beveled ends.", 0x53544f4e, (vertices, indices) => {
+    const layer = materialDef(blockDef(BLOCK_ID.stoneFragment).materialId).textureLayer;
+    let quads = appendTaperedPrism(vertices, indices, .48, .10, .50, .50, .46, .49, .38, .32, .68, .52, layer, 218);
+    quads += appendTaperedPrism(vertices, indices, .50, .46, .49, .56, .69, .47, .68, .52, .30, .24, layer, 238);
+    return quads;
+  }),
   [BLOCK_ID.twig]: resourceDropModel("twig", "forked dry twig", "A slender brown branch with a short side fork and pale broken tips.", 0x54574947, (vertices,indices) => {
     const layer=materialDef(blockDef(BLOCK_ID.twig).materialId).textureLayer;
     let quads=appendTaperedPrism(vertices,indices,.44,.06,.5,.54,.86,.5,.07,.07,.035,.035,layer,220);
