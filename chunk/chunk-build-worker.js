@@ -87,6 +87,31 @@ self.onmessage = (event) => {
       const jobs=task.sectionJobs ?? (task.sectionIndex!==undefined
         ? [{sectionIndex:task.sectionIndex,sectionRevision:task.sectionRevision,visualOnly:task.visualOnly}]
         : [...sections.keys()].map(sectionIndex=>({sectionIndex})));
+      if (task.progressiveSections === true) {
+        const preferredY = Number.isFinite(task.preferredSectionY) ? task.preferredSectionY
+          : baseProfile.surfaceY.reduce((sum, y) => sum + y, 0) / baseProfile.surfaceY.length;
+        jobs.sort((a, b) => Math.abs(sections.get(a.sectionIndex).originY + 8 - preferredY)
+          - Math.abs(sections.get(b.sectionIndex).originY + 8 - preferredY) || a.sectionIndex - b.sectionIndex);
+        for (let sequence = 0; sequence < jobs.length; sequence++) {
+          const job = jobs[sequence];
+          const result = { sectionIndex: job.sectionIndex, sectionRevision: job.sectionRevision,
+            ...buildRenderSection(chunk, sections.get(job.sectionIndex), access, { visualOnly: Boolean(job.visualOnly) }) };
+          // Only the clone is transferred. The profile used by later sections
+          // remains owned by this Worker until the task reaches its terminal.
+          const response = { type: "chunkProgress", taskId: task.taskId, chunkX: task.chunkX, chunkZ: task.chunkZ,
+            mode: task.mode || "base", taskVersion: task.taskVersion, materialVersion: task.materialVersion,
+            progressSequence: sequence, completedSections: sequence + 1, totalSections: jobs.length,
+            baseProfile: sequence === 0 && task.mode === "base" ? structuredClone(baseProfile) : null,
+            treeInstances: sequence === 0 && task.mode === "base" ? treeInstances : null,
+            sectionResults: [result], elapsedMs: performance.now() - startedAt };
+          self.postMessage(response, transferablesForBuild(response));
+        }
+        self.postMessage({ type: "chunkBuilt", taskId: task.taskId, chunkX: task.chunkX, chunkZ: task.chunkZ,
+          mode: task.mode || "base", taskVersion: task.taskVersion, materialVersion: task.materialVersion,
+          progressComplete: true, progressMessageCount: jobs.length, visualPending: false,
+          elapsedMs: performance.now() - startedAt });
+        return;
+      }
       const results=jobs.map(job=>({sectionIndex:job.sectionIndex,sectionRevision:job.sectionRevision,
         ...buildRenderSection(chunk,sections.get(job.sectionIndex),access,{visualOnly:Boolean(job.visualOnly)})}));
       const response={type:"chunkBuilt",taskId:task.taskId,chunkX:task.chunkX,chunkZ:task.chunkZ,mode:task.mode||"base",taskVersion:task.taskVersion,materialVersion:task.materialVersion,

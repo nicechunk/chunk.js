@@ -1,8 +1,8 @@
-import { meshChunkOpaque, meshChunkOpaqueFast, meshChunkVisual, packChunkVertices } from "./chunk-mesher.js";
+import { meshChunkOpaque, meshChunkOpaqueFast, meshChunkVisual, packChunkVertices, buildGeneratedVisualCandidates, meshChunkOpaqueSteps, meshChunkOpaqueFastSteps, meshChunkVisualSteps, buildGeneratedVisualCandidatesSteps } from "./chunk-mesher.js";
 import { deltaKey } from "./chunk-delta.js";
-import { bakeSectionLighting } from "./baked-light-field.js";
+import { bakeSectionLightingSteps } from "./baked-light-field.js";
 import { isVisualBlock,isOpaqueSolidBlock,BLOCK_ID } from "../world/block-registry.js";
-import { prepareMeshDrawRanges } from "../renderer/mesh-draw-ranges.js";
+import { prepareMeshDrawRanges, prepareMeshDrawRangesSteps } from "../renderer/mesh-draw-ranges.js";
 import { SUNLIGHT_HORIZONTAL_REACH, SUNLIGHT_VERTICAL_REACH } from "../world/sunlight.js";
 import { publishCommittedWorldBounds } from "../renderer/frustum.js";
 
@@ -15,7 +15,8 @@ const MAX_RETAINED_VOXEL_SCRATCH_BYTES = 128 * 1024;
 
 // Canonical generated terrain has no buried cavities. Chain/halo edits still
 // enumerate their exact affected sections; custom/dense worlds use the full path.
-function generatedSectionPlan(chunk, access) {
+function* generatedSectionPlan(chunk, access, workBudget) {
+  let units=0;
   if (!access.generatedTerrain || typeof access.generatedSurfaceAtWorld!=="function" || !chunk.baseProfile || chunk.baseBlocks) return null;
   const cached = generatedPlans.get(access);
   if (cached?.chunk === chunk && cached.version === chunk.version && cached.profile === chunk.baseProfile) return cached.sections;
@@ -25,6 +26,7 @@ function generatedSectionPlan(chunk, access) {
     lower = Math.min(lower, profile.surfaceY[i]);
     upper = Math.max(upper, profile.surfaceY[i] + 1);
     if (profile.waterY[i] !== profile.noWater) upper = Math.max(upper, profile.waterY[i] + 1);
+    if(++units>=workBudget){units=0;yield {phase:"section-plan-columns",workUnits:workBudget};}
   }
   // A lower adjacent column can expose a chunk-edge cliff. Include the complete
   // one-cell geometry halo, using generated height rather than edited column tops.
@@ -34,6 +36,7 @@ function generatedSectionPlan(chunk, access) {
       const surface = access.generatedSurfaceAtWorld(ox+x,oz+z);
       if (!Number.isFinite(surface)) return null;
       lower = Math.min(lower,surface);
+      if(++units>=workBudget){units=0;yield {phase:"section-plan-halo",workUnits:workBudget};}
     }
   }
   // The first three subsurface cells may use biome-specific non-opaque material.
@@ -42,10 +45,10 @@ function generatedSectionPlan(chunk, access) {
   const last=Math.min(Math.ceil(chunk.height/RENDER_SECTION_HEIGHT)-1,sectionIndexAt(chunk,upper));
   for (let index = first; index <= last; index++) sections.add(index);
   for (const tree of chunk.treeInstances ?? []) sections.add(sectionIndexAt(chunk,tree.baseY));
-  const deltas = [...chunk.getFinalDeltaMap().values(), ...(access.neighborDeltas ?? access.getNeighborDeltas?.() ?? [])];
-  for (const delta of deltas) {
+  for (const deltas of [chunk.getFinalDeltaMap().values(), access.neighborDeltas ?? access.getNeighborDeltas?.() ?? []]) for (const delta of deltas) {
     const y = delta.localY ?? delta.worldY;
     for (const sample of [y-1,y,y+1]) sections.add(sectionIndexAt(chunk,sample));
+    if(++units>=workBudget){units=0;yield {phase:"section-plan-deltas",workUnits:workBudget};}
   }
   generatedPlans.set(access,{chunk,version:chunk.version,profile:chunk.baseProfile,sections});
   return sections;
@@ -55,7 +58,7 @@ export function sectionIndexAt(chunk, y) {
   return Math.floor((y - chunk.minY) / RENDER_SECTION_HEIGHT);
 }
 
-export function ensureRenderSections(chunk) {
+export function ensureRenderSections(chunk, { initializeColumnTops = true } = {}) {
   if (chunk.renderSections) return chunk.renderSections;
   chunk.generation ??= generationSerial++;
   chunk.renderSections = new Map();
@@ -65,7 +68,7 @@ export function ensureRenderSections(chunk) {
   chunk.renderColumnEpoch = 1;
   for (const delta of chunk.getFinalDeltaMap().values()) indexDelta(chunk, delta);
   chunk.renderColumnTops=new Map();
-  if(chunk.shadows!==false)for(let z=0;z<chunk.chunkSize;z++)for(let x=0;x<chunk.chunkSize;x++)chunk.renderColumnTops.set(x+z*chunk.chunkSize,finalColumnTop(chunk,x,z));
+  if(initializeColumnTops&&chunk.shadows!==false)for(let z=0;z<chunk.chunkSize;z++)for(let x=0;x<chunk.chunkSize;x++)chunk.renderColumnTops.set(x+z*chunk.chunkSize,finalColumnTop(chunk,x,z));
   for (let i = 0; i < Math.ceil(chunk.height / RENDER_SECTION_HEIGHT); i++) {
     const originY = chunk.minY + i * RENDER_SECTION_HEIGHT;
     chunk.renderSections.set(i, {
@@ -268,9 +271,18 @@ export function sectionDeltaValues(chunk, index, marginSections = 1) {
   return values;
 }
 
-export function buildRenderSection(chunk, section, access = {}, { visualOnly = false } = {}) {
+export function buildRenderSection(chunk, section, access = {}, options = {}) {
+  return drainSectionSteps(buildRenderSectionSteps(chunk, section, access, options));
+}
+
+// Callers stepping across frames must provide an immutable input snapshot and
+// validate its section/halo revision before publication. Progress never mutates
+// the live section, and iterator.return() releases its private scratch buffer.
+export function* buildRenderSectionSteps(chunk, section, access = {}, { visualOnly = false, workBudget = 256 } = {}) {
+  if(!Number.isInteger(workBudget)||workBudget<1||workBudget>4096)throw new RangeError("Section workBudget must be from 1 to 4096.");
+  let units=0;
   const startedAt=performance.now();
-  const plan=generatedSectionPlan(chunk,access);
+  const plan=yield* generatedSectionPlan(chunk,access,workBudget);
   if (plan && !plan.has(section.sectionIndex)) {
     const empty=()=>prepareMeshDrawRanges({...emptySectionMesh(chunk,section),sectionIndex:section.sectionIndex});
     return {mesh:visualOnly?null:empty(),visualMesh:empty(),visualError:null,lighting:undefined,
@@ -284,7 +296,10 @@ export function buildRenderSection(chunk, section, access = {}, { visualOnly = f
   view.hasDeltaAt=chunk.hasDeltaAt.bind(chunk);
   view.treeInstances=(chunk.treeInstances ?? []).filter(t=>sectionIndexAt(chunk,t.baseY)===section.sectionIndex);
   const localDeltas=new Map();
-  for(const delta of sectionDeltaValues(chunk,section.sectionIndex))localDeltas.set(deltaKey(delta.localX,delta.localY,delta.localZ,chunk.chunkSize),delta);
+  for(let index=section.sectionIndex-1;index<=section.sectionIndex+1;index++)for(const delta of chunk.renderDeltaSections.get(index)?.values()??[]) {
+    localDeltas.set(deltaKey(delta.localX,delta.localY,delta.localZ,chunk.chunkSize),delta);
+    if(++units>=workBudget){units=0;yield {phase:"section-delta-snapshot",workUnits:workBudget};}
+  }
   view.getFinalDeltaMap=()=>localDeltas;
   // Generation v5 only has visual base blocks at the surface or in its water
   // column. Keep the ordinary z/y/x emission order, but never reconstruct ores
@@ -296,7 +311,11 @@ export function buildRenderSection(chunk, section, access = {}, { visualOnly = f
     for(let z=0;z<size;z++)for(let x=0;x<size;x++) {
       const column=x+z*size,surface=chunk.baseProfile.surfaceY[column],water=chunk.baseProfile.waterY[column];
       const end=Math.min(section.originY+section.height-1,Math.max(surface,water===chunk.baseProfile.noWater?surface:water));
-      for(let y=Math.max(section.originY,surface);y<=end;y++)mask[x+z*size+(y-section.originY)*size*size]=1;
+      for(let y=Math.max(section.originY,surface);y<=end;y++) {
+        mask[x+z*size+(y-section.originY)*size*size]=1;
+        if(++units>=workBudget){units=0;yield {phase:"section-visual-mask",workUnits:workBudget};}
+      }
+      if(++units>=workBudget){units=0;yield {phase:"section-visual-columns",workUnits:workBudget};}
     }
     for(const delta of localDeltas.values()) {
       editedColumns.add(delta.localX+delta.localZ*size);
@@ -327,7 +346,7 @@ export function buildRenderSection(chunk, section, access = {}, { visualOnly = f
     return block;
   };
   view.getFinalBlock=(x,y,z)=>getWorld(chunk.chunkX*chunk.chunkSize+x,y,chunk.chunkZ*chunk.chunkSize+z);
-  const snapshotAccess={...access,getBlockAtWorld:getWorld,getColumnTopAtWorld:(x,z)=>{
+  const snapshotAccess={...access,workBudget,getBlockAtWorld:getWorld,getColumnTopAtWorld:(x,z)=>{
     const key=`${x}:${z}`;
     if(columns.has(key))return columns.get(key);
     const value=access.getColumnTopAtWorld?.(x,z)??chunk.minY+chunk.height;
@@ -338,7 +357,7 @@ export function buildRenderSection(chunk, section, access = {}, { visualOnly = f
   opaqueView.baseProfile=chunk.baseProfile;
   // Generated profile columns have no unrecorded underground cavities. Use the
   // complete delta/halo candidate mesher within this bounded vertical slice.
-  let mesh=visualOnly?null:(chunk.baseProfile?meshChunkOpaqueFast(opaqueView,snapshotAccess):meshChunkOpaque(view,snapshotAccess));
+  let mesh=visualOnly?null:(chunk.baseProfile?yield* meshChunkOpaqueFastSteps(opaqueView,snapshotAccess):yield* meshChunkOpaqueSteps(view,snapshotAccess));
   let visualMesh=null,visualError=null;
   let visualPossible=!chunk.baseProfile||view.treeInstances.length>0;
   if(chunk.baseProfile) {
@@ -349,19 +368,25 @@ export function buildRenderSection(chunk, section, access = {}, { visualOnly = f
     }
     for(const delta of localDeltas.values())if(delta.localY>=section.originY&&delta.localY<end&&(isVisualBlock(delta.blockId)||delta.blockId===BLOCK_ID.cactus))visualPossible=true;
   }
-  try { visualMesh=visualPossible?meshChunkVisual(view,snapshotAccess):emptySectionMesh(chunk,section); }
+  try {
+    const candidates = yield* buildGeneratedVisualCandidatesSteps(view, { finalDeltas: localDeltas, workBudget });
+    view.visualCandidates = candidates;
+    visualMesh = candidates
+      ? candidates.empty ? { ...emptySectionMesh(chunk, section), blockCount: candidates.blockCount } : yield* meshChunkVisualSteps(view, snapshotAccess)
+      : visualPossible ? yield* meshChunkVisualSteps(view, snapshotAccess) : emptySectionMesh(chunk, section);
+  }
   catch(error) { visualError=error?.message || String(error); }
   for(const part of [mesh,visualMesh]) if(part) {
     part.sectionIndex=section.sectionIndex;
     part.originY=section.originY;
     // Models owned by a section can extend into the section above it.
-    part.bounds=packedMeshBounds(part);
+    part.bounds=yield* packedMeshBoundsSteps(part,{workBudget});
   }
-  const lighting=bakeSectionLighting(chunk,section,snapshotAccess,[mesh,visualMesh],access.caveLighting);
+  const lighting=yield* bakeSectionLightingSteps(chunk,section,snapshotAccess,[mesh,visualMesh],access.caveLighting,{workBudget});
   // Prepare material ranges in the same bounded task, including inside the real
   // Worker. The GPU uploader validates and reuses these immutable partitions.
-  if(mesh)mesh=prepareMeshDrawRanges(mesh);
-  if(visualMesh)visualMesh=prepareMeshDrawRanges(visualMesh);
+  if(mesh)mesh=yield* prepareMeshDrawRangesSteps(mesh,{workBudget});
+  if(visualMesh)visualMesh=yield* prepareMeshDrawRangesSteps(visualMesh,{workBudget});
   return {mesh,visualMesh,visualError,lighting,voxelQueries,voxelVisits,voxelCacheBytes:voxels.byteLength,opaqueCellBudget:chunk.chunkSize*chunk.chunkSize*section.height,elapsedMs:performance.now()-startedAt};
   } finally {
     if (voxels.byteLength<=MAX_RETAINED_VOXEL_SCRATCH_BYTES && voxelScratchPool.reduce((bytes,array)=>bytes+array.byteLength,0)+voxels.byteLength<=MAX_RETAINED_VOXEL_SCRATCH_BYTES) voxelScratchPool.push(voxels);
@@ -377,6 +402,7 @@ export function commitRenderSection(chunk, section, result, expectedRevision = s
   if(result.mesh) {
     section.mesh=result.mesh; section.meshVersion=section.dataRevision;
     section.meshCommitToken=submissionSerial++; section.gpuUploaded=false; section.dirty=false;
+    section.meshReadyAt=performance.now();
   }
   if(result.visualError) {
     section.visualError=result.visualError; section.visualDirty=true; section.visualFailures++;
@@ -384,6 +410,7 @@ export function commitRenderSection(chunk, section, result, expectedRevision = s
   } else {
     section.visualMesh=result.visualMesh; section.visualMeshVersion=section.dataRevision;
     section.visualCommitToken=submissionSerial++; section.visualGpuUploaded=false;
+    section.visualMeshReadyAt=performance.now();
     section.visualDirty=false;section.visualError=null;section.visualFailures=0;section.visualRetryAt=0;
   }
   section.materialVersion=chunk.materialVersion;
@@ -454,6 +481,11 @@ function mergeMeshes(meshes) {
 }
 
 export function packedMeshBounds(mesh) {
+  return drainSectionSteps(packedMeshBoundsSteps(mesh));
+}
+
+export function* packedMeshBoundsSteps(mesh,{workBudget=256}={}) {
+  let units=0;
   let minX=Infinity,minY=Infinity,minZ=Infinity,maxX=-Infinity,maxY=-Infinity,maxZ=-Infinity;
   const view=new DataView(mesh.vertices.buffer,mesh.vertices.byteOffset,mesh.vertices.byteLength);
   for(let i=0;i<mesh.vertexCount;i++) {
@@ -461,6 +493,13 @@ export function packedMeshBounds(mesh) {
     minX=Math.min(minX,x);maxX=Math.max(maxX,x);
     minY=Math.min(minY,y);maxY=Math.max(maxY,y);
     minZ=Math.min(minZ,z);maxZ=Math.max(maxZ,z);
+    if(++units>=workBudget){units=0;yield {phase:"section-bounds",workUnits:workBudget};}
   }
   return {minX,minY,minZ,maxX,maxY,maxZ};
+}
+
+function drainSectionSteps(iterator) {
+  let step;
+  do {step=iterator.next();} while(!step.done);
+  return step.value;
 }

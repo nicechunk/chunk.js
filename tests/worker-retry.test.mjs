@@ -71,3 +71,20 @@ function failedChunk({ baseBlocksReady, mesh = null }) {
     },
   };
 }
+
+test('continuous fresh near work cannot starve an old background column', () => {
+  const manager=new ChunkManager({useWorkers:false});
+  try {
+    const far={id:'8,8',chunkX:8,chunkZ:8},near={id:'0,0',chunkX:0,chunkZ:0,lastBuildDispatchAt:5000};
+    manager.chunks.set(far.id,far);manager.chunks.set(near.id,near);
+    manager.buildQueue=[{id:far.id,queuedAt:0}];
+    let served=false;
+    for(let turn=0;turn<8;turn++){
+      manager.buildQueue.unshift({id:near.id,queuedAt:0});
+      const task=manager.takeNextBuildTask(5000);
+      if(task.id===far.id){served=true;break;}
+      near.lastBuildDispatchAt=5000;
+    }
+    assert.equal(served,true,'a previously serviced near edit cannot consume every aged selection');
+  }finally{manager.dispose();}
+});

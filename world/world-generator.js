@@ -236,7 +236,13 @@ export function generateBaseChunkProfile(worldSeed, chunkX, chunkZ, generationVe
   return generateBaseChunkProfileFromConfig(config, chunkX, chunkZ);
 }
 
-export function generateBaseChunkProfileFromConfig(config, chunkX, chunkZ, { cacheTreeCandidates = false } = {}) {
+export function generateBaseChunkProfileFromConfig(config, chunkX, chunkZ, options = {}) {
+  return drainWorldSteps(generateBaseChunkProfileFromConfigSteps(config,chunkX,chunkZ,options));
+}
+
+export function* generateBaseChunkProfileFromConfigSteps(config, chunkX, chunkZ, { cacheTreeCandidates = false, workBudget = 32 } = {}) {
+  validateWorldWorkBudget(workBudget);
+  let units=0;
   const coordinates = assertChunkCoordinates(config, chunkX, chunkZ);
   const size = config.chunkSize;
   const cells = size * size;
@@ -261,6 +267,7 @@ export function generateBaseChunkProfileFromConfig(config, chunkX, chunkZ, { cac
         ? (canGrowTree(config, worldX, worldZ, surface) ? treeAt(config, worldX, worldZ, surface, surfaceBlock[column]) : null)
         : undefined;
       if (treeCandidates) treeCandidates[column] = tree;
+      if(++units>=workBudget){units=0;yield {phase:"base-profile",workUnits:workBudget};}
     }
   }
 
@@ -291,6 +298,12 @@ export function generateTreeInstancesForChunk(worldSeed, chunkX, chunkZ, generat
 }
 
 export function generateTreeInstancesForChunkFromConfig(config, chunkX, chunkZ, baseProfile = null) {
+  return drainWorldSteps(generateTreeInstancesForChunkFromConfigSteps(config,chunkX,chunkZ,baseProfile));
+}
+
+export function* generateTreeInstancesForChunkFromConfigSteps(config, chunkX, chunkZ, baseProfile = null, {workBudget=32}={}) {
+  validateWorldWorkBudget(workBudget);
+  let units=0;
   const coordinates = assertChunkCoordinates(config, chunkX, chunkZ);
   const out = [];
   const visitedWorldColumns = new Set();
@@ -300,6 +313,7 @@ export function generateTreeInstancesForChunkFromConfig(config, chunkX, chunkZ, 
     const z = chunkLocalToWorldI32(coordinates.chunkZ, localZ, config.chunkSize);
     for (let localX = 0; localX < config.chunkSize; localX += 1) {
       const x = chunkLocalToWorldI32(coordinates.chunkX, localX, config.chunkSize);
+      if(++units>=workBudget){units=0;yield {phase:"base-trees",workUnits:workBudget};}
       const worldColumn = `${x},${z}`;
       if (visitedWorldColumns.has(worldColumn)) continue;
       visitedWorldColumns.add(worldColumn);
@@ -337,8 +351,12 @@ export function getBlockAt(worldSeed, worldX, worldY, worldZ, ruleVersion, optio
     worldSeed: assertReconstructionSeed(worldSeed),
     generationVersion: assertExplicitGenerationVersion(ruleVersion),
   });
+  return getBlockAtConfig(config,worldX,worldY,worldZ);
+}
+
+export function getBlockAtConfig(config, worldX, worldY, worldZ) {
   const coordinates = assertWorldCoordinates(worldX, worldY, worldZ);
-  return blockAtConfig(config, coordinates.worldX, coordinates.worldY, coordinates.worldZ);
+  return blockAtConfig(config,coordinates.worldX,coordinates.worldY,coordinates.worldZ);
 }
 
 export function getBaseBlockAt(worldSeed, worldX, worldY, worldZ, ruleVersion, options = {}) {
@@ -378,6 +396,10 @@ export function getGeneratedTreeBlockAt(worldSeed, worldX, worldY, worldZ, ruleV
     worldSeed: assertReconstructionSeed(worldSeed),
     generationVersion: assertExplicitGenerationVersion(ruleVersion),
   });
+  return getGeneratedTreeBlockAtConfig(config,worldX,worldY,worldZ);
+}
+
+export function getGeneratedTreeBlockAtConfig(config, worldX, worldY, worldZ) {
   const coordinates = assertWorldCoordinates(worldX, worldY, worldZ);
   if (!containsVerticalBuildCoordinate(config, coordinates.worldY)) return BLOCK_ID.air;
   return treeBlockAt(config, coordinates.worldX, coordinates.worldY, coordinates.worldZ);
@@ -422,6 +444,10 @@ export function getGeneratedTreeTrunkBlockAt(worldSeed, worldX, worldY, worldZ, 
     worldSeed: assertReconstructionSeed(worldSeed),
     generationVersion: assertExplicitGenerationVersion(ruleVersion),
   });
+  return getGeneratedTreeTrunkBlockAtConfig(config,worldX,worldY,worldZ);
+}
+
+export function getGeneratedTreeTrunkBlockAtConfig(config, worldX, worldY, worldZ) {
   const { worldX: x, worldY: y, worldZ: z } = assertWorldCoordinates(worldX, worldY, worldZ);
   if (!containsVerticalBuildCoordinate(config, y)) return BLOCK_ID.air;
   const surface = terrainSurfaceHeight(config, x, z);
@@ -1096,4 +1122,12 @@ function divFloor(value, divisor) {
 
 export function isGeneratedFluidBlock(blockId) {
   return isFluidBlock(blockId);
+}
+
+function validateWorldWorkBudget(value) {
+  if(!Number.isInteger(value)||value<1||value>4096)throw new RangeError("World workBudget must be from 1 to 4096.");
+}
+
+function drainWorldSteps(iterator) {
+  let step;do{step=iterator.next();}while(!step.done);return step.value;
 }

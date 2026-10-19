@@ -10,12 +10,14 @@ import {
   DEFAULT_GENERATION_VERSION,
   DEFAULT_RESOURCE_RULE_VERSION,
   generateBaseChunkProfileFromConfig,
+  generateBaseChunkProfileFromConfigSteps,
   generateTreeInstancesForChunkFromConfig,
+  generateTreeInstancesForChunkFromConfigSteps,
   getBaseBlockAtColumnConfig,
   getBaseBlockAtConfig,
-  getBlockAt,
-  getGeneratedTreeBlockAt,
-  getGeneratedTreeTrunkBlockAt,
+  getBlockAtConfig,
+  getGeneratedTreeBlockAtConfig,
+  getGeneratedTreeTrunkBlockAtConfig,
   MAINNET_WORLD_SEED,
   terrainSurfaceHeight,
   treeInstanceBlockAt,
@@ -30,7 +32,7 @@ import {
   normalizeDelta,
 } from "./chunk-delta.js";
 import { meshChunkOpaqueFast, meshChunkVisual } from "./chunk-mesher.js";
-import { ensureRenderSections, buildRenderSection, commitRenderSection, updateChunkSectionSummary, sectionRevision, sectionDeltaValues, invalidateRenderSections, prepareRenderSnapshotInvalidation, invalidateSurfaceDecorations } from "./render-sections.js";
+import { ensureRenderSections, buildRenderSection, buildRenderSectionSteps, commitRenderSection, updateChunkSectionSummary, sectionRevision, sectionDeltaValues, invalidateRenderSections, prepareRenderSnapshotInvalidation, invalidateSurfaceDecorations } from "./render-sections.js";
 import { chunkIntersectsCameraFrustum, prepareCameraFrustum, cameraRenderCenterChunk } from "../renderer/frustum.js";
 import { RenderStageStats } from "../debug/stats.js";
 
@@ -41,6 +43,7 @@ const INITIAL_BUILD_CONCURRENCY = 1;
 const WORKER_BUILD_RETRY_BASE_MS = 180;
 const WORKER_BUILD_RETRY_MAX_MS = 5000;
 const MAX_CONSECUTIVE_WORKER_FAILURES = 3;
+const WORKER_TASK_TIMEOUT_MS = 30_000;
 const COLLISION_COLUMN_CACHE_LIMIT = 4096;
 const MAX_GENERATED_TREE_TRUNK_HEIGHT = 7;
 const BUILD_CAMERA_FIELDS = ["worldX","worldY","worldZ","localOffsetX","localOffsetY","localOffsetZ",
@@ -149,9 +152,17 @@ export class ChunkManager {
     this.buildQueue = [];
     this.buildQueueNeedsSort = false;
     this.lastBuildQueueSortAt = -Infinity;
+    this.buildDispatchSerial = 0;
     this.inFlightBuilds = new Map();
     this.settledWorkerTaskIds = new WeakMap();
     this.completedBuilds = [];
+    this.progressDrainCursor = 0;
+    this.progressiveSectionsCommitted = 0;
+    this.workerTaskTimeouts = 0;
+    this.cancelledWorkerTasks = 0;
+    this.fallbackBuild = null;
+    this.fallbackSlices = 0;
+    this.fallbackCancelled = 0;
     this.workerBuildFailures = new Map();
     this.consecutiveWorkerFailures = 0;
     this.dispatchScheduled = false;
@@ -420,6 +431,7 @@ export class ChunkManager {
     for (const task of this.inFlightBuilds.values()) {
       if (!this.chunks.has(task.id)) task.cancelled = true;
     }
+    this.cancelObsoleteWorkerTasks();
     for (const id of this.workerBuildFailures.keys()) {
       if (!this.chunks.has(id)) this.workerBuildFailures.delete(id);
     }
@@ -577,14 +589,16 @@ export class ChunkManager {
       const relevant=deltas.filter(d=>d.worldX>=minX-reach&&d.worldX<minX+this.chunkSize+reach&&d.worldZ>=minZ-reach&&d.worldZ<minZ+this.chunkSize+reach);
       if(!relevant.length)continue;
       if(!target.renderSections) {target.markDirty();changed.add(target);continue;}
+      let invalidated = false;
       for(const section of target.renderSections.values()) {
         if(!section.mesh?.vertexCount&&!section.visualMesh?.vertexCount)continue;
         if(section.originY>Math.max(...relevant.map(d=>d.worldY))+4)continue;
         if(!this.shadows&&section.originY+section.height<=Math.min(...relevant.map(d=>d.worldY))-4)continue;
         section.lightRevision++;section.dirty=true;section.visualDirty=true;
         section.dirtyReason="sun-halo";section.oldestDirtyAt??=performance.now();
+        invalidated = true;
       }
-      target.renderInvalidationPending=true;target.markDirty();changed.add(target);
+      if (invalidated) { target.renderInvalidationPending=true;target.markDirty();changed.add(target); }
     }
     return changed;
   }
@@ -661,6 +675,7 @@ export class ChunkManager {
 
   enqueueSectionBuilds(chunk) {
     if(!this.useWorkers)return false;
+    if(this.inFlightBuilds.get(chunk.buildTaskId)?.progressiveJobs)return false;
     const sections=ensureRenderSections(chunk);
     let queued=false;
     let batch = null;
@@ -689,6 +704,7 @@ export class ChunkManager {
     if (!selected.length) return false;
     const section = selected[0];
     const taskId=this.taskSerial++,revision=sectionRevision(section,this.materialVersion),startedAt=performance.now();
+    chunk.lastBuildDispatchAt = startedAt;
     const sectionJobs = selected.map(section => ({ sectionIndex: section.sectionIndex, sectionRevision: sectionRevision(section,this.materialVersion), visualOnly: !section.dirty }));
     const task={...queued,sectionIndex:section.sectionIndex,sectionJobs,worker,chunk,version:chunk.version,sectionRevision:revision,materialVersion:this.materialVersion,phase:"chunk",cancelled:false,startedAt};
     for (const item of selected) { item.buildState="building";item.buildTaskId=taskId; }
@@ -722,9 +738,204 @@ export class ChunkManager {
     } else chunk.visualBuildError=null;
   }
 
-  rebuildDirtyChunks(budgetMs = DEFAULT_MESH_BUDGET_MS, { synchronousNearField = false } = {}) {
+  // Snapshot construction itself yields: a large edit map must not become a
+  // new indivisible setup cost in the no-Worker path. Internal base profiles
+  // are immutable, and copies also isolate legacy callers owning dense arrays.
+  *captureSectionBuildInputs(chunk, { workBudget = 128 } = {}) {
+    const snapshotManager = Object.create(this);
+    const snapshots = new Map();
+    snapshotManager.chunks = snapshots;
+    snapshotManager.collisionColumnTopCache = new Map();
+    managerWorldSeeds.set(snapshotManager, managerWorldSeed(this));
+    const radius = Math.ceil((this.shadows ? SUNLIGHT_HORIZONTAL_REACH : 8) / this.chunkSize) + 1;
+    let units = 0;
+    for (const source of this.chunks.values()) {
+      if (Math.abs(source.chunkX - chunk.chunkX) > radius || Math.abs(source.chunkZ - chunk.chunkZ) > radius) continue;
+      source.expireRemoteDeltas();
+      const snapshot = Object.create(source), final = new Map();
+      snapshot.pendingDeltas = new Map();
+      snapshot.remoteDeltas = new Map();
+      snapshot.chainDeltas = final;
+      snapshot.renderDeltaColumns = new Map();
+      snapshot.renderDeltaSections = new Map();
+      snapshot.renderColumnTops = new Map(source.renderColumnTops ?? []);
+      snapshot.renderColumnRevisions = new Map(source.renderColumnRevisions ?? []);
+      snapshot.renderSections = source.renderSections
+        ? new Map([...source.renderSections].map(([index, section]) => [index, { ...section }])) : null;
+      snapshot.baseBlocks = source.baseBlocks?.slice() ?? null;
+      snapshot.baseProfile = source.baseProfile && { ...source.baseProfile,
+        surfaceY: source.baseProfile.surfaceY.slice(), waterY: source.baseProfile.waterY.slice(),
+        surfaceBlock: source.baseProfile.surfaceBlock?.slice() };
+      snapshot.treeInstances = [];
+      snapshot.pickedSurfaceColumns = [...(source.pickedSurfaceColumns ?? [])];
+      for (const tree of source.treeInstances ?? []) {
+        snapshot.treeInstances.push({ ...tree, leafMasks: tree.leafMasks?.slice() });
+        if (++units >= workBudget) { units = 0; yield { phase: "snapshot-trees", workUnits: workBudget }; }
+      }
+      for (const map of [source.chainDeltas, source.remoteDeltas, source.pendingDeltas]) for (const [key, delta] of map) {
+        final.set(key, { ...delta });
+        if (++units >= workBudget) { units = 0; yield { phase: "snapshot-deltas", workUnits: workBudget }; }
+      }
+      for (const [key, delta] of final) {
+        const column = delta.localX + delta.localZ * this.chunkSize;
+        const section = Math.floor((delta.localY - source.minY) / 16);
+        for (const [map, index] of [[snapshot.renderDeltaColumns, column], [snapshot.renderDeltaSections, section]]) {
+          let entries = map.get(index); if (!entries) map.set(index, entries = new Map());
+          entries.set(key, delta);
+        }
+        if (++units >= workBudget) { units = 0; yield { phase: "snapshot-indices", workUnits: workBudget }; }
+      }
+      snapshot.getFinalDeltaMap = () => final;
+      snapshot.expireRemoteDeltas = () => ({ changed: false, boundaryMask: 0 });
+      snapshot.hasDeltaAt = (x, y, z) => final.has(deltaKey(x, y, z, source.chunkSize));
+      snapshot.getFinalBlock = (x, y, z) => x < 0 || z < 0 || x >= source.chunkSize || z >= source.chunkSize
+        || y < source.minY || y >= source.minY + source.height ? BLOCK_ID.air
+        : final.get(deltaKey(x, y, z, source.chunkSize))?.blockId ?? snapshot.getBaseBlock(x, y, z);
+      snapshots.set(source.id, snapshot);
+      yield { phase: "snapshot-column", workUnits: 1 };
+    }
+    const snapshot = snapshots.get(chunk.id);
+    return { chunk: snapshot, access: snapshotManager.meshAccessForChunk(snapshot) };
+  }
+
+  cancelFallbackBuild() {
+    const job = this.fallbackBuild;
+    if (!job) return;
+    job.iterator.return?.();
+    if (job.section?.buildState === "fallback") job.section.buildState = "ready";
+    this.fallbackBuild = null;
+    this.fallbackCancelled++;
+  }
+
+  fallbackBuildIsCurrent(job) {
+    return this.chunks.get(job.chunk.id) === job.chunk && !this.disposed
+      && (job.kind === "base" ? !job.chunk.baseBlocksReady
+        : job.chunk.baseProfile === job.baseProfile && job.chunk.baseBlocks === job.baseBlocks
+          && job.chunk.renderSections?.get(job.section.sectionIndex) === job.section
+          && sectionRevision(job.section, this.materialVersion) === job.revision
+          && this.surfaceDecorationRulesSignature === job.rules);
+  }
+
+  advanceFallbackBuild(deadline, rebuilt) {
+    let slices = 0;
+    while (slices < 4096 && (!slices || performance.now() < deadline)) {
+      if (this.fallbackBuild && !this.fallbackBuildIsCurrent(this.fallbackBuild)) this.cancelFallbackBuild();
+      if (!this.fallbackBuild) {
+        const center = { chunkX: this.centerChunkX, chunkZ: this.centerChunkZ };
+        const dirty = [...this.chunks.values()].filter(chunk => chunk.dirty)
+          .sort((a, b) => chunkPriority(a, center, this) - chunkPriority(b, center, this));
+        let job = null;
+        for (const chunk of dirty) {
+          if (chunk.buildState === "error" && !this.prepareWorkerBuildRetry(chunk, performance.now())) continue;
+          if (!chunk.baseBlocksReady && this.restoreReusableMesh(chunk)) { rebuilt.push(chunk); continue; }
+          if (!chunk.baseBlocksReady) {
+            const manager = this;
+            job = { chunk, kind: "base", cpuMs: 0, startedAt: performance.now(), iterator: (function* () {
+              const profile = yield* generateBaseChunkProfileFromConfigSteps(manager.config, chunk.chunkX, chunk.chunkZ, { cacheTreeCandidates: true, workBudget: 16 });
+              const treeInstances = yield* generateTreeInstancesForChunkFromConfigSteps(manager.config, chunk.chunkX, chunk.chunkZ, profile, { workBudget: 16 });
+              return { profile, treeInstances };
+            })() };
+            break;
+          }
+          const section = [...ensureRenderSections(chunk).values()].filter(section => section.dirty
+            || section.visualDirty && performance.now() >= section.visualRetryAt)
+            .sort((a, b) => (a.oldestDirtyAt ?? Infinity) - (b.oldestDirtyAt ?? Infinity))[0];
+          if (!section) continue;
+          const manager = this, sectionInput = { ...section }, visualOnly = !section.dirty;
+          job = { chunk, section, kind: "section", baseProfile: chunk.baseProfile, baseBlocks: chunk.baseBlocks,
+            rules: this.surfaceDecorationRulesSignature, revision: sectionRevision(section, this.materialVersion),
+            cpuMs: 0, startedAt: performance.now(), iterator: (function* () {
+              const inputs = yield* manager.captureSectionBuildInputs(chunk);
+              return yield* buildRenderSectionSteps(inputs.chunk, sectionInput, inputs.access, { visualOnly, workBudget: 128 });
+            })() };
+          section.buildState = "fallback";
+          break;
+        }
+        this.fallbackBuild = job;
+        if (!job) break;
+      }
+      const job = this.fallbackBuild, startedAt = performance.now();
+      let step;
+      try { step = job.iterator.next(); }
+      catch (error) {
+        this.lastBuildError = error?.message || String(error);
+        this.cancelFallbackBuild();
+        job.chunk.markBuildError(error);
+        this.recordWorkerBuildFailure(job.chunk, error);
+        break;
+      }
+      job.cpuMs += performance.now() - startedAt;
+      slices++; this.fallbackSlices++;
+      if (!this.fallbackBuildIsCurrent(job)) { this.cancelFallbackBuild(); continue; }
+      if (!step.done) continue;
+      this.fallbackBuild = null;
+      if (job.kind === "base") {
+        job.chunk.setBaseProfile(step.value.profile, step.value.treeInstances,
+          this.baseBlockResolverForChunk(job.chunk.chunkX, job.chunk.chunkZ, step.value.profile), { retainRenderSections: true });
+      } else {
+        const result = step.value;
+        result.elapsedWallMs = performance.now() - job.startedAt;
+        result.elapsedMs = job.cpuMs;
+        if (commitRenderSection(job.chunk, job.section, result, job.revision)) rebuilt.push(job.chunk);
+        this.sectionBuildVisits += result.voxelVisits;
+        this.stageStats.record("mesh-build", job.cpuMs);
+        this.logRenderEvent("section-build-cooperative", { chunkId: job.chunk.id, section: job.section.sectionIndex,
+          revision: job.revision, elapsedMs: job.cpuMs, elapsedWallMs: result.elapsedWallMs, voxelVisits: result.voxelVisits,
+          uniqueVoxelQueries: result.voxelQueries, visualError: result.visualError });
+      }
+    }
+    return slices;
+  }
+
+  recoverTimedOutWorkers(now = performance.now()) {
+    const expired = new Set();
+    for (const task of this.inFlightBuilds?.values() ?? []) {
+      const awaitingWorker = !task.progressTerminal || task.receivedProgress.size < task.progressiveJobs.length;
+      if (awaitingWorker && now - (task.lastActivityAt ?? task.startedAt) > WORKER_TASK_TIMEOUT_MS) expired.add(task.worker);
+    }
+    for (const worker of expired) {
+      this.workerTaskTimeouts++;
+      this.handleWorkerError(worker, new Error("Chunk Worker task timed out."));
+    }
+    return expired.size;
+  }
+
+  cancelObsoleteWorkerTasks() {
+    const cancelled = [...this.inFlightBuilds].filter(([, task]) => task.cancelled);
+    if (!cancelled.length) return 0;
+    const previousSize = this.workers.length;
+    for (const [taskId, task] of cancelled) {
+      // The build Worker is synchronous inside one request. Termination, rather
+      // than posting an unobservable cancel request, establishes ownership has
+      // ended before its slot can be reused.
+      this.terminateWorker(task.worker);
+      this.workers = this.workers.filter(worker => worker !== task.worker);
+      this.idleWorkers = this.idleWorkers.filter(worker => worker !== task.worker);
+      task.pendingProgress?.clear();
+      task.cancelState = "terminated";
+      this.settleWorkerTask(taskId, task);
+      this.cancelledWorkerTasks++;
+    }
+    if (this.useWorkers && !this.disposed && this.workers.length < Math.min(previousSize, this.activeBuildLimit)) {
+      this.initWorkers(Math.min(previousSize, this.activeBuildLimit));
+    }
+    this.scheduleBuildDispatch();
+    return cancelled.length;
+  }
+
+  rebuildDirtyChunks(budgetMs = DEFAULT_MESH_BUDGET_MS, { synchronousNearField = false, deadline = Infinity } = {}) {
     const start = performance.now();
+    this.recoverTimedOutWorkers(start);
+    budgetMs = Math.max(0, Math.min(budgetMs, deadline - start));
+    if (!this.useWorkers) {
+      const rebuilt = this.drainCompletedBuilds();
+      this.advanceFallbackBuild(start + budgetMs, rebuilt);
+      this.lastRebuildMs = performance.now() - start;
+      return [...new Set(rebuilt)];
+    }
+    const progress = this.drainWorkerProgress(budgetMs);
     const rebuilt = this.drainCompletedBuilds();
+    if (budgetMs <= 0 || progress && performance.now() - start >= budgetMs) { this.dispatchBuilds(); return rebuilt; }
     const dirty = Array.from(this.chunks.values())
       .filter((chunk) => chunk.dirty && chunk.buildState !== "queued" && chunk.buildState !== "building")
       .sort((a, b) => Math.max(Math.abs(a.chunkX - this.centerChunkX), Math.abs(a.chunkZ - this.centerChunkZ)) - Math.max(Math.abs(b.chunkX - this.centerChunkX), Math.abs(b.chunkZ - this.centerChunkZ)));
@@ -757,22 +968,6 @@ export class ChunkManager {
         if (performance.now() - start >= budgetMs) break;
         continue;
       }
-      if (!chunk.baseBlocksReady) this.ensureChunkBaseSync(chunk);
-      const access = this.meshAccessForChunk(chunk);
-      const sections=ensureRenderSections(chunk);
-      let changed=false;
-      for (const section of sections.values()) {
-        if (!section.dirty && (!section.visualDirty || performance.now()<section.visualRetryAt)) continue;
-        const revision=sectionRevision(section,this.materialVersion);
-        const result=buildRenderSection(chunk,section,access,{visualOnly:!section.dirty});
-        if(commitRenderSection(chunk,section,result,revision))changed=true;
-        this.sectionBuildVisits+=result.voxelVisits;
-        this.stageStats.record("mesh-build",result.elapsedMs);
-        this.logRenderEvent("section-build-sync",{chunkId:chunk.id,section:section.sectionIndex,generation:section.generation,revision,elapsedMs:result.elapsedMs,voxelVisits:result.voxelVisits,uniqueVoxelQueries:result.voxelQueries,voxelCacheBytes:result.voxelCacheBytes,lightCells:result.lighting?.cells??0,visualError:result.visualError});
-        if(performance.now()-start>=budgetMs)break;
-      }
-      if(changed)rebuilt.push(chunk);
-      if (performance.now() - start >= budgetMs) break;
     }
     this.lastRebuildMs = performance.now() - start;
     this.dispatchBuilds();
@@ -789,10 +984,10 @@ export class ChunkManager {
         if (base !== BLOCK_ID.air) return base;
         const loadedTreeBlock = this.getLoadedTreeBlockAtWorld(coord.worldX, coord.worldY, coord.worldZ);
         if (loadedTreeBlock !== null) return loadedTreeBlock;
-        return getGeneratedTreeBlockAt(managerWorldSeed(this), coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions());
+        return getGeneratedTreeBlockAtConfig(this.config, coord.worldX, coord.worldY, coord.worldZ);
       }
     }
-    return getBlockAt(managerWorldSeed(this), coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions());
+    return getBlockAtConfig(this.config, coord.worldX, coord.worldY, coord.worldZ);
   }
 
   getDeltaAtWorld(worldX, worldY, worldZ) {
@@ -884,10 +1079,10 @@ export class ChunkManager {
         if (base !== BLOCK_ID.air) return base;
         const loadedTreeBlock = this.getLoadedTreeTrunkBlockAtWorld(coord.worldX, coord.worldY, coord.worldZ);
         if (loadedTreeBlock !== null) return loadedTreeBlock;
-        return collisionBlockId(getGeneratedTreeTrunkBlockAt(managerWorldSeed(this), coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions()));
+        return collisionBlockId(getGeneratedTreeTrunkBlockAtConfig(this.config, coord.worldX, coord.worldY, coord.worldZ));
       }
     }
-    return collisionBlockId(getBlockAt(managerWorldSeed(this), coord.worldX, coord.worldY, coord.worldZ, this.generationVersion, this.workerOptions()));
+    return collisionBlockId(getBlockAtConfig(this.config, coord.worldX, coord.worldY, coord.worldZ));
   }
 
   getCollisionTopAtWorld(worldX, worldZ, maxBlockY = Infinity) {
@@ -1221,6 +1416,14 @@ export class ChunkManager {
       staleBuildResults: this.staleBuildResults,
       sectionBuildVisits: this.sectionBuildVisits,
       nearFieldRepairs: this.nearFieldRepairs,
+      progressiveSectionsCommitted: this.progressiveSectionsCommitted,
+      progressivePacketsQueued: [...this.inFlightBuilds.values()].reduce((sum, task) => sum + (task.pendingProgress?.size ?? 0), 0),
+      progressiveBytesQueued: [...this.inFlightBuilds.values()].reduce((sum, task) => sum + (task.progressBytesQueued ?? 0), 0),
+      workerTaskTimeouts: this.workerTaskTimeouts,
+      cancelledWorkerTasks: this.cancelledWorkerTasks,
+      fallbackSlices: this.fallbackSlices,
+      fallbackCancelled: this.fallbackCancelled,
+      fallbackActive: Boolean(this.fallbackBuild),
       remoteOverlayChunks: this.remoteOverlayChunks.size,
       cpuStages: this.stageStats.snapshot(),
     };
@@ -1242,6 +1445,7 @@ export class ChunkManager {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.cancelFallbackBuild();
     if (this.dispatchTimer !== null) clearTimeout(this.dispatchTimer);
     this.dispatchTimer = null;
     for (const worker of this.workers) this.terminateWorker(worker);
@@ -1386,11 +1590,11 @@ export class ChunkManager {
     if (!phase || phase !== task.phase) {
       return { error: new Error(`Chunk worker response type ${String(message.type)} is invalid during the ${task.phase} phase of task ${taskId}.`) };
     }
-    if (message.type === "chunkBuilt" || message.type === "visualBuilt") {
+    if (message.type === "chunkBuilt" || message.type === "chunkProgress" || message.type === "visualBuilt") {
       if (message.taskVersion !== task.version || message.materialVersion !== task.materialVersion) {
         return { error: new Error(`Chunk worker response versions do not match task ${taskId}.`) };
       }
-      if (message.type === "chunkBuilt" && message.mode !== task.mode) {
+      if ((message.type === "chunkBuilt" || message.type === "chunkProgress") && message.mode !== task.mode) {
         return { error: new Error(`Chunk worker response mode does not match task ${taskId}.`) };
       }
     }
@@ -1474,6 +1678,24 @@ export class ChunkManager {
     return true;
   }
 
+  takeNextBuildTask(now = performance.now()) {
+    const serial = this.buildDispatchSerial = (this.buildDispatchSerial ?? 0) + 1;
+    let index = 0;
+    // Reserve one of eight selections for genuinely waiting columns. An old
+    // dirty timestamp on a repeatedly serviced edit must not monopolize this
+    // lane, and a capped distance/age score alone cannot guarantee progress.
+    if (serial % 8 === 0) {
+      let oldest = now - 2000;
+      for (let candidate = 0; candidate < this.buildQueue.length; candidate++) {
+        const task = this.buildQueue[candidate], chunk = this.chunks.get(task.id);
+        if (!chunk) continue;
+        const waitingSince = Math.max(task.queuedAt ?? now, chunk.lastBuildDispatchAt ?? -Infinity);
+        if (waitingSince < oldest) { oldest = waitingSince; index = candidate; }
+      }
+    }
+    return this.buildQueue.splice(index, 1)[0];
+  }
+
   dispatchBuilds() {
     if (!this.useWorkers || !this.idleWorkers.length || !this.buildQueue.length) return;
     const activeLimit = Math.max(0, Math.min(this.workerCount, Math.trunc(this.activeBuildLimit || 0)));
@@ -1487,7 +1709,7 @@ export class ChunkManager {
     }
     while (this.idleWorkers.length && this.buildQueue.length && this.inFlightBuilds.size < activeLimit) {
       const worker = this.idleWorkers.pop();
-      const task = this.buildQueue.shift();
+      const task = this.takeNextBuildTask();
       const chunk = this.chunks.get(task.id);
       if(task.mode==="section") {
         if(!chunk||chunk!==task.chunk||!this.dispatchSectionBuild(worker,task,chunk))this.idleWorkers.push(worker);
@@ -1520,7 +1742,10 @@ export class ChunkManager {
       }
       const taskId = this.taskSerial++;
       const startedAt = performance.now();
+      chunk.lastBuildDispatchAt = startedAt;
       const waitMs = Number.isFinite(task.queuedAt) ? startedAt - task.queuedAt : 0;
+      const progressiveJobs = [...ensureRenderSections(chunk, { initializeColumnTops: chunk.baseBlocksReady }).values()]
+        .map(section => ({ sectionIndex: section.sectionIndex, sectionRevision: sectionRevision(section, this.materialVersion) }));
       chunk.markBuilding(taskId);
       this.inFlightBuilds.set(taskId, {
         worker,
@@ -1538,6 +1763,12 @@ export class ChunkManager {
         materialVersion: this.materialVersion,
         phase: "chunk",
         cancelled: false,
+        progressiveJobs,
+        pendingProgress: new Map(),
+        receivedProgress: new Set(),
+        nextProgressToApply: 0,
+        baseProfileAtStart: chunk.baseProfile,
+        baseBlocksAtStart: chunk.baseBlocks,
       });
       this.logRenderEvent("chunk-build-start", {
         chunkId: chunk.id,
@@ -1558,6 +1789,10 @@ export class ChunkManager {
         options: this.workerOptions(),
         mode: task.mode || "base",
         taskVersion: task.version,
+        progressiveSections: true,
+        sectionJobs: progressiveJobs,
+        preferredSectionY: this.buildCamera ? (this.buildCamera.targetWorldY ?? this.buildCamera.worldY)
+          + (this.buildCamera.targetLocalOffsetY ?? this.buildCamera.localOffsetY ?? 0) : undefined,
         baseProfile: task.mode === "remesh" ? chunk.baseProfile : null,
         treeInstances: task.mode === "remesh" && chunk.baseProfile ? chunk.treeInstances : null,
         finalDeltas,
@@ -1609,6 +1844,12 @@ export class ChunkManager {
       return;
     }
     const task = validation.task;
+    task.lastActivityAt = performance.now();
+    if (task.progressiveJobs && (message.type === "chunkProgress" || message.progressComplete === true)) {
+      try { this.queueWorkerProgress(task, message); }
+      catch (error) { this.handleWorkerError(worker, error); }
+      return;
+    }
     const chunk = this.chunks.get(task.id);
     if (task.phase === "chunk" && (!chunk || (task.sectionJobs
       ? chunk!==task.chunk || !task.sectionJobs.some(job=>chunk.renderSections?.get(job.sectionIndex)?.buildTaskId===message.taskId)
@@ -1659,6 +1900,107 @@ export class ChunkManager {
     }
     if (this.settleWorkerTask(message.taskId, task)) this.markWorkerIdle(worker);
     this.scheduleBuildDispatch();
+  }
+
+  queueWorkerProgress(task, message) {
+    const count = task.progressiveJobs.length;
+    if (message.progressComplete === true) {
+      if (message.progressMessageCount !== count) throw new Error("Invalid progressive Worker terminal count.");
+      task.progressTerminal = message;
+      return;
+    }
+    const sequence = message.progressSequence;
+    if (!Number.isSafeInteger(sequence) || sequence < 0 || sequence >= count
+      || !Array.isArray(message.sectionResults) || message.sectionResults.length !== 1) {
+      throw new Error("Invalid progressive Worker section packet.");
+    }
+    if (task.receivedProgress.has(sequence)) return;
+    const result = message.sectionResults[0];
+    const job = task.progressiveJobs.find(candidate => candidate.sectionIndex === result.sectionIndex);
+    task.receivedProgressSections ??= new Set();
+    if (!job || result.sectionRevision !== job.sectionRevision || task.receivedProgressSections.has(result.sectionIndex)
+      || sequence !== 0 && message.baseProfile) throw new Error("Progressive Worker section does not match its captured job.");
+    task.receivedProgress.add(sequence);
+    task.receivedProgressSections.add(result.sectionIndex);
+    task.pendingProgress.set(sequence, message);
+    message.receivedAt = performance.now();
+    task.firstProgressReceivedAt ??= message.receivedAt;
+    task.progressBytesQueued = (task.progressBytesQueued ?? 0) + progressivePacketBytes(message);
+  }
+
+  drainWorkerProgress(budgetMs = 1) {
+    const startedAt = performance.now();
+    if (!this.inFlightBuilds?.size) return 0;
+    const tasks = [...this.inFlightBuilds.entries()].filter(([, task]) => task.progressiveJobs);
+    if (!tasks.length) return 0;
+    let committed = 0, packets = 0, advanced = true;
+    const first = (this.progressDrainCursor ?? 0) % tasks.length;
+    this.progressDrainCursor = first + 1;
+    while (advanced && packets < 64) {
+      advanced = false;
+      for (let offset = 0; offset < tasks.length; offset++) {
+        const [taskId, task] = tasks[(first + offset) % tasks.length];
+        if (!this.inFlightBuilds.has(taskId)) continue;
+        const chunk = this.chunks.get(task.id);
+        if (chunk !== task.chunk) task.cancelled = true;
+        if (task.cancelled) { task.pendingProgress.clear(); task.progressBytesQueued = 0; }
+        const message = task.pendingProgress.get(task.nextProgressToApply);
+        // One bounded commit can still make progress when earlier frame work
+        // exhausted its deadline. No geometry is generated in this path.
+        if (message && (!packets || performance.now() - startedAt < budgetMs)) {
+          task.pendingProgress.delete(task.nextProgressToApply++);
+          task.progressBytesQueued = Math.max(0, (task.progressBytesQueued ?? 0) - progressivePacketBytes(message));
+          packets++; advanced = true;
+          if (!task.baseAdopted) {
+            if (chunk.baseProfile !== task.baseProfileAtStart || chunk.baseBlocks !== task.baseBlocksAtStart) task.cancelled = true;
+            if (!task.cancelled && message.baseProfile) {
+              chunk.setBaseProfile(message.baseProfile, message.treeInstances,
+                this.baseBlockResolverForChunk(chunk.chunkX, chunk.chunkZ, message.baseProfile), { retainRenderSections: true });
+              // Tree owners were unknown before the first generated profile.
+              // An intervening edit can touch a crown in another section. Keep
+              // all other captured sections usable and retry these owners.
+              if (chunk.version !== task.version) for (const tree of chunk.treeInstances) {
+                const section = chunk.renderSections.get(Math.floor((tree.baseY - chunk.minY) / 16));
+                if (section) { section.dataRevision++; section.haloRevision++; section.dirty = true; section.visualDirty = true; }
+              }
+            }
+            task.baseAdopted = true;
+          }
+          if (!task.cancelled && message.materialVersion === this.materialVersion) {
+            const result = message.sectionResults[0];
+            const section = chunk.renderSections.get(result.sectionIndex);
+            if (section && commitRenderSection(chunk, section, result, result.sectionRevision)) {
+              committed++; this.progressiveSectionsCommitted++;
+              this.completedBuilds.push(chunk);
+              this.logRenderEvent("section-worker-progress", { chunkId: chunk.id, section: section.sectionIndex,
+                taskId, cpuReadyAt: section.meshReadyAt, receivedAt: message.receivedAt,
+                applyWaitMs: performance.now() - message.receivedAt, elapsedMs: performance.now() - task.startedAt,
+                first: task.firstSectionCommittedAt == null });
+              task.firstSectionCommittedAt ??= performance.now();
+            } else this.staleBuildResults++;
+          }
+          if (chunk === task.chunk) chunk.markBuilding(taskId);
+        }
+        if (task.progressTerminal && (task.cancelled || task.nextProgressToApply === task.progressiveJobs.length)) {
+          if (chunk === task.chunk && chunk.buildTaskId === taskId) {
+            chunk.buildTaskId = null;
+            chunk.buildState = chunk.baseBlocksReady ? "ready" : "empty";
+            if (!task.cancelled) {
+              updateChunkSectionSummary(chunk);
+              if (task.reusableBase && !chunk.dirty) chunk.reusableBaseVersion = chunk.version;
+              this.workerBuildFailures.delete(chunk.id);
+              this.consecutiveWorkerFailures = 0;
+            }
+          }
+          this.lastWorkerBuildMs = Number(task.progressTerminal.elapsedMs) || 0;
+          if (this.settleWorkerTask(taskId, task)) this.markWorkerIdle(task.worker);
+          this.scheduleBuildDispatch();
+        }
+      }
+      if (performance.now() - startedAt >= budgetMs) break;
+    }
+    this.stageStats.record("worker-progress-commit", performance.now() - startedAt);
+    return committed;
   }
 
   handleWorkerError(worker, event, { allowRestart = true } = {}) {
@@ -1811,7 +2153,7 @@ export class ChunkManager {
 
   drainCompletedBuilds() {
     if (!this.completedBuilds.length) return [];
-    const out = this.completedBuilds.filter((chunk) => this.chunks.has(chunk.id));
+    const out = [...new Set(this.completedBuilds.filter((chunk) => this.chunks.get(chunk.id) === chunk))];
     this.completedBuilds.length = 0;
     return out;
   }
@@ -2237,7 +2579,7 @@ function normalizeWorkerUrl(value) {
 }
 
 function workerResponsePhase(type) {
-  if (type === "chunkBuilt" || type === "chunkBuildError") return "chunk";
+  if (type === "chunkBuilt" || type === "chunkProgress" || type === "chunkBuildError") return "chunk";
   if (type === "visualBuilt" || type === "visualBuildError") return "visual";
   return null;
 }
@@ -2254,4 +2596,14 @@ function managerWorldSeed(manager) {
   const seed = managerWorldSeeds.get(manager);
   if (!seed) throw new Error("ChunkManager world seed is unavailable.");
   return seed;
+}
+
+function progressivePacketBytes(message) {
+  let bytes=0;
+  for(const result of message.sectionResults ?? []) for(const mesh of [result.mesh,result.visualMesh]) {
+    bytes += (mesh?.vertices?.byteLength ?? 0) + (mesh?.indices?.byteLength ?? 0);
+  }
+  if(message.baseProfile) for(const key of ['surfaceY','waterY','surfaceBlock']) bytes += message.baseProfile[key]?.byteLength ?? 0;
+  for(const tree of message.treeInstances ?? []) bytes += tree.leafMasks?.byteLength ?? 0;
+  return bytes;
 }

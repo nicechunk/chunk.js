@@ -42,12 +42,77 @@ function isGreedyOpaqueBlock(blockId) {
   return blockId !== BLOCK_ID.cactus && isOpaqueSolidBlock(blockId);
 }
 
-export function meshChunkOpaque(chunkState, {
+function drainMeshSteps(iterator) {
+  let result = iterator.next();
+  while (!result.done) result = iterator.next();
+  return result.value;
+}
+
+function meshWorkBudget(value = 256) {
+  if (!Number.isInteger(value) || value < 1 || value > 4096) throw new RangeError("Mesh workBudget must be an integer from 1 to 4096.");
+  return {limit: value, used: 0, last: 0};
+}
+
+function takeMeshWork(budget, amount = 1) {
+  budget.used += amount;
+  if (budget.used < budget.limit) return false;
+  budget.last = budget.used;
+  budget.used = 0;
+  return true;
+}
+
+function meshStep(budget, phase) {
+  return {phase, workUnits: budget.last};
+}
+
+function* sortedMeshCandidatesSteps(candidates, work) {
+  let values = [];
+  for (const value of candidates) {
+    if (takeMeshWork(work)) yield meshStep(work, "opaque-candidate-order");
+    values.push(value);
+  }
+  if (values.length <= 256) return values.sort((a, b) => a - b);
+  let scratch = new Array(values.length);
+  // A merge pass can yield between entries; a large native Array.sort cannot.
+  for (let width = 1; width < values.length; width *= 2) {
+    for (let start = 0; start < values.length; start += width * 2) {
+      const middle = Math.min(values.length, start + width), end = Math.min(values.length, start + width * 2);
+      let left = start, right = middle;
+      for (let index = start; index < end; index++) {
+        if (takeMeshWork(work)) yield meshStep(work, "opaque-candidate-order");
+        scratch[index] = left < middle && (right >= end || values[left] <= values[right]) ? values[left++] : values[right++];
+      }
+    }
+    [values, scratch] = [scratch, values];
+  }
+  return values;
+}
+
+function* packMeshIndicesSteps(indices, vertexCount, work) {
+  const output = vertexCount > 65535 ? new Uint32Array(indices.length) : new Uint16Array(indices.length);
+  const stride = Math.min(256, work.limit);
+  for (let offset = 0; offset < indices.length; offset += stride) {
+    if (takeMeshWork(work, Math.min(stride, indices.length - offset))) yield meshStep(work, "pack-indices");
+    const end = Math.min(indices.length, offset + stride);
+    for (let index = offset; index < end; index++) output[index] = indices[index];
+  }
+  return output;
+}
+
+// Iterators own their CPU output until completion. Callers that suspend a build
+// must retain its immutable voxel/access snapshot and discard cancelled output.
+export function meshChunkOpaque(chunkState, options = {}) {
+  return drainMeshSteps(meshChunkOpaqueSteps(chunkState, options));
+}
+
+export function* meshChunkOpaqueSteps(chunkState, {
   getBlockAtWorld = null,
   getDeltaAtWorld = null,
   getColumnTopAtWorld = null,
   treeDeltaCandidateCount = 0,
+  workBudget = 256,
 } = {}) {
+  const work = meshWorkBudget(workBudget);
   const positions = [];
   const indices = [];
   let blockCount = 0;
@@ -60,6 +125,7 @@ export function meshChunkOpaque(chunkState, {
   for (let z = 0; z < size; z += 1) {
     for (let y = minY; y < minY + height; y += 1) {
       for (let x = 0; x < size; x += 1) {
+        if (takeMeshWork(work)) yield meshStep(work, "opaque-cells");
         const blockId = chunkState.getFinalBlock(x, y, z);
         if (!isGreedyOpaqueBlock(blockId)) continue;
         blockCount += 1;
@@ -78,16 +144,16 @@ export function meshChunkOpaque(chunkState, {
   }
 
   for (const group of faceGroups.values()) {
-    quadCount += appendGreedyGroup(group, positions, indices);
+    quadCount += yield* appendGreedyGroupSteps(group, positions, indices, work);
   }
-  const cactusModels = appendCactusResourceModels(chunkState, positions, indices);
+  const cactusModels = yield* appendCactusResourceModelsSteps(chunkState, positions, indices, work);
   blockCount += cactusModels.blocks;
   quadCount += cactusModels.quads;
-  quadCount += appendTreeInstanceProxyQuads(chunkState, positions, indices, { getDeltaAtWorld, treeDeltaCandidateCount });
+  quadCount += yield* appendTreeInstanceProxyQuadsSteps(chunkState, positions, indices, { getDeltaAtWorld, treeDeltaCandidateCount }, work);
 
-  const vertices = packVertices(positions, chunkState.renderOriginY ?? null);
+  const vertices = yield* packChunkVerticesSteps(positions, chunkState.renderOriginY ?? null, {workBudget});
   const vertexCount = vertices.byteLength / CHUNK_VERTEX_STRIDE_BYTES;
-  const indexArray = vertexCount > 65535 ? new Uint32Array(indices) : new Uint16Array(indices);
+  const indexArray = yield* packMeshIndicesSteps(indices, vertexCount, work);
   return {
     vertices,
     originY: vertices.positionOriginY || 0,
@@ -106,19 +172,26 @@ export function meshChunkOpaque(chunkState, {
   };
 }
 
-export function meshChunkOpaqueFast(chunkState, {
+export function meshChunkOpaqueFast(chunkState, options = {}) {
+  return drainMeshSteps(meshChunkOpaqueFastSteps(chunkState, options));
+}
+
+export function* meshChunkOpaqueFastSteps(chunkState, {
   getBlockAtWorld = null,
   getDeltaAtWorld = null,
   getColumnTopAtWorld = null,
   treeDeltaCandidateCount = 0,
   neighborDeltas = null,
+  workBudget = 256,
 } = {}) {
+  const work = meshWorkBudget(workBudget);
   if (!chunkState.baseProfile) {
-    return meshChunkOpaque(chunkState, {
+    return yield* meshChunkOpaqueSteps(chunkState, {
       getBlockAtWorld,
       getDeltaAtWorld,
       getColumnTopAtWorld,
       treeDeltaCandidateCount,
+      workBudget,
     });
   }
   const positions = [];
@@ -131,14 +204,18 @@ export function meshChunkOpaqueFast(chunkState, {
   const maxY = minY + chunkState.height - 1;
   const topY = new Int16Array(size * size);
   const topBlock = new Uint16Array(size * size);
-  const deltaColumns = finalDeltaColumns(chunkState);
+  const deltaColumns = yield* finalDeltaColumnsSteps(chunkState, work);
   topY.fill(minY - 1);
 
   if (chunkState.baseProfile) {
     for (let z = 0; z < size; z += 1) {
       for (let x = 0; x < size; x += 1) {
+        if (takeMeshWork(work)) yield meshStep(work, "opaque-column-tops");
         const column = x + z * size;
-        const top = deltaAwareProfileOpaqueColumnTop(chunkState, x, z, maxY, deltaColumns.get(column));
+        const deltas = deltaColumns.get(column);
+        const top = deltas?.length
+          ? yield* deltaAwareProfileOpaqueColumnTopSteps(chunkState, x, z, maxY, deltas, work)
+          : profileOpaqueColumnTop(chunkState, x, z, maxY);
         if (top.y < minY) continue;
         topY[column] = top.y;
         topBlock[column] = top.blockId;
@@ -150,6 +227,7 @@ export function meshChunkOpaqueFast(chunkState, {
       for (let x = 0; x < size; x += 1) {
         const column = x + z * size;
         for (let y = maxY; y >= minY; y -= 1) {
+          if (takeMeshWork(work)) yield meshStep(work, "opaque-column-tops");
           const blockId = chunkState.getFinalBlock(x, y, z);
           if (!isGreedyOpaqueBlock(blockId)) continue;
           topY[column] = y;
@@ -163,11 +241,12 @@ export function meshChunkOpaqueFast(chunkState, {
 
   for (let z = 0; z < size; z += 1) {
     for (let x = 0; x < size; x += 1) {
+      if (takeMeshWork(work)) yield meshStep(work, "opaque-cliffs");
       const column = x + z * size;
       const yTop = topY[column];
       if (yTop < minY) continue;
       if (deltaColumns.has(column)) {
-        appendExposedOpaqueTopFaces(chunkState, faceGroups, x, z, yTop, getBlockAtWorld, getColumnTopAtWorld);
+        yield* appendExposedOpaqueTopFacesSteps(chunkState, faceGroups, x, z, yTop, getBlockAtWorld, getColumnTopAtWorld, work);
       } else if (!isGreedyOpaqueBlock(neighborBlock(chunkState,x,yTop+1,z,getBlockAtWorld))) {
         addFaceCell(faceGroups, 2, x, yTop, z, topBlock[column], terrainSunShadowShade(chunkState, x, yTop, z, getBlockAtWorld, getColumnTopAtWorld, FACE_DEFS[2].shade));
       }
@@ -182,6 +261,7 @@ export function meshChunkOpaqueFast(chunkState, {
         // no coverage and repeats expensive material reconstruction.
         const startY = Math.max(minY, neighborTop + 1);
         for (let y = startY; y <= yTop; y += 1) {
+          if (takeMeshWork(work)) yield meshStep(work, "opaque-cliffs");
           const blockId = chunkState.getFinalBlock(x, y, z);
           if (!isGreedyOpaqueBlock(blockId)) continue;
           if (isGreedyOpaqueBlock(neighborBlock(chunkState, nx, y, nz, getBlockAtWorld))) continue;
@@ -190,25 +270,26 @@ export function meshChunkOpaqueFast(chunkState, {
       }
     }
   }
-  appendOpaqueDeltaFaces(chunkState, faceGroups, getBlockAtWorld, getColumnTopAtWorld, neighborDeltas);
+  yield* appendOpaqueDeltaFacesSteps(chunkState, faceGroups, getBlockAtWorld, getColumnTopAtWorld, neighborDeltas, work);
   // The actual world bottom is a boundary, not a boundary at each render section.
   for (let z = 0; z < size; z++) for (let x = 0; x < size; x++) {
+    if (takeMeshWork(work)) yield meshStep(work, "opaque-world-bottom");
     const block = chunkState.getFinalBlock(x, minY, z);
     if (isGreedyOpaqueBlock(block) && !isGreedyOpaqueBlock(neighborBlock(chunkState, x, minY - 1, z, getBlockAtWorld))) {
       addFaceCell(faceGroups, 3, x, minY, z, block);
     }
   }
   for (const group of faceGroups.values()) {
-    quadCount += appendGreedyGroup(group, positions, indices);
+    quadCount += yield* appendGreedyGroupSteps(group, positions, indices, work);
   }
-  const cactusModels = appendCactusResourceModels(chunkState, positions, indices);
+  const cactusModels = yield* appendCactusResourceModelsSteps(chunkState, positions, indices, work);
   blockCount += cactusModels.blocks;
   quadCount += cactusModels.quads;
-  quadCount += appendTreeInstanceProxyQuads(chunkState, positions, indices, { getDeltaAtWorld, treeDeltaCandidateCount });
+  quadCount += yield* appendTreeInstanceProxyQuadsSteps(chunkState, positions, indices, { getDeltaAtWorld, treeDeltaCandidateCount }, work);
 
-  const vertices = packVertices(positions, chunkState.renderOriginY ?? null);
+  const vertices = yield* packChunkVerticesSteps(positions, chunkState.renderOriginY ?? null, {workBudget});
   const vertexCount = vertices.byteLength / CHUNK_VERTEX_STRIDE_BYTES;
-  const indexArray = vertexCount > 65535 ? new Uint32Array(indices) : new Uint16Array(indices);
+  const indexArray = yield* packMeshIndicesSteps(indices, vertexCount, work);
   return {
     vertices,
     originY: vertices.positionOriginY || 0,
@@ -228,9 +309,10 @@ export function meshChunkOpaqueFast(chunkState, {
   };
 }
 
-function appendExposedOpaqueTopFaces(chunkState, faceGroups, x, z, yTop, getBlockAtWorld, getColumnTopAtWorld) {
+function* appendExposedOpaqueTopFacesSteps(chunkState, faceGroups, x, z, yTop, getBlockAtWorld, getColumnTopAtWorld, work) {
   let aboveIsOpaque = isGreedyOpaqueBlock(neighborBlock(chunkState,x,yTop+1,z,getBlockAtWorld));
   for (let y = yTop; y >= chunkState.minY; y -= 1) {
+    if (takeMeshWork(work)) yield meshStep(work, "opaque-edited-tops");
     const blockId = chunkState.getFinalBlock(x, y, z);
     const opaque = isGreedyOpaqueBlock(blockId);
     if (opaque && !aboveIsOpaque) {
@@ -265,15 +347,17 @@ function profileOpaqueColumnTop(chunkState, localX, localZ, maxY) {
   return { y: chunkState.minY - 1, blockId: BLOCK_ID.air };
 }
 
-function deltaAwareProfileOpaqueColumnTop(chunkState, localX, localZ, maxY, deltas = null) {
+function* deltaAwareProfileOpaqueColumnTopSteps(chunkState, localX, localZ, maxY, deltas, work) {
   const profileTop = profileOpaqueColumnTop(chunkState, localX, localZ, maxY);
   if (!deltas?.length) return profileTop;
   let candidateY = profileTop.y;
   for (const delta of deltas) {
+    if (takeMeshWork(work)) yield meshStep(work, "opaque-edited-column-tops");
     if (delta.localY > maxY || delta.localY < chunkState.minY) continue;
     if (isGreedyOpaqueBlock(delta.blockId)) candidateY = Math.max(candidateY, delta.localY);
   }
   for (let y = Math.min(maxY, candidateY); y >= chunkState.minY; y -= 1) {
+    if (takeMeshWork(work)) yield meshStep(work, "opaque-edited-column-tops");
     const blockId = chunkState.getFinalBlock(localX, y, localZ);
     if (isGreedyOpaqueBlock(blockId)) return { y, blockId };
   }
@@ -287,15 +371,127 @@ function profileWaterY(profile, column) {
   return water;
 }
 
-export function meshChunkVisual(chunkState, { getBlockAtWorld = null, getColumnTopAtWorld = null, getWaterLevelAtWorld = null } = {}) {
+// Only the caller that established a canonical v5 generated profile may use
+// this summary. Dense/custom chunks return null and keep the full final-state
+// traversal. The result belongs to one immutable build snapshot, not a chunk
+// version cache: edits, remote expiry, rules and pickup masks can all change it.
+export function buildGeneratedVisualCandidates(chunkState, options = {}) {
+  return drainMeshSteps(buildGeneratedVisualCandidatesSteps(chunkState, options));
+}
+
+export function* buildGeneratedVisualCandidatesSteps(chunkState, {
+  profile = chunkState.generatedVisualProfile?.profile,
+  finalDeltas = finalDeltaMap(chunkState),
+  workBudget = 256,
+} = {}) {
+  const work = meshWorkBudget(workBudget);
+  const size = chunkState.chunkSize;
+  const columns = size * size;
+  if (!chunkState.generatedVisualProfile || chunkState.generationVersion !== 5 || chunkState.baseBlocks
+    || !profile?.surfaceBlock || profile.surfaceBlock.length !== columns
+    || profile.surfaceY?.length !== columns || profile.waterY?.length !== columns) return null;
+
+  const minY = chunkState.minY, endY = minY + chunkState.height;
+  const mask = new Uint8Array(columns * chunkState.height);
+  const groundColumns = new Uint8Array(columns);
+  const resolvedDetails = new Map();
+  const editedColumns = new Set();
+  const rules = chunkState.surfaceDecorationRules ?? EMPTY_COMPILED_SURFACE_DECORATION_RULES;
+  const hasRules = (rules.bySurface?.size ?? 0) > 0;
+  const worldSeed = hasRules ? chunkState.worldSeed : null;
+  const picked = new Set(chunkState.pickedSurfaceColumns ?? []);
+  let cellCount = 0, detailColumnCount = 0, blockCount = 0;
+
+  const baseBlock = (x, y, z) => {
+    if (y < profile.minY || y >= profile.minY + profile.height || y > chunkState.maxBuildY) return BLOCK_ID.air;
+    const column = x + z * size, surface = profile.surfaceY[column];
+    if (y === surface) return profile.surfaceBlock[column];
+    if (y < surface) return BLOCK_ID.stone; // v5 subsurface blocks are all opaque.
+    const water = profileWaterY(profile, column);
+    return water !== null && y <= water ? BLOCK_ID.water : BLOCK_ID.air;
+  };
+  const finalBlock = (x, y, z) => finalDeltas.get(deltaKey(x, y, z, size))?.blockId ?? baseBlock(x, y, z);
+  const contributes = (id, x, y, z) => isVisualBlock(id)
+    && (!isLowVegetationBlock(id) || shouldRenderLowVegetation(id, chunkState, x, y, z));
+  const mark = (x, y, z) => {
+    if (y < minY || y >= endY) return;
+    const id = finalBlock(x, y, z);
+    if (!contributes(id, x, y, z)) return;
+    if (isFluidBlock(id)) {
+      const above = finalBlock(x, y + 1, z);
+      if (isFluidBlock(above) || isOpaqueSolidBlock(above)) return;
+    }
+    const index = x + z * size + (y - minY) * columns;
+    if (!mask[index]) { mask[index] = 1; cellCount++; }
+  };
+
+  for (const delta of finalDeltas.values()) {
+    if (takeMeshWork(work)) yield meshStep(work, "visual-final-candidates");
+    const {localX: x, localY: y, localZ: z} = delta;
+    if (x < 0 || x >= size || z < 0 || z >= size) return null;
+    editedColumns.add(x + z * size);
+    if (y >= minY && y < endY) {
+      blockCount += Number(contributes(delta.blockId, x, y, z)) - Number(contributes(baseBlock(x, y, z), x, y, z));
+    }
+    mark(x, y, z);
+    // A removed/capped top exposes the segment immediately below the edit,
+    // including a surface in the preceding render section.
+    mark(x, y - 1, z);
+  }
+  for (let z = 0; z < size; z++) for (let x = 0; x < size; x++) {
+    if (takeMeshWork(work)) yield meshStep(work, "visual-surface-candidates");
+    const column = x + z * size, surface = profile.surfaceY[column];
+    const water = profileWaterY(profile, column);
+    if (surface >= minY && surface < endY) blockCount += Number(contributes(profile.surfaceBlock[column], x, surface, z));
+    if (water !== null && water > surface) {
+      blockCount += Math.max(0, Math.min(water + 1, endY) - Math.max(surface + 1, minY));
+      mark(x, water, z);
+    }
+    mark(x, surface, z);
+    if (!hasRules) continue;
+    if (editedColumns.has(column)) {
+      // Edits can uncover cave floors or introduce a new top. The full final
+      // column scan remains authoritative for these columns.
+      groundColumns[column] = 1; detailColumnCount++; continue;
+    }
+    if (surface < minY || surface >= endY || (water !== null && water > surface)) continue;
+    const surfaceBlockId = profile.surfaceBlock[column];
+    if (!rules.bySurface.has(surfaceBlockId)) continue;
+    const decoration = resolveSurfaceDecoration({worldSeed,
+      worldX: chunkLocalToWorldI32(chunkState.chunkX, x, size), surfaceY: surface,
+      worldZ: chunkLocalToWorldI32(chunkState.chunkZ, z, size), surfaceBlockId, rules});
+    if (!decoration || (decoration.decorationId >= 100 && decoration.decorationId <= 107 && picked.has(column))) continue;
+    groundColumns[column] = 1; detailColumnCount++;
+    resolvedDetails.set(column, {y: surface + 1, surfaceBlockId, decoration});
+  }
+  const shadowsPossible = chunkState.shadows !== false;
+  return {mask, cellCount, groundColumns, resolvedDetails, editedColumns, detailColumnCount,
+    blockCount, hiddenBlockCount: blockCount - cellCount, shadowsPossible,
+    empty: cellCount === 0 && detailColumnCount === 0 && !shadowsPossible};
+}
+
+export function meshChunkVisual(chunkState, options = {}) {
+  return drainMeshSteps(meshChunkVisualSteps(chunkState, options));
+}
+
+export function* meshChunkVisualSteps(chunkState, { getBlockAtWorld = null, getColumnTopAtWorld = null, getWaterLevelAtWorld = null, workBudget = 256 } = {}) {
+  const work = meshWorkBudget(workBudget);
+  if (chunkState.visualCandidates?.empty) {
+    const vertices = new Uint8Array(0), indices = new Uint16Array(0);
+    vertices.positionOriginY = chunkState.renderOriginY ?? 0;
+    return {vertices, originY: vertices.positionOriginY || 0, indices, vertexCount: 0, indexCount: 0,
+      triangleCount: 0, quadCount: 0, blockCount: chunkState.visualCandidates.blockCount,
+      vertexStrideBytes: CHUNK_VERTEX_STRIDE_BYTES, chunkX: chunkState.chunkX, chunkZ: chunkState.chunkZ,
+      chunkSize: chunkState.chunkSize, height: chunkState.height, minY: chunkState.minY, visual: true};
+  }
   const positions = [];
   const indices = [];
-  let blockCount = 0;
+  let blockCount = chunkState.visualCandidates?.hiddenBlockCount ?? 0;
   let quadCount = 0;
   const faceGroups = new Map();
   const waterDepthCache = new WaterDepthFieldSampler(chunkState, getBlockAtWorld, getColumnTopAtWorld, getWaterLevelAtWorld);
   const visitedVisualCells = new Set();
-  const changedColumns = finalDeltaColumns(chunkState);
+  const changedColumns = yield* finalDeltaColumnsSteps(chunkState, work);
   const size = chunkState.chunkSize;
   const minY = chunkState.minY;
   const height = chunkState.height;
@@ -303,6 +499,7 @@ export function meshChunkVisual(chunkState, { getBlockAtWorld = null, getColumnT
   if (chunkState.baseProfile) {
     for (let z = 0; z < size; z += 1) {
       for (let x = 0; x < size; x += 1) {
+        if (takeMeshWork(work)) yield meshStep(work, "visual-profile-cells");
         const column = x + z * size;
         const surface = chunkState.baseProfile.surfaceY[column];
         const water = profileWaterY(chunkState.baseProfile, column);
@@ -320,9 +517,11 @@ export function meshChunkVisual(chunkState, { getBlockAtWorld = null, getColumnT
         const waterCandidates = new Set();
         if (water !== null && water > surface) waterCandidates.add(water);
         for (const delta of changedColumns.get(column) ?? []) {
+          if (takeMeshWork(work)) yield meshStep(work, "visual-fluid-candidates");
           waterCandidates.add(delta.localY); waterCandidates.add(delta.localY - 1);
         }
         for (const waterY of waterCandidates) {
+          if (takeMeshWork(work)) yield meshStep(work, "visual-fluid-candidates");
           if (waterY < minY || waterY >= minY + height) continue;
           const blockId = chunkState.getFinalBlock(x, waterY, z);
           if (!isFluidBlock(blockId)) continue;
@@ -351,17 +550,18 @@ export function meshChunkVisual(chunkState, { getBlockAtWorld = null, getColumnT
         }
       }
     }
-    const deltaVisual = appendVisualDeltaGeometry(chunkState, faceGroups, positions, indices, getBlockAtWorld, waterDepthCache, visitedVisualCells);
+    const deltaVisual = yield* appendVisualDeltaGeometrySteps(chunkState, faceGroups, positions, indices, getBlockAtWorld, waterDepthCache, visitedVisualCells, work);
     blockCount += deltaVisual.blocks;
     quadCount += deltaVisual.quads;
-    quadCount += appendTerrainProjectionShadowsProfile(chunkState, positions, indices, getColumnTopAtWorld);
-    quadCount += appendTreeInstanceShadowQuads(chunkState, positions, indices);
-    quadCount += appendGroundDetailLayerProfile(chunkState, positions, indices, getBlockAtWorld);
+    quadCount += yield* appendTerrainProjectionShadowsProfileSteps(chunkState, positions, indices, getColumnTopAtWorld, work);
+    quadCount += yield* appendTreeInstanceShadowQuadsSteps(chunkState, positions, indices, work);
+    quadCount += yield* appendGroundDetailLayerProfileSteps(chunkState, positions, indices, getBlockAtWorld, work);
   } else {
-    const candidates=chunkState.generatedVisualProfile?.mask;
+    const candidates=chunkState.visualCandidates?.mask ?? chunkState.generatedVisualProfile?.mask;
     for (let z = 0; z < size; z += 1) {
       for (let y = minY; y < minY + height; y += 1) {
         for (let x = 0; x < size; x += 1) {
+          if (takeMeshWork(work)) yield meshStep(work, "visual-cells");
           if(candidates && !candidates[x+z*size+(y-minY)*size*size])continue;
           const blockId = chunkState.getFinalBlock(x, y, z);
           if (!isVisualBlock(blockId)) continue;
@@ -396,22 +596,22 @@ export function meshChunkVisual(chunkState, { getBlockAtWorld = null, getColumnT
         }
       }
     }
-    quadCount += appendTerrainProjectionShadows(chunkState, positions, indices, getBlockAtWorld, getColumnTopAtWorld);
-    quadCount += appendTreeInstanceShadowQuads(chunkState, positions, indices);
-    quadCount += appendGroundDetailLayer(chunkState, positions, indices, getBlockAtWorld);
+    quadCount += yield* appendTerrainProjectionShadowsSteps(chunkState, positions, indices, getBlockAtWorld, getColumnTopAtWorld, work);
+    quadCount += yield* appendTreeInstanceShadowQuadsSteps(chunkState, positions, indices, work);
+    quadCount += yield* appendGroundDetailLayerSteps(chunkState, positions, indices, getBlockAtWorld, work);
   }
 
-  const cactusShadows = appendCactusResourceShadows(chunkState, positions, indices);
+  const cactusShadows = yield* appendCactusResourceShadowsSteps(chunkState, positions, indices, work);
   blockCount += cactusShadows.blocks;
   quadCount += cactusShadows.quads;
 
   for (const group of faceGroups.values()) {
-    quadCount += appendGreedyGroup(group, positions, indices);
+    quadCount += yield* appendGreedyGroupSteps(group, positions, indices, work);
   }
 
-  const vertices = packVertices(positions, chunkState.renderOriginY ?? null);
+  const vertices = yield* packChunkVerticesSteps(positions, chunkState.renderOriginY ?? null, {workBudget});
   const vertexCount = vertices.byteLength / CHUNK_VERTEX_STRIDE_BYTES;
-  const indexArray = vertexCount > 65535 ? new Uint32Array(indices) : new Uint16Array(indices);
+  const indexArray = yield* packMeshIndicesSteps(indices, vertexCount, work);
   return {
     vertices,
     originY: vertices.positionOriginY || 0,
@@ -889,9 +1089,10 @@ function finalDeltaMap(chunkState) {
   return merged;
 }
 
-function finalDeltaColumns(chunkState) {
+function* finalDeltaColumnsSteps(chunkState, work) {
   const columns = new Map();
   for (const delta of finalDeltaMap(chunkState).values()) {
+    if (takeMeshWork(work)) yield meshStep(work, "delta-columns");
     if (!delta) continue;
     const column = delta.localX + delta.localZ * chunkState.chunkSize;
     let list = columns.get(column);
@@ -904,13 +1105,14 @@ function finalDeltaColumns(chunkState) {
   return columns;
 }
 
-function appendOpaqueDeltaFaces(chunkState, faceGroups, getBlockAtWorld, getColumnTopAtWorld, neighborDeltas = null) {
+function* appendOpaqueDeltaFacesSteps(chunkState, faceGroups, getBlockAtWorld, getColumnTopAtWorld, neighborDeltas, work) {
   const deltas = finalDeltaMap(chunkState);
   const candidates = new Set();
   // A neighbouring edit can expose a face even if this chunk has no edits and
   // its column tops did not move. Keep the candidate on the owning side.
   if (neighborDeltas) {
     for (const delta of neighborDeltas) {
+      if (takeMeshWork(work, 6)) yield meshStep(work, "opaque-halo-candidates");
       const x = delta.worldX - chunkState.chunkX * chunkState.chunkSize;
       const z = delta.worldZ - chunkState.chunkZ * chunkState.chunkSize;
       for (const face of FACE_DEFS) addCandidate(x + face.delta[0], delta.worldY + face.delta[1], z + face.delta[2]);
@@ -920,12 +1122,14 @@ function appendOpaqueDeltaFaces(chunkState, faceGroups, getBlockAtWorld, getColu
     // builds provide indexed neighbour edits and do not take this boundary scan.
     for (let y = chunkState.minY; y < chunkState.minY + chunkState.height; y++) {
       for (let a = 0; a < chunkState.chunkSize; a++) {
+        if (takeMeshWork(work, 4)) yield meshStep(work, "opaque-halo-candidates");
         addCandidate(0,y,a); addCandidate(chunkState.chunkSize-1,y,a);
         addCandidate(a,y,0); addCandidate(a,y,chunkState.chunkSize-1);
       }
     }
   }
   for (const delta of deltas.values()) {
+    if (takeMeshWork(work, 6)) yield meshStep(work, "opaque-delta-candidates");
     if (!delta) continue;
     if (isGreedyOpaqueBlock(delta.blockId)) addCandidate(delta.localX, delta.localY, delta.localZ);
     for (const face of FACE_DEFS) {
@@ -942,7 +1146,9 @@ function appendOpaqueDeltaFaces(chunkState, faceGroups, getBlockAtWorld, getColu
   // A compatibility boundary scan may discover hidden candidates that an
   // explicit halo does not contain. Canonical y/z/x order keeps the exposed
   // face groups and packed output identical in both execution paths.
-  for (const key of [...candidates].sort((a,b)=>a-b)) {
+  const ordered = yield* sortedMeshCandidatesSteps(candidates, work);
+  for (const key of ordered) {
+    if (takeMeshWork(work)) yield meshStep(work, "opaque-delta-faces");
     const layer = Math.floor(key / area);
     const inLayer = key - layer * area;
     const z = Math.floor(inLayer / chunkState.chunkSize);
@@ -970,10 +1176,11 @@ function appendOpaqueDeltaFaces(chunkState, faceGroups, getBlockAtWorld, getColu
   }
 }
 
-function appendVisualDeltaGeometry(chunkState, faceGroups, positions, indices, getBlockAtWorld, waterDepthCache, visited = new Set()) {
+function* appendVisualDeltaGeometrySteps(chunkState, faceGroups, positions, indices, getBlockAtWorld, waterDepthCache, visited, work) {
   let blocks = 0;
   let quads = 0;
   for (const delta of finalDeltaMap(chunkState).values()) {
+    if (takeMeshWork(work)) yield meshStep(work, "visual-delta-cells");
     const { localX: x, localY: y, localZ: z } = delta;
     const key = `${x}:${y}:${z}`;
     if (visited.has(key)) continue;
@@ -1132,20 +1339,31 @@ function addFaceCell(faceGroups, faceIndex, x, y, z, blockId, ao = null) {
   const material = materialDef(blockMaterialIdForFace(blockId, faceIndex));
   const layer = material.textureLayer;
   const shade = Number.isFinite(ao) ? Math.max(0, Math.min(255, Math.trunc(ao))) : face.shade;
-  const cell = greedyCell(faceIndex, x, y, z);
-  const groupKey = `${faceIndex}:${cell.plane}:${layer}:${blockId}:${shade}`;
+  const plane = faceIndex < 2 ? x + (faceIndex === 0 ? 1 : 0) : faceIndex < 4 ? y + (faceIndex === 2 ? 1 : 0) : z + (faceIndex === 4 ? 1 : 0);
+  const u = faceIndex < 2 ? z : x;
+  const v = faceIndex < 2 || faceIndex > 3 ? y : z;
+  // Material layers are immutable functions of block ID and face. Number keys
+  // avoid allocating one tuple string and one cell object for every face.
+  const groupKey = faceGroupKey(faceIndex, plane, blockId, shade);
   let group = faceGroups.get(groupKey);
   if (!group) {
-    group = { faceIndex, face, plane: cell.plane, layer, blockId, ao: shade, cellsByV: new Map(), minU: cell.u, maxU: cell.u, minV: cell.v, maxV: cell.v };
+    group = { faceIndex, face, plane, layer, blockId, ao: shade, cellsByV: new Map(), minU: u, maxU: u, minV: v, maxV: v };
     faceGroups.set(groupKey, group);
   }
-  let row = group.cellsByV.get(cell.v);
-  if (!row) group.cellsByV.set(cell.v, row = new Set());
-  row.add(cell.u);
-  group.minU = Math.min(group.minU, cell.u);
-  group.maxU = Math.max(group.maxU, cell.u);
-  group.minV = Math.min(group.minV, cell.v);
-  group.maxV = Math.max(group.maxV, cell.v);
+  let row = group.cellsByV.get(v);
+  if (!row) group.cellsByV.set(v, row = new Set());
+  row.add(u);
+  group.minU = Math.min(group.minU, u);
+  group.maxU = Math.max(group.maxU, u);
+  group.minV = Math.min(group.minV, v);
+  group.maxV = Math.max(group.maxV, v);
+}
+
+function faceGroupKey(faceIndex, plane, material, shade) {
+  const key = ((plane * 6 + faceIndex) * 65536 + material) * 256 + shade;
+  // Legal terrain heights fit comfortably within 53 bits. Keep a fallback for
+  // custom out-of-domain tree coordinates rather than aliasing their groups.
+  return Number.isSafeInteger(key) ? key : `${faceIndex}:${plane}:${material}:${shade}`;
 }
 
 function greedyCell(faceIndex, x, y, z) {
@@ -1159,25 +1377,31 @@ function greedyCell(faceIndex, x, y, z) {
   }
 }
 
-function appendGreedyGroup(group, vertices, indices) {
+function* appendGreedyGroupSteps(group, vertices, indices, work) {
   let quads = 0;
-  const visited = new Map();
+  // Groups are private to this build and consumed once. Removing emitted cells
+  // preserves the canonical rectangle order without a second Map/Set grid.
   for (let v = group.minV; v <= group.maxV; v += 1) {
     for (let u = group.minU; u <= group.maxU; u += 1) {
-      if (isVisited(visited, u, v) || !hasCell(group, u, v)) continue;
+      if (takeMeshWork(work)) yield meshStep(work, "greedy-faces");
+      if (!hasCell(group, u, v)) continue;
       let width = 1;
-      while (hasCell(group, u + width, v) && !isVisited(visited, u + width, v)) width += 1;
+      while (hasCell(group, u + width, v)) {
+        if (takeMeshWork(work)) yield meshStep(work, "greedy-faces");
+        width += 1;
+      }
       let height = 1;
       grow: while (v + height <= group.maxV) {
         for (let dx = 0; dx < width; dx += 1) {
-          if (!hasCell(group, u + dx, v + height) || isVisited(visited, u + dx, v + height)) break grow;
+          if (takeMeshWork(work)) yield meshStep(work, "greedy-faces");
+          if (!hasCell(group, u + dx, v + height)) break grow;
         }
         height += 1;
       }
       for (let dy = 0; dy < height; dy += 1) {
-        let row = visited.get(v + dy);
-        if (!row) visited.set(v + dy, row = new Set());
-        for (let dx = 0; dx < width; dx++) row.add(u + dx);
+        if (takeMeshWork(work, width)) yield meshStep(work, "greedy-faces");
+        const row = group.cellsByV.get(v + dy);
+        for (let dx = 0; dx < width; dx++) row.delete(u + dx);
       }
       appendQuad(group, u, v, width, height, vertices, indices);
       quads += 1;
@@ -1257,7 +1481,7 @@ function appendGroundDetailShadow(x, y, z, hash, vertices, indices, radius, leng
   return appendProjectedShadowQuad(vertices, indices, cx, y + SHADOW_SURFACE_BIAS, zc, radius, length, height, alpha);
 }
 
-function appendTerrainProjectionShadowsProfile(chunkState, vertices, indices, getColumnTopAtWorld) {
+function* appendTerrainProjectionShadowsProfileSteps(chunkState, vertices, indices, getColumnTopAtWorld, work) {
   if (chunkState.shadows === false) return 0;
   if (!chunkState.baseProfile) return 0;
   let quads = 0;
@@ -1266,6 +1490,7 @@ function appendTerrainProjectionShadowsProfile(chunkState, vertices, indices, ge
   const size = chunkState.chunkSize;
   for (let z = 0; z < size; z += 1) {
     for (let x = 0; x < size; x += 1) {
+      if (takeMeshWork(work)) yield meshStep(work, "terrain-shadow-columns");
       const column = x + z * size;
       const y = profile.surfaceY[column];
       const water = profileWaterY(profile, column);
@@ -1284,7 +1509,7 @@ function appendTerrainProjectionShadowsProfile(chunkState, vertices, indices, ge
   return quads;
 }
 
-function appendTerrainProjectionShadows(chunkState, vertices, indices, getBlockAtWorld, getColumnTopAtWorld) {
+function* appendTerrainProjectionShadowsSteps(chunkState, vertices, indices, getBlockAtWorld, getColumnTopAtWorld, work) {
   if (chunkState.shadows === false) return 0;
   let quads = 0;
   let emitted = 0;
@@ -1294,6 +1519,7 @@ function appendTerrainProjectionShadows(chunkState, vertices, indices, getBlockA
   for (let z = 0; z < size; z += 1) {
     for (let x = 0; x < size; x += 1) {
       for (let y = maxY; y >= minY; y -= 1) {
+        if (takeMeshWork(work)) yield meshStep(work, "terrain-shadow-cells");
         const blockId = chunkState.getFinalBlock(x, y, z);
         if (!isOpaqueSolidBlock(blockId) || !isGroundDetailSurface(blockId)) continue;
         const above = neighborBlock(chunkState, x, y + 1, z, getBlockAtWorld);
@@ -1351,11 +1577,12 @@ function appendTerrainProjectionShadowQuad(vertices, indices, x, y, z, strength,
   return appendProjectedShadowQuad(vertices, indices, x + 0.5 + jitterX, y, z + 0.5 + jitterZ, radius, length, 0.45 + strength, alpha);
 }
 
-function appendTreeInstanceShadowQuads(chunkState, vertices, indices) {
+function* appendTreeInstanceShadowQuadsSteps(chunkState, vertices, indices, work) {
   if (chunkState.shadows === false) return 0;
   if (!chunkState.treeInstances?.length) return 0;
   let quads = 0;
   for (const tree of chunkState.treeInstances) {
+    if (takeMeshWork(work, 16)) yield meshStep(work, "tree-shadows");
     if (treeInstanceModifiedByDelta(chunkState, tree)) continue;
     const x = worldI32ToChunkAffineLocal(chunkState.chunkX, tree.x, chunkState.chunkSize) + 0.5;
     const z = worldI32ToChunkAffineLocal(chunkState.chunkZ, tree.z, chunkState.chunkSize) + 0.5;
@@ -1484,13 +1711,23 @@ function hashI32(hash, value) {
   return Math.imul((hash ^ ((v >>> 24) & 255)) >>> 0, 0x01000193) >>> 0;
 }
 
-function appendGroundDetailLayer(chunkState, vertices, indices, getBlockAtWorld) {
+function* appendGroundDetailLayerSteps(chunkState, vertices, indices, getBlockAtWorld, work) {
+  const rules = chunkState.surfaceDecorationRules ?? EMPTY_COMPILED_SURFACE_DECORATION_RULES;
+  if (!rules.bySurface?.size) return 0;
   let quads = 0;
   const size = chunkState.chunkSize;
   const minY = chunkState.minY;
   const maxY = minY + chunkState.height - 1;
   for (let z = 0; z < size; z += 1) {
     for (let x = 0; x < size; x += 1) {
+      if (takeMeshWork(work, 16)) yield meshStep(work, "ground-details");
+      const candidates = chunkState.visualCandidates;
+      if (candidates && !candidates.groundColumns[x + z * size]) continue;
+      const resolved = candidates?.resolvedDetails.get(x + z * size);
+      if (resolved) {
+        quads += appendResolvedGroundDetail(chunkState, x, resolved.y, z, resolved.surfaceBlockId, resolved.decoration, vertices, indices);
+        continue;
+      }
       const generated=chunkState.generatedVisualProfile;
       const unchanged=generated&&!generated.editedColumns.has(x+z*size);
       const surface=unchanged?generated.profile.surfaceY[x+z*size]:maxY;
@@ -1500,6 +1737,7 @@ function appendGroundDetailLayer(chunkState, vertices, indices, getBlockAtWorld)
       if(unchanged&&(surface<minY||surface>maxY))continue;
       const lower=unchanged?surface:minY;
       for (let y = surface; y >= lower; y -= 1) {
+        if (takeMeshWork(work)) yield meshStep(work, "ground-detail-columns");
         const blockId = chunkState.getFinalBlock(x, y, z);
         if (!hasSurfaceDecorationRule(chunkState, blockId)) continue;
         const above = neighborBlock(chunkState, x, y + 1, z, getBlockAtWorld);
@@ -1513,12 +1751,15 @@ function appendGroundDetailLayer(chunkState, vertices, indices, getBlockAtWorld)
   return quads;
 }
 
-function appendGroundDetailLayerProfile(chunkState, vertices, indices, getBlockAtWorld) {
+function* appendGroundDetailLayerProfileSteps(chunkState, vertices, indices, getBlockAtWorld, work) {
+  const rules = chunkState.surfaceDecorationRules ?? EMPTY_COMPILED_SURFACE_DECORATION_RULES;
+  if (!rules.bySurface?.size) return 0;
   let quads = 0;
   const profile = chunkState.baseProfile;
   const size = chunkState.chunkSize;
   for (let z = 0; z < size; z += 1) {
     for (let x = 0; x < size; x += 1) {
+      if (takeMeshWork(work, 16)) yield meshStep(work, "ground-details");
       const column = x + z * size;
       const y = profile.surfaceY[column];
       const water = profileWaterY(profile, column);
@@ -1552,6 +1793,10 @@ function appendGroundDetailAt(chunkState, x, y, z, surfaceBlockId, vertices, ind
     rules: chunkState.surfaceDecorationRules ?? EMPTY_COMPILED_SURFACE_DECORATION_RULES,
   });
   if (!decoration || ((decoration.decorationId>=100 && decoration.decorationId<=107) && chunkState.pickedSurfaceColumns?.includes(z*chunkState.chunkSize+x))) return 0;
+  return appendResolvedGroundDetail(chunkState, x, y, z, surfaceBlockId, decoration, vertices, indices);
+}
+
+function appendResolvedGroundDetail(chunkState, x, y, z, surfaceBlockId, decoration, vertices, indices) {
   const hash = decoration.variantHash;
   const shadow = chunkState.shadows !== false && (decoration.flags & SURFACE_DECORATION_FLAGS.SHADOW)
     ? appendSurfaceDecorationShadow(decoration.decorationId, x, y, z, hash, vertices, indices)
@@ -2107,25 +2352,25 @@ function appendVoxelCactus(vertices, indices, x, y, z, hash) {
   return quads;
 }
 
-function appendCactusResourceModels(chunkState, vertices, indices) {
+function* appendCactusResourceModelsSteps(chunkState, vertices, indices, work) {
   let quads = 0;
-  const blocks = visitCactusResourceCells(chunkState, (x, y, z) => {
+  const blocks = yield* visitCactusResourceCellsSteps(chunkState, (x, y, z) => {
     const hash = lowVegetationHash(BLOCK_ID.cactus, chunkState, x, y, z);
     quads += appendVoxelCactus(vertices, indices, x, y, z, hash);
-  });
+  }, work);
   return { blocks, quads };
 }
 
-function appendCactusResourceShadows(chunkState, vertices, indices) {
+function* appendCactusResourceShadowsSteps(chunkState, vertices, indices, work) {
   if (chunkState.shadows === false) return { blocks: 0, quads: 0 };
   let quads = 0;
-  const blocks = visitCactusResourceCells(chunkState, (x, y, z) => {
+  const blocks = yield* visitCactusResourceCellsSteps(chunkState, (x, y, z) => {
     quads += appendProjectedShadowQuad(vertices, indices, x + 0.5, y + SHADOW_SURFACE_BIAS, z + 0.5, 0.38, 0.88 * CACTUS_MODEL_HEIGHT_SCALE, CACTUS_MODEL_MAX_Y, 0.34);
-  });
+  }, work);
   return { blocks, quads };
 }
 
-function visitCactusResourceCells(chunkState, visitor) {
+function* visitCactusResourceCellsSteps(chunkState, visitor, work) {
   const seen = new Set();
   let count = 0;
   const visit = (x, y, z) => {
@@ -2142,17 +2387,22 @@ function visitCactusResourceCells(chunkState, visitor) {
   if (chunkState.baseProfile) {
     for (let z = 0; z < chunkState.chunkSize; z += 1) {
       for (let x = 0; x < chunkState.chunkSize; x += 1) {
+        if (takeMeshWork(work)) yield meshStep(work, "cactus-cells");
         const column = x + z * chunkState.chunkSize;
         visit(x, chunkState.baseProfile.surfaceY[column] + 1, z);
       }
     }
     for (const delta of finalDeltaMap(chunkState).values()) {
+      if (takeMeshWork(work)) yield meshStep(work, "cactus-cells");
       visit(delta.localX, delta.localY, delta.localZ);
     }
   } else {
     for (let z = 0; z < chunkState.chunkSize; z += 1) {
       for (let y = chunkState.minY; y < chunkState.minY + chunkState.height; y += 1) {
-        for (let x = 0; x < chunkState.chunkSize; x += 1) visit(x, y, z);
+        for (let x = 0; x < chunkState.chunkSize; x += 1) {
+          if (takeMeshWork(work)) yield meshStep(work, "cactus-cells");
+          visit(x, y, z);
+        }
       }
     }
   }
@@ -2557,16 +2807,22 @@ function detailHash(worldX, y, worldZ, surfaceBlockId) {
   return (h ^ (h >>> 16)) >>> 0;
 }
 
-function appendTreeInstanceProxyQuads(
+function appendTreeInstanceProxyQuads(chunkState, vertices, indices, options = {}) {
+  return drainMeshSteps(appendTreeInstanceProxyQuadsSteps(chunkState, vertices, indices, options, meshWorkBudget()));
+}
+
+function* appendTreeInstanceProxyQuadsSteps(
   chunkState,
   vertices,
   indices,
   { getDeltaAtWorld = null, treeDeltaCandidateCount = 0 } = {},
+  work,
 ) {
   if (!chunkState.treeInstances?.length) return 0;
   let quads = 0;
   const leafFaceGroups = new Map();
   for (const tree of chunkState.treeInstances) {
+    if (takeMeshWork(work, 16)) yield meshStep(work, "tree-models");
     if (treeInstanceModifiedByDelta(chunkState, tree)) continue;
     const x = worldI32ToChunkAffineLocal(chunkState.chunkX, tree.x, chunkState.chunkSize) + 0.5;
     const z = worldI32ToChunkAffineLocal(chunkState.chunkZ, tree.z, chunkState.chunkSize) + 0.5;
@@ -2575,7 +2831,7 @@ function appendTreeInstanceProxyQuads(
     const snowLayer = materialDef(MATERIAL_ID.snow).textureLayer;
     appendBoxQuads(vertices, indices, x, tree.baseY + tree.trunkHeight * 0.5, z, 0.48, tree.trunkHeight, 0.48, trunkLayer, 218, { skipBottom: true });
     quads += 5;
-    appendCanonicalTreeLeafFaces(
+    yield* appendCanonicalTreeLeafFacesSteps(
       chunkState,
       tree,
       leafFaceGroups,
@@ -2583,13 +2839,14 @@ function appendTreeInstanceProxyQuads(
       snowLayer,
       getDeltaAtWorld,
       treeDeltaCandidateCount,
+      work,
     );
   }
-  for (const group of leafFaceGroups.values()) quads += appendTreeGreedyGroup(group, vertices, indices);
+  for (const group of leafFaceGroups.values()) quads += yield* appendGreedyGroupSteps(group, vertices, indices, work);
   return quads;
 }
 
-function appendCanonicalTreeLeafFaces(
+function* appendCanonicalTreeLeafFacesSteps(
   chunkState,
   tree,
   faceGroups,
@@ -2597,12 +2854,14 @@ function appendCanonicalTreeLeafFaces(
   snowLayer,
   getDeltaAtWorld,
   treeDeltaCandidateCount,
+  work,
 ) {
   const profile = treeLeafProfileForMesh(chunkState, tree);
   const masks = visibleTreeLeafMasks(chunkState, tree, profile, getDeltaAtWorld, treeDeltaCandidateCount);
   const cells = uniqueTreeLeafWorldCells(tree, profile, masks);
   const occupied = new Set(cells.map(({ worldX, y, worldZ }) => treeWorldCellKey(worldX, y, worldZ)));
   for (const { worldX, y, worldZ } of cells) {
+    if (takeMeshWork(work)) yield meshStep(work, "tree-leaf-faces");
     const localX = worldI32ToChunkAffineLocal(chunkState.chunkX, worldX, chunkState.chunkSize);
     const localZ = worldI32ToChunkAffineLocal(chunkState.chunkZ, worldZ, chunkState.chunkSize);
     for (let faceIndex = 0; faceIndex < FACE_DEFS.length; faceIndex += 1) {
@@ -2674,68 +2933,36 @@ function visibleTreeLeafMasks(chunkState, tree, profile, getDeltaAtWorld, treeDe
 
 function addTreeFaceCell(groups, faceIndex, x, y, z, layer, shade) {
   const face = FACE_DEFS[faceIndex];
-  const cell = greedyCell(faceIndex, x, y, z);
-  const groupKey = `${faceIndex}:${cell.plane}:${layer}:${shade}`;
+  const plane = faceIndex < 2 ? x + (faceIndex === 0 ? 1 : 0) : faceIndex < 4 ? y + (faceIndex === 2 ? 1 : 0) : z + (faceIndex === 4 ? 1 : 0);
+  const u = faceIndex < 2 ? z : x;
+  const v = faceIndex < 2 || faceIndex > 3 ? y : z;
+  const groupKey = faceGroupKey(faceIndex, plane, layer, shade);
   let group = groups.get(groupKey);
   if (!group) {
     group = {
       faceIndex,
       face,
-      plane: cell.plane,
+      plane,
       layer,
       ao: shade,
       cellsByV: new Map(),
-      minU: cell.u,
-      maxU: cell.u,
-      minV: cell.v,
-      maxV: cell.v,
+      minU: u,
+      maxU: u,
+      minV: v,
+      maxV: v,
     };
     groups.set(groupKey, group);
   }
-  let row = group.cellsByV.get(cell.v);
+  let row = group.cellsByV.get(v);
   if (!row) {
     row = new Set();
-    group.cellsByV.set(cell.v, row);
+    group.cellsByV.set(v, row);
   }
-  row.add(cell.u);
-  group.minU = Math.min(group.minU, cell.u);
-  group.maxU = Math.max(group.maxU, cell.u);
-  group.minV = Math.min(group.minV, cell.v);
-  group.maxV = Math.max(group.maxV, cell.v);
-}
-
-function appendTreeGreedyGroup(group, vertices, indices) {
-  const visited = new Map();
-  let quads = 0;
-  for (let v = group.minV; v <= group.maxV; v += 1) {
-    for (let u = group.minU; u <= group.maxU; u += 1) {
-      if (treeFaceCellVisited(visited, u, v) || !group.cellsByV.get(v)?.has(u)) continue;
-      let width = 1;
-      while (group.cellsByV.get(v)?.has(u + width) && !treeFaceCellVisited(visited, u + width, v)) width += 1;
-      let height = 1;
-      grow: while (v + height <= group.maxV) {
-        for (let offset = 0; offset < width; offset += 1) {
-          if (!group.cellsByV.get(v + height)?.has(u + offset) || treeFaceCellVisited(visited, u + offset, v + height)) break grow;
-        }
-        height += 1;
-      }
-      for (let rowOffset = 0; rowOffset < height; rowOffset += 1) {
-        let row = visited.get(v + rowOffset);
-        if (!row) {
-          row = new Set();
-          visited.set(v + rowOffset, row);
-        }
-        for (let columnOffset = 0; columnOffset < width; columnOffset += 1) row.add(u + columnOffset);
-      }
-      appendQuad(group, u, v, width, height, vertices, indices);
-      quads += 1;
-    }
-  }
-  return quads;
-}
-
-function treeFaceCellVisited(visited, u, v) {
-  return Boolean(visited.get(v)?.has(u));
+  row.add(u);
+  group.minU = Math.min(group.minU, u);
+  group.maxU = Math.max(group.maxU, u);
+  group.minV = Math.min(group.minV, v);
+  group.maxV = Math.max(group.maxV, v);
 }
 
 function explicitTreeDeltaBlockAt(chunkState, worldX, worldY, worldZ, getDeltaAtWorld) {
@@ -2849,22 +3076,39 @@ function quadUvs(faceIndex, corners) {
 }
 
 export function packChunkVertices(vertices, originY = null) {
+  return drainMeshSteps(packChunkVerticesSteps(vertices, originY));
+}
+
+export function* packChunkVerticesSteps(vertices, originY = null, {workBudget = 256} = {}) {
+  const work = meshWorkBudget(workBudget);
   let scale = POSITION_PACK_SCALE;
-  let min = Infinity, max = -Infinity;
-  for (const vertex of vertices) { min = Math.min(min, vertex.p[1]); max = Math.max(max, vertex.p[1]); }
-  const offsetY = originY ?? ((min < -512 || max >= 512) ? Math.floor(min / 16) * 16 : 0);
-  while (scale > 1 && vertices.some(v => v.p.some((n, axis) => Math.round((n - (axis === 1 ? offsetY : 0)) * scale) < -32768 || Math.round((n - (axis === 1 ? offsetY : 0)) * scale) > 32767))) scale /= 2;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const {p} of vertices) {
+    if (takeMeshWork(work)) yield meshStep(work, "pack-bounds");
+    minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]);
+    minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]);
+    minZ = Math.min(minZ, p[2]); maxZ = Math.max(maxZ, p[2]);
+  }
+  const offsetY = originY ?? ((minY < -512 || maxY >= 512) ? Math.floor(minY / 16) * 16 : 0);
+  // Rounding is monotone, so the six extents prove the range of every vertex.
+  // Empty meshes keep scale 64 and the caller's explicit origin.
+  while (scale > 1 && vertices.length && (Math.round(minX * scale) < -32768 || Math.round(maxX * scale) > 32767
+    || Math.round((minY - offsetY) * scale) < -32768 || Math.round((maxY - offsetY) * scale) > 32767
+    || Math.round(minZ * scale) < -32768 || Math.round(maxZ * scale) > 32767)) scale /= 2;
   const out = new Uint8Array(vertices.length * CHUNK_VERTEX_STRIDE_BYTES);
   out.positionOriginY = offsetY;
   const view = new DataView(out.buffer);
   for (let i = 0; i < vertices.length; i += 1) {
+    if (takeMeshWork(work)) yield meshStep(work, "pack-vertices");
     const vertex = vertices[i];
     const offset = i * CHUNK_VERTEX_STRIDE_BYTES;
-    const p = vertex.p.map((n, axis) => Math.round((n - (axis === 1 ? offsetY : 0)) * scale));
-    if (p.some(n => !Number.isSafeInteger(n) || n < -32768 || n > 32767)) throw new RangeError("Final mesh vertex exceeds the packed coordinate range.");
-    view.setInt16(offset, p[0], true);
-    view.setInt16(offset + 2, p[1], true);
-    view.setInt16(offset + 4, p[2], true);
+    const x = Math.round(vertex.p[0] * scale), y = Math.round((vertex.p[1] - offsetY) * scale), z = Math.round(vertex.p[2] * scale);
+    if (!Number.isSafeInteger(x) || x < -32768 || x > 32767 || !Number.isSafeInteger(y) || y < -32768 || y > 32767
+      || !Number.isSafeInteger(z) || z < -32768 || z > 32767) throw new RangeError("Final mesh vertex exceeds the packed coordinate range.");
+    view.setInt16(offset, x, true);
+    view.setInt16(offset + 2, y, true);
+    view.setInt16(offset + 4, z, true);
     view.setInt16(offset + 6, scale, true);
     view.setInt8(offset + 8, vertex.n[0]);
     view.setInt8(offset + 9, vertex.n[1]);
@@ -2880,10 +3124,6 @@ export function packChunkVertices(vertices, originY = null) {
 
 function hasCell(group, u, v) {
   return group.cellsByV.get(v)?.has(u) ?? false;
-}
-
-function isVisited(visited, u, v) {
-  return visited.get(v)?.has(u) ?? false;
 }
 
 const packVertices = packChunkVertices;

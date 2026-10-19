@@ -37,7 +37,11 @@ test("small-budget synchronous fallback generates the next near base progressive
     manager.ensureChunkRange(0,0);
     assert.ok([...manager.chunks.values()].every(chunk=>!chunk.baseBlocksReady));
     manager.rebuildDirtyChunks(.001);
-    assert.equal(manager.chunks.get("0,0").baseBlocksReady,true);
+    const center=manager.chunks.get("0,0");
+    assert.equal(center.baseBlocksReady,false,"a tiny slice does not run a whole profile reconstruction");
+    assert.equal(manager.fallbackSlices,1);
+    for(let step=0;step<5000&&!center.renderSections?.get(0).mesh;step++)manager.rebuildDirtyChunks(0);
+    assert.equal(center.baseBlocksReady,true);
     assert.equal([...manager.chunks.values()].filter(chunk=>chunk.baseBlocksReady).length,1);
     assert.ok(manager.chunks.get("0,0").renderSections.get(0).mesh);
   } finally {manager.dispose();}

@@ -68,7 +68,8 @@ test('a real Worker initial retry matches the final edited world in every comple
     postMessage(task) {
       if(task.type==='setSurfaceDecorationRules'){actual.setSurfaceDecorationRules(task.rules,task.revision);return;}
       starts.push(task);
-      pending.push(actual.build(task).then(result=>this.onmessage?.({data:{...result,taskId:task.taskId}})));
+      pending.push(actual.build(task,{onProgress:result=>this.onmessage?.({data:{...result,taskId:task.taskId}})})
+        .then(result=>this.onmessage?.({data:{...result,taskId:task.taskId}})));
     }
     terminate(){}
   };
@@ -78,8 +79,11 @@ test('a real Worker initial retry matches the final edited world in every comple
     const chunk=manager.ensureChunk(66,29);manager.setBuildConcurrencyLimit(1);
     manager.applyChainDelta([{worldX:1064,worldY:5,worldZ:472,blockId:20},
       {worldX:1065,worldY:6,worldZ:472,blockId:0}]);
-    await pending[0];assert.equal(chunk.mesh,null);assert.equal(manager.staleBuildResults,1);
-    manager.rebuildDirtyChunks(4);assert.equal(starts[1].mode,'remesh');await pending[1];
+    await pending[0];assert.equal(chunk.mesh,null,'message callbacks must only enqueue progressive output');
+    for(let step=0;step<32&&manager.inFlightBuilds.size;step++)manager.rebuildDirtyChunks(0);
+    assert.ok(chunk.mesh,'unaffected initial sections can publish while the edited section retries');
+    assert.ok(manager.staleBuildResults>=1);
+    manager.rebuildDirtyChunks(50);assert.equal(starts[1].mode,'section');await pending[1];
     assert.equal(starts.length,2);assert.equal(manager.buildQueue.length,0);assert.equal(chunk.dirty,false);
     const access={...manager.meshAccessForChunk(chunk),generatedTerrain:false,noLocalLightSources:false};
     for(const section of chunk.renderSections.values()) {

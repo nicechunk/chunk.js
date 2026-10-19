@@ -18,9 +18,16 @@ export async function createActualBuildWorker() {
   });
   worker.on("message",message=>{
     const entry=pending.get(message.taskId);if(!entry)return;
+    if(message.type==="chunkProgress"){
+      entry.progress.push(message);entry.onProgress?.(message);return;
+    }
     pending.delete(message.taskId);clearTimeout(entry.timer);
     if(message.type==="chunkBuildError")entry.reject(new Error(message.error));
-    else entry.resolve(message);
+    else if(message.progressComplete){
+      const first=entry.progress[0];
+      entry.resolve({...message,baseProfile:first?.baseProfile??null,treeInstances:first?.treeInstances??null,
+        sectionResults:entry.progress.flatMap(part=>part.sectionResults??[]).sort((a,b)=>a.sectionIndex-b.sectionIndex),progress:entry.progress});
+    }else entry.resolve(message);
   });
   worker.on("error",error=>{for(const entry of pending.values()){clearTimeout(entry.timer);entry.reject(error);}pending.clear();});
   await ready;
@@ -28,11 +35,11 @@ export async function createActualBuildWorker() {
     setSurfaceDecorationRules(rules, revision=1) {
       worker.postMessage({type:"setSurfaceDecorationRules",rules,revision});
     },
-    build(task) {
+    build(task, { onProgress = null } = {}) {
       const taskId=sequence++;
       return new Promise((resolve,reject)=>{
         const timer=setTimeout(()=>{pending.delete(taskId);reject(new Error(`Actual Worker timeout for task ${taskId}`));},30000);
-        pending.set(taskId,{resolve,reject,timer});worker.postMessage({...task,type:"buildChunk",taskId});
+        pending.set(taskId,{resolve,reject,timer,progress:[],onProgress});worker.postMessage({...task,type:"buildChunk",taskId});
       });
     },
     async dispose(){for(const entry of pending.values()){clearTimeout(entry.timer);entry.reject(new Error("Worker terminated"));}pending.clear();await worker.terminate();},

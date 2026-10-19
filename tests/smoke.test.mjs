@@ -124,7 +124,8 @@ import {
 
 const chunks = new ChunkManager({ viewDistance: 1, height: 64, minY: -16 });
 chunks.updatePlayerPosition(0, 24, 0);
-const rebuilt = chunks.rebuildDirtyChunks(100);
+let rebuilt = [];
+for (let step = 0; step < 200 && !rebuilt.length; step++) rebuilt = chunks.rebuildDirtyChunks(100);
 assert.ok(rebuilt.length > 0, "dirty chunk rebuild should produce meshes");
 const chunk = rebuilt[0];
 assert.ok(chunk.mesh.vertexCount > 0, "chunk mesh should contain vertices");

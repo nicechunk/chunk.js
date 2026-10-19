@@ -583,7 +583,7 @@ export class ChunkState {
     this.invalidateRenderSections?.(null,"base-blocks");
   }
 
-  setBaseProfile(baseProfile, treeInstances = this.treeInstances, baseBlockResolver = null) {
+  setBaseProfile(baseProfile, treeInstances = this.treeInstances, baseBlockResolver = null, { retainRenderSections = false } = {}) {
     this.authorityInputRevision++;
     this.baseBlocks = null;
     this.baseProfile = baseProfile ?? null;
@@ -593,7 +593,7 @@ export class ChunkState {
     this.buildState = this.baseBlocksReady ? "ready" : "empty";
     this.buildTaskId = null;
     this.buildError = null;
-    this.invalidateRenderSections?.(null,"base-profile");
+    if (!retainRenderSections) this.invalidateRenderSections?.(null,"base-profile");
   }
 
   setMesh(mesh, meshVersion = this.version) {

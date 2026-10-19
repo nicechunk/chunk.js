@@ -11,6 +11,12 @@ const STEPS=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
 // solid in the entire section and halo. The lazy cell cache is shared by all
 // samples; no early-out depends on a height-field assumption about cavities.
 export function bakeSectionLighting(chunk, section, access, meshes, options = DEFAULT_CAVE_LIGHTING) {
+  const iterator=bakeSectionLightingSteps(chunk,section,access,meshes,options);
+  let step;do{step=iterator.next();}while(!step.done);return step.value;
+}
+
+export function* bakeSectionLightingSteps(chunk, section, access, meshes, options = DEFAULT_CAVE_LIGHTING, {workBudget=256}={}) {
+  let units=0;
   if(!meshes.some(mesh=>mesh?.vertexCount))return;
   const shadows=chunk.shadows!==false;
   const noLocalLightSources=(typeof access.noLocalLightSources==="function"?access.noLocalLightSources():access.noLocalLightSources)===true;
@@ -20,7 +26,10 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
   if(!shadows&&noLocalLightSources) {
     for(const mesh of meshes)if(mesh?.vertexCount) {
       const data=new DataView(mesh.vertices.buffer,mesh.vertices.byteOffset,mesh.vertices.byteLength);
-      for(let v=0;v<mesh.vertexCount;v++)data.setUint16(v*20+18,(data.getUint16(v*20+18,true)&7)|0xff80,true);
+      for(let v=0;v<mesh.vertexCount;v++) {
+        data.setUint16(v*20+18,(data.getUint16(v*20+18,true)&7)|0xff80,true);
+        if(++units>=workBudget){units=0;yield {phase:"lighting-constant",workUnits:workBudget};}
+      }
       mesh.lightEncoding="sun4-sky4-local4-v1";
     }
     return {cells:0,domainCells:0,radius:0,skySeeds:0,localSeeds:0,samples:0,sunlight:null,transportCacheBytes:0,occlusion:false};
@@ -59,7 +68,8 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
   // Cache finite-radius transport by cell and remaining distance. Adjacent wall
   // corners reuse the same subproblems instead of each walking the air volume.
   let transportCache=null;
-  const transport=(i,x,y,z,remaining)=>{
+  const transport=function*(i,x,y,z,remaining){
+    if(++units>=workBudget){units=0;yield {phase:"lighting-transport",workUnits:workBudget};}
     const cached=transportCache?.[remaining]?.[i];
     if(cached)return cached-1;
     readCell(i,x,y,z);
@@ -71,7 +81,7 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     if(remaining>0&&!solid[i])for(const [dx,dy,dz]of STEPS){
       const nx=x+dx,ny=y+dy,nz=z+dz;
       if(nx<0||ny<0||nz<0||nx>=width||nz>=width||ny>=height)continue;
-      const value=transport(index(nx,ny,nz),nx,ny,nz,remaining-1);
+      const value=yield* transport(index(nx,ny,nz),nx,ny,nz,remaining-1);
       sky=Math.max(sky,(value>>>4)-attenuation);local=Math.max(local,(value&15)-attenuation);
       if((sky===15&&local===15)||(noLocalLightSources&&sky>=15-attenuation))break;
     }
@@ -80,14 +90,14 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     transportCache[remaining][i]=encoded+1;
     return encoded;
   };
-  const sample=(p)=>{
+  const sample=function*(p){
     const x=Math.floor(p[0])-ox,y=Math.floor(p[1])-oy,z=Math.floor(p[2])-oz;
     if(x<0||y<0||z<0||x>=width||z>=width||y>=height)return {sun:shadows?0:15,sky:shadows?0:15,local:0};
     const first=index(x,y,z),cached=samples.get(first);
     if(cached)return cached;
     readCell(first,x,y,z);
     const light={sun:0,sky:0,local:0};
-    const value=transport(first,x,y,z,maxDistance);
+    const value=yield* transport(first,x,y,z,maxDistance);
     light.sky=shadows?value>>>4:15;light.local=value&15;
     // Only enabled shadows may suppress sunlight or sky. Local emission remains
     // additive in the no-shadow policy and cannot create dark occlusion masks.
@@ -109,8 +119,9 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
         const p=[chunk.chunkX*chunk.chunkSize+data.getInt16(o,true)/s+n[0]*.1,
           (mesh.originY??0)+data.getInt16(o+2,true)/s+n[1]*.1,
           chunk.chunkZ*chunk.chunkSize+data.getInt16(o+4,true)/s+n[2]*.1];
-        const light=sample(p),encoded=128|((light.sun*16+light.sky)<<8)|(light.local<<3);
+        const light=yield* sample(p);const encoded=128|((light.sun*16+light.sky)<<8)|(light.local<<3);
         data.setUint16(o+18,(data.getUint16(o+18,true)&7)|encoded,true);
+        if(++units>=workBudget){units=0;yield {phase:"lighting-vertices",workUnits:workBudget};}
       }
     }
     mesh.lightEncoding="sun4-sky4-local4-v1";

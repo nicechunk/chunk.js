@@ -116,7 +116,7 @@ test("Worker construction failure falls back without disposing the manager", () 
   }
 });
 
-test("losing the last Worker releases queued chunks to synchronous fallback", () => {
+test("losing the last Worker releases queued chunks to cooperative fallback", () => {
   const OriginalWorker = globalThis.Worker;
   const workers = [];
   globalThis.Worker = class FakeWorker {
@@ -158,7 +158,9 @@ test("losing the last Worker releases queued chunks to synchronous fallback", ()
     assert.notEqual(first.buildState, "building");
     assert.notEqual(second.buildState, "queued");
 
-    for (let frame = 0; frame < 20 && (!first.mesh || !second.mesh); frame++) manager.rebuildDirtyChunks(20);
+    // A zero time allowance guarantees one bounded work step. Completion is
+    // checked by work count rather than the speed of a contended test machine.
+    for (let frame = 0; frame < 50_000 && (!first.mesh || !second.mesh); frame++) manager.rebuildDirtyChunks(0);
     assert.equal(first.baseBlocksReady, true);
     assert.equal(second.baseBlocksReady, true);
     assert.ok(first.mesh);
@@ -375,24 +377,26 @@ test("late responses for canceled chunk tasks cannot release a Worker's newer ta
   try {
     const { manager, taskId, task, worker } = harness.startOne();
     const canceledResponse = chunkBuiltResponse(taskId, task);
+    const lateHandler = worker.onmessage;
     manager.unloadFarChunks(100, 100);
     assert.equal(task.cancelled, true);
 
     worker.emit(canceledResponse);
     assert.equal(manager.inFlightBuilds.has(taskId), false);
-    assert.equal(manager.idleWorkers.includes(worker), true);
+    assert.equal(worker.terminated, true);
+    assert.equal(manager.idleWorkers.includes(worker), false);
 
     const currentChunk = manager.ensureChunk(100, 100);
     manager.dispatchBuilds();
     const [currentTaskId, currentTask] = Array.from(manager.inFlightBuilds.entries())
       .find(([, candidate]) => candidate.id === currentChunk.id);
-    assert.equal(currentTask.worker, worker);
-    assert.equal(manager.idleWorkers.includes(worker), false);
+    assert.notEqual(currentTask.worker, worker);
+    assert.equal(manager.idleWorkers.includes(currentTask.worker), false);
 
-    worker.emit(canceledResponse);
+    lateHandler({ data: canceledResponse });
     assert.equal(manager.inFlightBuilds.get(currentTaskId), currentTask);
     assert.equal(currentChunk.buildState, "building");
-    assert.equal(manager.idleWorkers.includes(worker), false);
+    assert.equal(manager.idleWorkers.includes(currentTask.worker), false);
     manager.dispose();
   } finally {
     harness.restore();
