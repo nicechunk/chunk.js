@@ -35,8 +35,8 @@ export class SharedChunkBuffers {
     if (!page) {
       const vertexCapacity = Math.max(BASE_VERTICES, powerOfTwo(vertices));
       const indexCapacity = Math.max(BASE_INDICES, powerOfTwo(mesh.indices.length));
-      const bytes = vertexCapacity * (CHUNK_VERTEX_STRIDE_BYTES + 8) + indexCapacity * 4;
-      if (bytes > MAX_PAGE_BYTES) return null;
+      const bytes = vertexCapacity * (CHUNK_VERTEX_STRIDE_BYTES + 8) + indexCapacity * 2;
+      if (vertexCapacity > 65536 || bytes > MAX_PAGE_BYTES) return null;
       // Empty cached pages must not strand the hard allocation budget.
       if (this.bytes + bytes > this.maxBytes) for (const candidate of [...this.pages]) {
         if (!candidate.live) this.deletePage(candidate);
@@ -56,13 +56,16 @@ export class SharedChunkBuffers {
         offsets[v * 4] = dx; offsets[v * 4 + 1] = dy; offsets[v * 4 + 2] = dz;
         offsets[v * 4 + 3] = tags[v] === 1 ? 1 : 0;
       }
-      const indices = new Uint32Array(mesh.indices.length);
-      for (let i = 0; i < indices.length; i++) indices[i] = mesh.indices[i] + vertexStart;
+      const indices = new Uint16Array(mesh.indices.length);
+      for (let i = 0; i < indices.length; i++) {
+        if (mesh.indices[i] >= vertices) throw new RangeError("Shared chunk index exceeds vertex storage");
+        indices[i] = mesh.indices[i] + vertexStart;
+      }
       const drawRanges = Object.fromEntries(Object.entries(mesh.drawRanges).map(([pass, range]) => [pass, { offset: range.offset + indexStart, count: range.count, sortOffset: range.offset }]));
       const blendUnits = mesh.blendUnits.map(unit => ({ ...unit, offset: unit.offset + indexStart, sortOffset: unit.offset }));
       const handle = { vao: page.vao, vbo: page.vbo, ibo: page.ibo, sharedPage: page,
         vertexStart, vertexCount: vertices, indexStart, indexCount: indices.length,
-        indexType: this.gl.UNSIGNED_INT, indexBytes: 4, triangleCount: mesh.triangleCount,
+        indexType: this.gl.UNSIGNED_SHORT, indexBytes: 2, triangleCount: mesh.triangleCount,
         byteLength: mesh.vertices.byteLength + offsets.byteLength + indices.byteLength,
         drawRanges, blendUnits, bounds: mesh.bounds, originY: mesh.originY ?? 0, released: false };
       page.liveBytes += handle.byteLength;
@@ -80,7 +83,7 @@ export class SharedChunkBuffers {
 
   createPage(vertices, indices, placement, bytes) {
     const gl = this.gl;
-    const page = { ...placement, bytes, live: 0, liveBytes: 0, validated: false,
+    const page = { ...placement, bytes, indexType:gl.UNSIGNED_SHORT,indexBytes:2,live: 0, liveBytes: 0, validated: false,
       freeVertices: [{ start: 0, count: vertices }], freeIndices: [{ start: 0, count: indices }] };
     try {
       page.vao = gl.createVertexArray(); if (!page.vao) throw new Error("Shared chunk VAO allocation returned null");
@@ -99,7 +102,7 @@ export class SharedChunkBuffers {
       gl.bufferData(gl.ARRAY_BUFFER, vertices * 8, gl.STATIC_DRAW);
       gl.enableVertexAttribArray(8); gl.vertexAttribIPointer(8, 4, gl.SHORT, 8, 0);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, page.ibo);
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices * 4, gl.STATIC_DRAW);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices * 2, gl.STATIC_DRAW);
       this.pages.add(page); this.bytes += bytes;
       return page;
     } catch (error) { this.deletePage(page); throw error; }

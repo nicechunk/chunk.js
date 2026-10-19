@@ -1020,8 +1020,8 @@ export class WebGL2VoxelRenderer {
       gl.uniform3f(uniforms.uChunkOrigin,pendingPage.x-origin.worldX,pendingPage.y-origin.worldY,pendingPage.z-origin.worldZ);
       gl.bindVertexArray(pendingPage.vao);
       if(runs>1 && typeof this.multiDraw?.multiDrawElementsWEBGL==='function'){
-        this.multiDraw.multiDrawElementsWEBGL(gl.TRIANGLES,this.multiDrawCounts,0,gl.UNSIGNED_INT,this.multiDrawOffsets,0,runs);drawCalls++;
-      }else for(let i=0;i<runs;i++){gl.drawElements(gl.TRIANGLES,this.multiDrawCounts[i],gl.UNSIGNED_INT,this.multiDrawOffsets[i]);drawCalls++;}
+        this.multiDraw.multiDrawElementsWEBGL(gl.TRIANGLES,this.multiDrawCounts,0,pendingPage.indexType,this.multiDrawOffsets,0,runs);drawCalls++;
+      }else for(let i=0;i<runs;i++){gl.drawElements(gl.TRIANGLES,this.multiDrawCounts[i],pendingPage.indexType,this.multiDrawOffsets[i]);drawCalls++;}
       runs=0;pendingPage=null;
     };
     for(const chunk of chunks){const entry=this.entryForChunk(chunk,visual);if(!entry?.handle)continue;
@@ -1033,8 +1033,8 @@ export class WebGL2VoxelRenderer {
         if(pendingPage && pendingPage!==handle.sharedPage)flush();
         pendingPage=handle.sharedPage;
         for(const pass of passes){const range=handle.drawRanges[pass];if(!range?.count)continue;
-          const offset=range.offset*4;
-          if(runs && this.multiDrawOffsets[runs-1]+this.multiDrawCounts[runs-1]*4===offset)this.multiDrawCounts[runs-1]+=range.count;
+          const offset=range.offset*pendingPage.indexBytes;
+          if(runs && this.multiDrawOffsets[runs-1]+this.multiDrawCounts[runs-1]*pendingPage.indexBytes===offset)this.multiDrawCounts[runs-1]+=range.count;
           else{ensureMultiDrawCapacity(this,runs+1);this.multiDrawCounts[runs]=range.count;this.multiDrawOffsets[runs++]=offset;}
           triangles+=range.count/3;
         }

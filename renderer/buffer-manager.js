@@ -45,7 +45,7 @@ export class BufferManager {
       const target=channel==='vertex'?gl.ARRAY_BUFFER:gl.ELEMENT_ARRAY_BUFFER;
       const actualTarget=channel==='origin'?gl.ARRAY_BUFFER:target;
       const buffer=channel==='vertex'?t.handle.vbo:channel==='origin'?t.handle.sharedPage.origins:t.handle.ibo;
-      const baseOffset=channel==='vertex'?(t.handle.vertexStart??0)*CHUNK_VERTEX_STRIDE_BYTES:channel==='origin'?(t.handle.vertexStart??0)*8:(t.handle.indexStart??0)*4;
+      const baseOffset=channel==='vertex'?(t.handle.vertexStart??0)*CHUNK_VERTEX_STRIDE_BYTES:channel==='origin'?(t.handle.vertexStart??0)*8:(t.handle.indexStart??0)*(t.handle.indexBytes??2);
       const count=Math.min(source.byteLength-t[offsetKey],remaining);
       if(count>0){gl.bindVertexArray(t.handle.vao);gl.bindBuffer(actualTarget,buffer);gl.bufferSubData(actualTarget,baseOffset+t[offsetKey],source.subarray(t[offsetKey],t[offsetKey]+count));t[offsetKey]+=count;remaining-=count;uploaded+=count;}
     }

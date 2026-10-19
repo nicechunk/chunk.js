@@ -4,10 +4,10 @@ Enable `sharedChunkBuffers` on `WebGL2VoxelRenderer` to share GPU storage across
 immutable terrain/visual mesh commits. The generic library default remains false;
 Play enables it. `maxSharedChunkBufferBytes` defaults to 32 MiB, with an absolute
 64 MiB pool ceiling. A normal page owns one VAO and three buffers: packed source
-vertices, integer origin/material offsets and 32-bit rebased indices. The origin attribute uses slot 8, isolated from
+vertices, integer origin/material offsets and 16-bit rebased indices. The origin attribute uses slot 8, isolated from
 avatar and particle slots 0-7, including legacy static avatar defaults.
 
-A page starts at 32768 vertices and 65536 indices (1.125 MiB); oversized commits
+A page starts at 32768 vertices and 65536 indices (1 MiB); oversized commits
 may use pages up to 2 MiB. Requests beyond the pool budget, unsupported layouts,
 noninteger/unrepresentable origin offsets and vertices shared across incompatible
 opaque/cutout passes retain the standalone buffer path. Origins are subtracted
@@ -29,8 +29,8 @@ Transparent units keep their logical sorting offsets and original world centers.
 The sorted queue can batch across shared pages only when adjacent units use the
 same page/state; avatars, particles, previews and other pages remain boundaries.
 
-Shared origins and 32-bit indices consume extra bytes compared with separate
-16-bit buffers. Diagnostics expose reserved/live shared bytes, page count and
+Shared origin/pass attributes consume extra bytes compared with separate
+buffers; rebased indices remain 16-bit because each page has at most 65536 vertices. Diagnostics expose reserved/live shared bytes, page count and
 allocation fallback; the GPU ledger counts actual page allocations once. These
 are application allocation metrics, not physical VRAM or hardware frame rates.
 

@@ -60,10 +60,10 @@ for(const extension of [false,true])test(`shared chunk geometry and ordered cros
   const renderer=Object.create(WebGL2VoxelRenderer.prototype),actual=[];let bound,offset,draws=0;
   const byVao=new Map(handles.map(h=>[h.vao,h]));
   d.gl.bindVertexArray=v=>bound=v;d.gl.uniform3f=(u,x,y,z)=>offset=[x,y,z];
-  const draw=(count,type,bytes)=>{draws++;actual.push(...readVertices(d,byVao.get(bound),{offset:bytes/4,count},offset));};
+  const draw=(count,type,bytes)=>{draws++;actual.push(...readVertices(d,byVao.get(bound),{offset:bytes/2,count},offset));};
   d.gl.drawElements=(mode,count,type,bytes)=>draw(count,type,bytes);
   Object.assign(renderer,{gl:d.gl,program:{},uniforms:{uUseChunkOffset:{},uSurfacePass:{}},multiDrawCounts:new Int32Array(2),multiDrawOffsets:new Int32Array(2),
-    entryForChunk:c=>c.entry,multiDraw:extension?{multiDrawElementsWEBGL(mode,counts,a,type,offsets,b,n){draws++;for(let i=0;i<n;i++)actual.push(...readVertices(d,byVao.get(bound),{offset:offsets[b+i]/4,count:counts[a+i]},offset));}}:null});
+    entryForChunk:c=>c.entry,multiDraw:extension?{multiDrawElementsWEBGL(mode,counts,a,type,offsets,b,n){draws++;for(let i=0;i<n;i++)actual.push(...readVertices(d,byVao.get(bound),{offset:offsets[b+i]/2,count:counts[a+i]},offset));}}:null});
   const result=renderer.renderMeshPass(chunks,origin,['opaque','cutout']);
   assert.deepEqual(actual,expected);assert.equal(result.triangles,expected.length/3);assert.equal(result.drawCalls,draws);
   assert.equal(draws,extension?1:6,'combine across chunks, or contiguous opaque/cutout ranges without the extension');
@@ -86,9 +86,9 @@ test('byte-limited replacement uploads occupy disjoint storage and released gaps
 });
 
 test('shared allocation cap, far origins and mixed-pass vertex conflicts retain the standalone fallback',()=>{
-  const d=device(),manager=new BufferManager(d.gl,{shared:true,maxSharedBytes:1179648}),large=mesh([3],24000);
+  const d=device(),manager=new BufferManager(d.gl,{shared:true,maxSharedBytes:1048576}),large=mesh([3],24000);
   const a=manager.createChunkBuffers(large,{x:0,y:0,z:0}),b=manager.createChunkBuffers(large,{x:16,y:0,z:0});
-  assert.ok(a.sharedPage);assert.equal(b.sharedPage,undefined);assert.ok(manager.shared.bytes<=1179648);
+  assert.ok(a.sharedPage);assert.equal(b.sharedPage,undefined);assert.ok(manager.shared.bytes<=1048576);
   const far=manager.createChunkBuffers(mesh(),{x:2**25,y:0,z:0});assert.equal(far.sharedPage,undefined);
   const conflict=mesh([3]);const v=new DataView(conflict.vertices.buffer);v.setUint16(2*20+16,28,true);conflict.indices=new Uint16Array([0,1,2,2,1,3]);
   const fallback=manager.createChunkBuffers(conflict,{x:0,y:0,z:0});assert.equal(fallback.sharedPage,undefined);
@@ -127,4 +127,23 @@ test('storage read by an in-flight frame is quarantined until the renderer repor
   ready=true;manager.reclaimSharedChunks();assert.equal(manager.shared.snapshot().sharedBufferRetiredSlices,0);
   const reused=manager.createChunkBuffers(source,placement);assert.equal(reused.vertexStart,old.vertexStart);
   manager.disposeChunkBuffers(next);manager.disposeChunkBuffers(reused);manager.dispose();assert.equal(d.buffers.size,0);
+});
+
+test('invalid blend indices cannot wrap into a valid 16-bit shared vertex address',()=>{
+  const d=device(),manager=new BufferManager(d.gl,{shared:true}),placement={x:0,y:0,z:0};
+  const old=manager.createChunkBuffers(mesh(),placement),before=manager.shared.snapshot().sharedBufferLiveBytes;
+  const broken=prepareMeshDrawRanges(mesh([17]));broken.indices=new Uint32Array(broken.indices);broken.indices[0]=65536;
+  assert.throws(()=>manager.createChunkBuffers(broken,placement),/index exceeds vertex storage/);
+  assert.equal(manager.shared.snapshot().sharedBufferLiveBytes,before);assert.ok(d.buffers.has(old.vbo));
+  manager.disposeChunkBuffers(old);manager.dispose();assert.equal(d.buffers.size,0);
+});
+
+test('a 65536-vertex page exactly represents the highest 16-bit vertex index',()=>{
+  const d=device(),manager=new BufferManager(d.gl,{shared:true}),placement={x:0,y:0,z:0};
+  const first=manager.createChunkBuffers(mesh([3],65532),placement),tail=manager.createChunkBuffers(mesh([3]),placement);
+  assert.equal(first.vao,tail.vao);assert.equal(tail.vertexStart,65532);assert.equal(tail.indexBytes,2);
+  const indices=new Uint16Array(d.buffers.get(tail.ibo).buffer,tail.indexStart*2,tail.indexCount);
+  assert.equal(Math.max(...indices),65535);
+  assert.deepEqual(readVertices(d,tail,tail.drawRanges.opaque,[0,0,0]),[[0,0,0],[0,1,0],[1,0,0],[1,0,0],[0,1,0],[1,1,0]]);
+  manager.disposeChunkBuffers(first);manager.disposeChunkBuffers(tail);manager.dispose();assert.equal(d.buffers.size,0);
 });
