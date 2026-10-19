@@ -117,6 +117,7 @@ export class WebGL2VoxelRenderer {
       environmentEffects: options.environmentEffects ?? true,
       waterEffects: options.waterEffects ?? true,
       shadows: options.shadows ?? true,
+      multiDraw: options.multiDraw ?? true,
       gpuTiming: options.gpuTiming ?? true,
       deferredChunkUploads: options.deferredChunkUploads ?? false,
       textureTileSize: options.textureTileSize ?? 32,
@@ -253,6 +254,9 @@ export class WebGL2VoxelRenderer {
       if (rawGl.isContextLost?.()) { this.pauseContext(); return this; }
       const gl = instrumentGl(rawGl, this.resourceLedger);
       this.gl = gl;
+      this.multiDraw = this.options.multiDraw ? gl.getExtension?.("WEBGL_multi_draw") : null;
+      this.multiDrawCounts = new Int32Array(32);
+      this.multiDrawOffsets = new Int32Array(32);
       this.gpuTimer = this.options.gpuTiming ? new AsyncGpuTimer(gl, { generation: this.contextGeneration }) : null;
       runStage("shader programs", () => {
         const shader=source=>shaderForShadowPolicy(source,this.options.shadows);
@@ -960,6 +964,9 @@ export class WebGL2VoxelRenderer {
       const offset=[(avatar.worldX||0)+(avatar.localOffsetX||0)-origin.worldX,(avatar.worldY||0)+(avatar.localOffsetY||0)-origin.worldY,(avatar.worldZ||0)+(avatar.localOffsetZ||0)-origin.worldZ];
       const yaw=avatar.yaw||0,c=Math.cos(yaw),s=Math.sin(yaw);
       for(let i=0;i<entry.mesh.indices.length;i+=3){const ids=[entry.mesh.indices[i],entry.mesh.indices[i+1],entry.mesh.indices[i+2]],stride=(entry.mesh.vertexStrideBytes||40)/4;
+        // Hidden equipment is collapsed with zero alpha. It has no pixels and
+        // must not become one transparent draw per invisible triangle.
+        if(ids.every(id=>snapshot.vertices[id*stride+9]===0&&(stride<13||snapshot.vertices[id*stride+12]<0)))continue;
         if(opacity>=0.999 && !ids.some(id=>snapshot.vertices[id*stride+9]<0.999 || (stride>=14&&snapshot.vertices[id*stride+13]>0.5)))continue;
         const center=[0,0,0];for(const id of ids){const o=id*stride;center[0]+=(c*snapshot.vertices[o]+s*snapshot.vertices[o+2])/3;center[1]+=snapshot.vertices[o+1]/3;center[2]+=(-s*snapshot.vertices[o]+c*snapshot.vertices[o+2])/3;}
         add({kind:'avatar',avatar,snapshot,range:{offset:i,count:3}},center.map((v,k)=>v+offset[k]));
@@ -978,14 +985,25 @@ export class WebGL2VoxelRenderer {
         const { entry, unit, offset, opacity } = item;
         // Only merge adjacent ranges in the already sorted queue. Never reorder
         // triangles or cross an intervening avatar, particle, preview or origin.
-        let count = unit.count;
+        let count = unit.count, runs = 0, rangeOffset = unit.offset;
+        const saveRange=()=>{
+          if(runs>=this.multiDrawCounts.length) {
+            const counts=new Int32Array(this.multiDrawCounts.length*2),offsets=new Int32Array(counts.length);
+            counts.set(this.multiDrawCounts);offsets.set(this.multiDrawOffsets);
+            this.multiDrawCounts=counts;this.multiDrawOffsets=offsets;
+          }
+          this.multiDrawCounts[runs]=count;
+          this.multiDrawOffsets[runs++]=rangeOffset*(entry.handle.indexBytes??2);
+        };
         while (index + 1 < queue.length) {
           const next = queue[index + 1];
           if (next.kind !== 'terrain' || next.entry.handle !== entry.handle || next.opacity !== opacity
-            || !sameOffset(next.offset, offset) || next.unit.offset !== unit.offset + count) break;
-          count += next.unit.count;
+            || !sameOffset(next.offset, offset)) break;
+          if(next.unit.offset===rangeOffset+count)count+=next.unit.count;
+          else {saveRange();rangeOffset=next.unit.offset;count=next.unit.count;}
           index++;
         }
+        saveRange();
         if (!terrainActive) {
           gl.useProgram(this.program);
           gl.uniformMatrix4fv(this.uniforms.uViewProjection, false, vp);
@@ -997,8 +1015,15 @@ export class WebGL2VoxelRenderer {
         if (boundOpacity !== opacity) { gl.uniform1f(this.uniforms.uOpacity, opacity); boundOpacity = opacity; }
         if (!sameOffset(boundOffset, offset)) { gl.uniform3f(this.uniforms.uChunkOrigin, ...offset); boundOffset = offset; }
         if (boundHandle !== entry.handle) { gl.bindVertexArray(entry.handle.vao); boundHandle = entry.handle; }
-        gl.drawElements(gl.TRIANGLES, count, entry.handle.indexType, unit.offset * (entry.handle.indexBytes ?? 2));
-        drawCalls++; triangles += count / 3;
+        // WEBGL_multi_draw executes these index ranges in their existing sorted
+        // order with identical state. Keep the ordinary path when unavailable.
+        if(runs>1&&typeof this.multiDraw?.multiDrawElementsWEBGL==='function') {
+          this.multiDraw.multiDrawElementsWEBGL(gl.TRIANGLES,this.multiDrawCounts,0,entry.handle.indexType,this.multiDrawOffsets,0,runs);
+          drawCalls++;
+        } else for(let range=0;range<runs;range++) {
+          gl.drawElements(gl.TRIANGLES,this.multiDrawCounts[range],entry.handle.indexType,this.multiDrawOffsets[range]);drawCalls++;
+        }
+        for(let range=0;range<runs;range++)triangles+=this.multiDrawCounts[range]/3;
       } else {
         const stats = item.kind === 'avatar'
           ? this.renderAvatars(camera, [item.avatar], vp, origin, lighting, { transparentOnly: true, drawRange: item.range, vertexSnapshot: item.snapshot })
@@ -1246,6 +1271,7 @@ export class WebGL2VoxelRenderer {
   }
 
   releaseContextResources() {
+    this.multiDraw = null;
     const safely = (callback) => {
       try {
         callback();
