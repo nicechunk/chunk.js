@@ -23,7 +23,12 @@ for(const seed of [1,7,19,41,83,101])test(`sparse finite light transport matches
   for(const radius of [1,2,4,8]){
     bakeSectionLighting(c,section,access,sparse,{radius});
     bakeDenseLightingOracle(c,section,access,dense,{radius});
-    for(let i=0;i<sparse.length;i++)assert.deepEqual(sparse[i].vertices,dense[i].vertices,`radius ${radius}, mesh ${i}`);
+    for(let i=0;i<sparse.length;i++) {
+      // This dense reference retains the old vertical direct-sun seed. Only its
+      // diffuse/local transport is an oracle; directional rays have separate tests.
+      const diffuse=mesh=>{const bytes=mesh.vertices.slice();for(let v=0;v<mesh.vertexCount;v++)bytes[v*20+19]&=15;return bytes;};
+      assert.deepEqual(diffuse(sparse[i]),diffuse(dense[i]),`radius ${radius}, mesh ${i}`);
+    }
   }
 });
 

@@ -4,6 +4,7 @@ import { blockDef, blockFlags, blockMaterialIdForFace, BLOCK_ID, MATERIAL_ID, is
 import { CACTUS_MODEL_HEIGHT_SCALE, CACTUS_MODEL_MAX_Y, cactusModelPartsForQuarterTurn } from "../world/cactus-model.js";
 import { materialDef } from "../world/material-registry.js";
 import { chunkLocalToWorldI32, treeInstanceLeafProfile } from "../world/world-generator.js";
+import { WORLD_SUN_VECTOR as TERRAIN_SHADOW_SUN_DIRECTION } from "../world/sunlight.js";
 import { deltaKey } from "./chunk-delta.js";
 import {
   EMPTY_COMPILED_SURFACE_DECORATION_RULES,
@@ -1023,7 +1024,6 @@ const WATER_GRADIENT_NEIGHBORS = [
 
 // Baked heightfield shadows keep mobile runtime cheap: no shadow map pass,
 // no extra GPU texture, and no per-frame terrain ray tracing.
-const TERRAIN_SHADOW_SUN_DIRECTION = [-0.72, 0.34, 0.62];
 const PROJECTED_SHADOW_DIR_XZ = projectedShadowDirection(TERRAIN_SHADOW_SUN_DIRECTION);
 const TERRAIN_SHADOW_STEPS = 7;
 const TERRAIN_SHADOW_STEP_START = 1.35;

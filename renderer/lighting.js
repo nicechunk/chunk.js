@@ -1,4 +1,6 @@
-export const MAIN_GAME_SUN_DIRECTION = Object.freeze(normalize3([-0.72, 0.34, 0.62]));
+import { WORLD_SUN_VECTOR } from "../world/sunlight.js";
+
+export const MAIN_GAME_SUN_DIRECTION = Object.freeze(normalize3(WORLD_SUN_VECTOR));
 
 const UNDERWATER_LIGHTING = Object.freeze({
   skyColor: hexToRgb(0x0d4054),

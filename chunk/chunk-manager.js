@@ -2,6 +2,7 @@ import { DEFAULT_CHUNK_HEIGHT, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_TERRAIN_HEIGHT, D
 import { chunkId, worldToChunk } from "../core/coordinates.js";
 import { isBlockingBlock, isOpaqueSolidBlock, BLOCK_ID } from "../world/block-registry.js";
 import { compileSurfaceDecorationRules } from "../world/surface-decoration-rules.js";
+import { SUNLIGHT_HORIZONTAL_REACH, SUNLIGHT_VERTICAL_REACH } from "../world/sunlight.js";
 import {
   chunkLocalToWorldI32,
   createWorldGeneratorConfig,
@@ -391,9 +392,9 @@ export class ChunkManager {
   }
 
   invalidateLightingDependencies(source,deltas) {
-    // Seven sun samples reach 14.3 horizontal cells. This footprint is separate
-    // from the one-cell geometry halo and the tree/vegetation dependency.
-    const reach=15;
+    // Both the legacy terrain samples and directional sunlight use this halo.
+    // It is separate from the one-cell geometry and tree dependencies.
+    const reach=SUNLIGHT_HORIZONTAL_REACH;
     const changed=new Set();
     for(const target of this.chunks.values()) {
       if(target===source)continue;
@@ -413,7 +414,7 @@ export class ChunkManager {
   }
 
   captureColumnTopHalo(chunk) {
-    const margin=15,width=this.chunkSize+2*margin;
+    const margin=SUNLIGHT_HORIZONTAL_REACH,width=this.chunkSize+2*margin;
     const originX=chunk.chunkX*this.chunkSize-margin,originZ=chunk.chunkZ*this.chunkSize-margin;
     const tops=new Int32Array(width*width);
     for(let z=0;z<width;z++)for(let x=0;x<width;x++)tops[x+z*width]=this.getOpaqueColumnTopAtWorld(originX+x,originZ+z);
@@ -424,7 +425,7 @@ export class ChunkManager {
     // The Worker reconstructs unchanged columns from the same captured seed and
     // generator configuration. Only edited column tops need a main-thread read.
     // Dense/custom base blocks retain the complete snapshot path.
-    const margin=15,width=this.chunkSize+2*margin;
+    const margin=SUNLIGHT_HORIZONTAL_REACH,width=this.chunkSize+2*margin;
     const originX=chunk.chunkX*this.chunkSize-margin,originZ=chunk.chunkZ*this.chunkSize-margin;
     const columns=[];
     const radius=Math.ceil(margin/this.chunkSize);
@@ -446,7 +447,7 @@ export class ChunkManager {
   }
 
   *prepareSnapshotNeighborhood(source,changes) {
-    const plans=new Map(),reach=15,radius=Math.ceil(reach/this.chunkSize);
+    const plans=new Map(),reach=SUNLIGHT_HORIZONTAL_REACH,radius=Math.ceil(reach/this.chunkSize);
     for(const delta of changes) {
       for(let dz=-radius;dz<=radius;dz++)for(let dx=-radius;dx<=radius;dx++) {
         if(dx===0&&dz===0)continue;
@@ -456,7 +457,7 @@ export class ChunkManager {
         if(!plan)plans.set(id,plan={data:new Set(),light:new Set(),maxY:-Infinity,trees:false});
         const y=delta.localY??delta.worldY;
         if(x>=-1&&z>=-1&&x<=this.chunkSize&&z<=this.chunkSize)for(const sy of [y-1,y,y+1])plan.data.add(Math.floor((sy-this.minY)/16));
-        for(const sy of [y-4,y,y+4])plan.light.add(Math.floor((sy-this.minY)/16));
+        for(const sy of [y-SUNLIGHT_VERTICAL_REACH,y,y+4])plan.light.add(Math.floor((sy-this.minY)/16));
         plan.maxY=Math.max(plan.maxY,y+4);
         plan.trees ||= x>=-6&&z>=-6&&x<this.chunkSize+6&&z<this.chunkSize+6;
         yield;
@@ -505,7 +506,7 @@ export class ChunkManager {
     const finalDeltas=packDeltaValues(sectionDeltaValues(chunk,section.sectionIndex));
     const neighborDeltas=this.neighborDeltasForWorker(chunk.chunkX,chunk.chunkZ,section.sectionIndex);
     const treeDeltas=this.treeNeighborDeltasForWorker(chunk.chunkX,chunk.chunkZ,section.sectionIndex);
-    const lightingDeltas=this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,8,section.sectionIndex);
+    const lightingDeltas=this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,SUNLIGHT_HORIZONTAL_REACH,section.sectionIndex);
     const columnTopHalo=this.captureWorkerColumnTopHalo(chunk);
     try {
       worker.postMessage({type:"buildChunk",taskId,worldSeed:new Uint8Array(managerWorldSeed(this)),chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,
@@ -1322,7 +1323,7 @@ export class ChunkManager {
         pickedSurfaceColumns: chunk.pickedSurfaceColumns,
         neighborDeltas,
         treeDeltas,
-        lightingDeltas: this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,8),
+        lightingDeltas: this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,SUNLIGHT_HORIZONTAL_REACH),
         columnTopHalo: this.captureWorkerColumnTopHalo(chunk),
       };
       const transfer = [];

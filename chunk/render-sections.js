@@ -3,6 +3,7 @@ import { deltaKey } from "./chunk-delta.js";
 import { bakeSectionLighting } from "./baked-light-field.js";
 import { isVisualBlock,isOpaqueSolidBlock,BLOCK_ID } from "../world/block-registry.js";
 import { prepareMeshDrawRanges } from "../renderer/mesh-draw-ranges.js";
+import { SUNLIGHT_HORIZONTAL_REACH, SUNLIGHT_VERTICAL_REACH } from "../world/sunlight.js";
 
 export const RENDER_SECTION_HEIGHT = 16;
 let generationSerial = 1;
@@ -76,7 +77,7 @@ export function* prepareRenderSnapshotInvalidation(chunk,nextChain,changes,{drop
   for(const delta of changes){
     const y=delta.localY??delta.worldY;
     for(const sy of [y-1,y,y+1])data.add(sectionIndexAt(chunk,sy));
-    for(const sy of [y-4,y,y+4])light.add(sectionIndexAt(chunk,sy));yield;
+    for(const sy of [y-SUNLIGHT_VERTICAL_REACH,y,y+4])light.add(sectionIndexAt(chunk,sy));yield;
   }
   // Tree proxies are sparse and owned by their base section. Conservatively
   // refresh these owners on an authoritative snapshot without an N*tree loop.
@@ -124,7 +125,7 @@ export function invalidateRenderSections(chunk, deltas = null, reason = "edit") 
     for (const delta of deltas) {
       const y = delta.localY ?? delta.worldY;
       for (const sy of [y-1,y,y+1]) affected.add(sectionIndexAt(chunk, sy));
-      for(const sy of [y-4,y,y+4])nearbyLight.add(sectionIndexAt(chunk,sy));
+      for(const sy of [y-SUNLIGHT_VERTICAL_REACH,y,y+4])nearbyLight.add(sectionIndexAt(chunk,sy));
       if (delta.localX !== undefined) {
         const key=deltaKey(delta.localX,y,delta.localZ,chunk.chunkSize);
         const current=chunk.pendingDeltas.get(key) ?? chunk.remoteDeltas?.get(key) ?? chunk.chainDeltas.get(key);
@@ -191,8 +192,8 @@ export function buildRenderSection(chunk, section, access = {}, { visualOnly = f
   const localDeltas=new Map();
   for(const delta of sectionDeltaValues(chunk,section.sectionIndex))localDeltas.set(deltaKey(delta.localX,delta.localY,delta.localZ,chunk.chunkSize),delta);
   view.getFinalDeltaMap=()=>localDeltas;
-  const margin=8,width=chunk.chunkSize+margin*2,cacheHeight=section.height+margin*2;
-  const originX=chunk.chunkX*chunk.chunkSize-margin,originZ=chunk.chunkZ*chunk.chunkSize-margin,originY=section.originY-margin;
+  const margin=SUNLIGHT_HORIZONTAL_REACH,verticalMargin=8,width=chunk.chunkSize+margin*2,cacheHeight=section.height+verticalMargin*2;
+  const originX=chunk.chunkX*chunk.chunkSize-margin,originZ=chunk.chunkZ*chunk.chunkSize-margin,originY=section.originY-verticalMargin;
   const voxels=new Uint16Array(width*width*cacheHeight);voxels.fill(65535);
   let voxelQueries=0,voxelVisits=0;
   const columns=new Map();

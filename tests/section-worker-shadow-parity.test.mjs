@@ -6,6 +6,7 @@ import { BLOCK_ID } from "../world/block-registry.js";
 import { ensureRenderSections,buildRenderSection,commitRenderSection,sectionDeltaValues,sectionRevision,sectionIndexAt } from "../chunk/render-sections.js";
 import { actualFaces,expectedFaces,decodedVertices } from "./helpers/face-oracle.mjs";
 import { createActualBuildWorker } from "./helpers/actual-build-worker.mjs";
+import { SUNLIGHT_HORIZONTAL_REACH } from "../world/sunlight.js";
 
 let worker;
 before(async()=>{worker=await createActualBuildWorker();});
@@ -26,7 +27,7 @@ function capture(manager,chunk,section) {
     options:manager.workerOptions(),mode:"section",taskVersion:chunk.version,sectionIndex:section.sectionIndex,
     sectionRevision:sectionRevision(section,manager.materialVersion),baseProfile:chunk.baseProfile,treeInstances:chunk.treeInstances,
     finalDeltas:packed(sectionDeltaValues(chunk,section.sectionIndex)),neighborDeltas:manager.neighborDeltasForWorker(chunk.chunkX,chunk.chunkZ),
-    treeDeltas:manager.treeNeighborDeltasForWorker(chunk.chunkX,chunk.chunkZ),lightingDeltas:manager.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,8,section.sectionIndex),columnTopHalo:manager.captureColumnTopHalo(chunk)};
+    treeDeltas:manager.treeNeighborDeltasForWorker(chunk.chunkX,chunk.chunkZ),lightingDeltas:manager.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,SUNLIGHT_HORIZONTAL_REACH,section.sectionIndex),columnTopHalo:manager.captureColumnTopHalo(chunk)};
 }
 function topShade(mesh,x=8,y=85,z=15) {
   const vertices=decodedVertices(mesh),values=[];

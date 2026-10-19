@@ -1,5 +1,6 @@
 import { BLOCK_FLAGS } from "../core/constants.js";
 import { blockFlags, isOpaqueSolidBlock } from "../world/block-registry.js";
+import { createDirectionalSunlight } from "./directional-sunlight.js";
 
 export const DEFAULT_CAVE_LIGHTING = Object.freeze({ radius: 4, attenuation: 3 });
 const STEPS=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
@@ -38,6 +39,10 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     if(emissive[i])localSeeds++;
   };
   const maxDistance=Math.floor(14/attenuation);
+  const sunlight=createDirectionalSunlight({
+    getColumnTopAtWorld:(x,z)=>access.getColumnTopAtWorld?.(x,z)??chunk.minY+chunk.height,
+    getBlockAtWorld:access.getBlockAtWorld,
+  });
   // Cache finite-radius transport by cell and remaining distance. Adjacent wall
   // corners reuse the same subproblems instead of each walking the air volume.
   const transportCache=Array.from({length:maxDistance+1},()=>new Uint16Array(count));
@@ -63,7 +68,7 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     const first=index(x,y,z),cached=samples.get(first);
     if(cached)return cached;
     readCell(first,x,y,z);
-    const light={sun:!solid[first]&&oy+y>columnTop(x,z)?15:0,sky:0,local:0};
+    const light={sun:solid[first]?0:sunlight.sample(ox+x,oy+y,oz+z),sky:0,local:0};
     const value=transport(first,x,y,z,maxDistance);
     light.sky=value>>>4;light.local=value&15;
     samples.set(first,light);return light;
@@ -89,5 +94,5 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     }
     mesh.lightEncoding="sun4-sky4-local4-v1";
   }
-  return {cells:sampledCells,domainCells:count,radius,skySeeds,localSeeds,samples:samples.size};
+  return {cells:sampledCells,domainCells:count,radius,skySeeds,localSeeds,samples:samples.size,sunlight:sunlight.stats};
 }

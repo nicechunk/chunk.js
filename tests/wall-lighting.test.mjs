@@ -21,12 +21,14 @@ const access = {
 };
 function flags(mesh) {const d=new DataView(mesh.vertices.buffer);return [0,1,2,3].map(i=>d.getUint16(i*20+18,true));}
 
-test("a greedy wall retains daylight above an overhang and shade below it", () => {
+test("a greedy wall retains diffuse roof shade while low sunlight enters from its open side", () => {
   const mesh=wall(1,13);
   bakeSectionLighting(chunk,{originY:0,height:16},access,[mesh]);
   const light=flags(mesh);
-  assert.equal(light[0]>>>12,0);assert.equal(light[1]>>>12,0);
+  assert.equal(light[0]>>>12,15);assert.equal(light[1]>>>12,15);
   assert.equal(light[2]>>>12,15);assert.equal(light[3]>>>12,15);
+  assert.ok(((light[0]>>>8)&15)<15);assert.ok(((light[1]>>>8)&15)<15);
+  assert.equal((light[2]>>>8)&15,15);assert.equal((light[3]>>>8)&15,15);
   assert.ok(light.every(value=>(value&7)===2),"material flags must survive");
   assert.equal(mesh.vertexCount,4,"lighting must not add geometry");
 });
@@ -39,7 +41,7 @@ test("adjacent section walls share identical corner illumination", () => {
   assert.equal(flags(lower)[3],flags(upper)[0]);
 });
 
-test("cached corner transport matches an independent finite six-neighbour oracle", () => {
+test("cached diffuse corner transport matches an independent finite six-neighbour oracle", () => {
   const block = (x,y,z) => {
     if (x<0||x>=16||y<0||y>=16||z<0||z>=16) return BLOCK_ID.air;
     const code=(x*73+y*31+z*17)%37;
@@ -70,5 +72,7 @@ test("cached corner transport matches an independent finite six-neighbour oracle
   const vertices=new Uint8Array(points.length*20),data=new DataView(vertices.buffer);
   points.forEach((point,i)=>{point.forEach((value,axis)=>data.setInt16(i*20+axis*2,(value+.5)*64,true));data.setInt16(i*20+6,64,true);data.setInt8(i*20+8,-127);});
   bakeSectionLighting(chunk,{originY:0,height:16},{getBlockAtWorld:block,getColumnTopAtWorld:top},[{vertices,vertexCount:points.length}]);
-  points.forEach(([x,y,z],i)=>assert.equal(data.getUint16(i*20+18,true),oracle(x,y,z),`corner ${x},${y},${z}`));
+  // Direct sunlight now follows a directional ray, rather than this legacy
+  // vertical seed. Keep this independent BFS gate for diffuse and local light.
+  points.forEach(([x,y,z],i)=>assert.equal(data.getUint16(i*20+18,true)&4095,oracle(x,y,z)&4095,`corner ${x},${y},${z}`));
 });

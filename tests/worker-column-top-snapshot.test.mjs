@@ -30,7 +30,7 @@ test('sparse captured tops preserve distant edited skylight and exact real Worke
       sectionRevision:sectionRevision(section,1),baseProfile:chunk.baseProfile,treeInstances:chunk.treeInstances,
       finalDeltas:Int32Array.from(sectionDeltaValues(chunk,7).flatMap(d=>[d.worldX,d.worldY,d.worldZ,d.blockId])),
       neighborDeltas:manager.neighborDeltasForWorker(0,0),treeDeltas:manager.treeNeighborDeltasForWorker(0,0),
-      lightingDeltas:manager.visualDeltasForWorker(0,0,8,7)};
+      lightingDeltas:manager.visualDeltasForWorker(0,0,15,7)};
     const dense=await worker.build({...task,columnTopHalo:manager.captureColumnTopHalo(chunk)});
     const sparse=manager.captureWorkerColumnTopHalo(chunk);
     assert.ok(sparse.columns.length>=3);

@@ -18,12 +18,16 @@ function denseManager() {
   m.rebuildDirtyChunks(10000);return {m,c};
 }
 
-test("a local edit invalidates only its section and one-cell vertical halo",()=>{
+test("a local edit keeps geometry invalidation local and refreshes its lower sunlight dependency",()=>{
   const {m,c}=denseManager();const original=[...c.renderSections.values()].map(s=>s.meshCommitToken);
+  const dataRevisions=[...c.renderSections.values()].map(s=>s.dataRevision);
   m.applyPendingDelta([{worldX:1,worldY:5,worldZ:1,blockId:BLOCK_ID.air}],"dig");
-  assert.equal([...c.renderSections.values()].filter(s=>s.dirty).length,1);
+  assert.equal([...c.renderSections.values()].filter(s=>s.dirty).length,2);
+  assert.equal(c.renderSections.get(0).dataRevision,dataRevisions[0]);
+  assert.equal(c.renderSections.get(2).dataRevision,dataRevisions[2]);
+  assert.ok(c.renderSections.get(1).dataRevision>dataRevisions[1]);
   m.rebuildDirtyChunks(10000);
-  assert.equal(c.renderSections.get(0).meshCommitToken,original[0]);assert.equal(c.renderSections.get(2).meshCommitToken,original[2]);
+  assert.notEqual(c.renderSections.get(0).meshCommitToken,original[0]);assert.equal(c.renderSections.get(2).meshCommitToken,original[2]);
   assert.notEqual(c.renderSections.get(1).meshCommitToken,original[1]);
   assert.deepEqual(actualFaces(c.mesh),expectedFaces(c,(...p)=>m.getBlockAtWorld(...p)));
   m.dispose();
