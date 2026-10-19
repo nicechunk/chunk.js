@@ -236,21 +236,45 @@ function decodeNcm3Record(code) {
   return { text, payloadBytes: raw.byteLength, blueprint, analysis };
 }
 
+function drainBlueprintSteps(iterator) {
+  let result = iterator.next();
+  while (!result.done) result = iterator.next();
+  return result.value;
+}
+
+function blueprintWorkBudget(value = 256) {
+  if (!Number.isInteger(value) || value < 1 || value > 4096) throw new RangeError("Blueprint workBudget must be an integer from 1 to 4096.");
+  return {limit: value, used: 0};
+}
+
+function takeBlueprintWork(work) {
+  if (++work.used < work.limit) return false;
+  work.used = 0; return true;
+}
+
 export function expandBlueprint(blueprint) {
+  return drainBlueprintSteps(expandBlueprintSteps(blueprint));
+}
+
+export function* expandBlueprintSteps(blueprint, {workBudget = 256} = {}) {
+  const work = blueprintWorkBudget(workBudget);
   validateBlueprint(blueprint);
   const cuboids = [];
   const add = (material, x, y, z, w = 1, h = 1, d = 1) => cuboids.push({ material, x, y, z, w, h, d });
 
   for (const command of blueprint.commands) {
+    if (takeBlueprintWork(work)) yield {phase: "blueprint-commands", workUnits: work.limit};
     if (command.op === OPCODE.BOX) {
       add(command.material, command.x, command.y, command.z, command.w, command.h, command.d);
     } else if (command.op === OPCODE.REPEAT_BOX) {
       for (let index = 0; index < command.count; index++) {
+        if (takeBlueprintWork(work)) yield {phase: "blueprint-expansion", workUnits: work.limit};
         add(command.material, command.x + command.dx * index, command.y + command.dy * index, command.z + command.dz * index, command.w, command.h, command.d);
       }
     } else if (command.op === OPCODE.GABLE) {
       const layers = Math.ceil(command.width / 2);
       for (let layer = 0; layer < layers; layer++) {
+        if (takeBlueprintWork(work)) yield {phase: "blueprint-expansion", workUnits: work.limit};
         const left = command.x + layer;
         const right = command.x + command.width - 1 - layer;
         add(command.material, left, command.y + layer, command.z, 1, 1, command.depth);
@@ -260,6 +284,7 @@ export function expandBlueprint(blueprint) {
       const trunkHeight = Math.max(2, command.height - command.crownRadius);
       add(command.trunkMaterial, command.x, command.y, command.z, 2, trunkHeight, 2);
       for (let layer = 0; layer < command.crownRadius; layer++) {
+        if (takeBlueprintWork(work)) yield {phase: "blueprint-expansion", workUnits: work.limit};
         const radius = Math.max(1, command.crownRadius - Math.floor(layer / 2));
         add(command.leafMaterial, command.x - radius, command.y + trunkHeight - 1 + layer, command.z - 1, radius * 2 + 2, 1, 4);
         add(command.leafMaterial, command.x - 1, command.y + trunkHeight - 1 + layer, command.z - radius, 4, 1, radius * 2 + 2);
@@ -270,6 +295,7 @@ export function expandBlueprint(blueprint) {
       add(command.material, command.x, command.y + 1, command.z, axisX ? command.length : 1, 1, axisX ? 1 : command.length);
       add(command.material, command.x, command.y + 3, command.z, axisX ? command.length : 1, 1, axisX ? 1 : command.length);
       for (let offset = 0; offset < command.length; offset += Math.max(1, command.spacing)) {
+        if (takeBlueprintWork(work)) yield {phase: "blueprint-expansion", workUnits: work.limit};
         add(command.material, command.x + (axisX ? offset : 0), command.y, command.z + (axisX ? 0 : offset), 1, 5, 1);
       }
       const end = command.length - 1;
@@ -277,6 +303,7 @@ export function expandBlueprint(blueprint) {
     } else if (command.op === OPCODE.GABLE_TRIM) {
       const layers = Math.ceil(command.width / 2);
       for (let layer = 0; layer < layers; layer++) {
+        if (takeBlueprintWork(work)) yield {phase: "blueprint-expansion", workUnits: work.limit};
         const left = command.x + layer;
         const right = command.x + command.width - 1 - layer;
         add(command.material, left, command.y + layer, command.z, 1, 1, 1);
@@ -289,11 +316,13 @@ export function expandBlueprint(blueprint) {
     } else if (command.op === OPCODE.GABLE_FILL) {
       const layers = Math.ceil(command.width / 2);
       for (let layer = 0; layer < layers; layer++) {
+        if (takeBlueprintWork(work)) yield {phase: "blueprint-expansion", workUnits: work.limit};
         add(command.material, command.x + layer, command.y + layer, command.z, command.width - layer * 2, 1, command.depth);
       }
     } else if (command.op === OPCODE.GABLE_Z) {
       const layers = Math.ceil(command.depth / 2);
       for (let layer = 0; layer < layers; layer++) {
+        if (takeBlueprintWork(work)) yield {phase: "blueprint-expansion", workUnits: work.limit};
         const front = command.z + layer;
         const back = command.z + command.depth - 1 - layer;
         add(command.material, command.x, command.y + layer, front, command.width, 1, 1);
@@ -302,6 +331,7 @@ export function expandBlueprint(blueprint) {
     } else if (command.op === OPCODE.GABLE_TRIM_Z) {
       const layers = Math.ceil(command.depth / 2);
       for (let layer = 0; layer < layers; layer++) {
+        if (takeBlueprintWork(work)) yield {phase: "blueprint-expansion", workUnits: work.limit};
         const front = command.z + layer;
         const back = command.z + command.depth - 1 - layer;
         add(command.material, command.x, command.y + layer, front, 1, 1, 1);
@@ -314,6 +344,7 @@ export function expandBlueprint(blueprint) {
     } else if (command.op === OPCODE.GABLE_FILL_Z) {
       const layers = Math.ceil(command.depth / 2);
       for (let layer = 0; layer < layers; layer++) {
+        if (takeBlueprintWork(work)) yield {phase: "blueprint-expansion", workUnits: work.limit};
         add(command.material, command.x, command.y + layer, command.z + layer, command.width, 1, command.depth - layer * 2);
       }
     }
@@ -323,18 +354,25 @@ export function expandBlueprint(blueprint) {
 
 /** Later commands overwrite earlier commands, matching a deterministic paint stack. */
 export function voxelize(blueprintOrCuboids, sizeOverride) {
+  return drainBlueprintSteps(voxelizeSteps(blueprintOrCuboids, sizeOverride));
+}
+
+export function* voxelizeSteps(blueprintOrCuboids, sizeOverride, {workBudget = 256} = {}) {
+  const work = blueprintWorkBudget(workBudget);
   const blueprint = Array.isArray(blueprintOrCuboids) ? null : blueprintOrCuboids;
-  const cuboids = blueprint ? expandBlueprint(blueprint) : blueprintOrCuboids;
+  const cuboids = blueprint ? yield* expandBlueprintSteps(blueprint, {workBudget}) : blueprintOrCuboids;
   const size = blueprint ? blueprint.size : normalizeSize(sizeOverride);
   const voxels = new Map();
   let operationBudget = 0;
   for (const cuboid of cuboids) {
+    if (takeBlueprintWork(work)) yield {phase: "blueprint-cuboids", workUnits: work.limit};
     validateCuboid(cuboid, size);
     operationBudget += cuboid.w * cuboid.h * cuboid.d;
     if (operationBudget > NCM3_MAX_EXPANDED_OPERATIONS) throw new Error("Expanded voxel operation budget exceeded.");
     for (let y = cuboid.y; y < cuboid.y + cuboid.h; y++) {
       for (let z = cuboid.z; z < cuboid.z + cuboid.d; z++) {
         for (let x = cuboid.x; x < cuboid.x + cuboid.w; x++) {
+          if (takeBlueprintWork(work)) yield {phase: "blueprint-voxels", workUnits: work.limit};
           voxels.set(`${x},${y},${z}`, { x, y, z, material: cuboid.material });
         }
       }

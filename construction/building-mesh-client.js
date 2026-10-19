@@ -1,11 +1,11 @@
 import {
-  createBuildingPlacement,
-  parseNcm3Building,
+  createBuildingPlacementSteps,
+  parseNcm3BuildingSteps,
 } from "./building-parser.js";
-import { createBuildingChunkMeshes } from "./building-mesher.js";
+import { createBuildingChunkMeshesSteps } from "./building-mesher.js";
 import {
-  createBuildingMeshResult,
-  validateBuildingMeshResult,
+  createBuildingMeshResultSteps,
+  validateBuildingMeshResultSteps,
 } from "./building-mesh-result.js";
 import {
   NCM3_MAX_PAYLOAD_BYTES,
@@ -18,21 +18,33 @@ const MAX_BUILDING_REQUEST_LABEL_LENGTH = 1_024;
 export function createBuildingMeshWorkerClient({
   useWorker = true,
   workerFactory = null,
+  now = () => performance.now(),
+  yieldToMain = () => new Promise(resolve => setTimeout(resolve, 0)),
+  fallbackBudgetMs = 2,
+  workerRetryBaseMs = 1000,
+  workerRetryMaxMs = 30_000,
+  workerTimeoutMs = 30_000,
 } = {}) {
   let worker = null;
-  let workerUnavailable = !useWorker || (!workerFactory && typeof Worker === "undefined");
+  const workerAllowed = Boolean(useWorker && (workerFactory || typeof Worker !== "undefined"));
+  let workerRetryAt = 0;
+  let workerFailures = 0;
+  let workerTimeout = null;
+  let fallbackSlices = 0;
   let nextRequestId = 1;
   let nextSequence = 1;
   let activeJob = null;
   let disposed = false;
   const queue = [];
+  const settledRequestIds = new WeakMap();
 
   return {
     build,
     cancelScope,
     dispose,
     stats,
-    workerMode: () => !workerUnavailable,
+    diagnostics: () => ({ ...stats(), workerFailures, workerRetryAt, fallbackSlices }),
+    workerMode,
   };
 
   function build(input = {}, { signal = null, priority = 0, scope = "" } = {}) {
@@ -45,7 +57,6 @@ export function createBuildingMeshWorkerClient({
         sequence: nextSequence++,
         priority: finiteNumber(priority),
         scope: String(scope || ""),
-        input,
         request: null,
         signal,
         resolve,
@@ -53,6 +64,8 @@ export function createBuildingMeshWorkerClient({
         abortHandler: null,
         settled: false,
       };
+      try { job.request = snapshotRequest(input, requestId); }
+      catch (error) { reject(error); return; }
       if (signal?.addEventListener) {
         job.abortHandler = () => cancelJob(job, abortError());
         signal.addEventListener("abort", job.abortHandler, { once: true });
@@ -77,17 +90,11 @@ export function createBuildingMeshWorkerClient({
       return;
     }
     activeJob = job;
-    try {
-      job.request = snapshotRequest(job.input, job.requestId);
-    } catch (error) {
-      activeJob = null;
-      settleJob(job, "reject", error);
-      queueMicrotask(pump);
-      return;
-    }
     const activeWorker = ensureWorker();
     if (activeWorker) {
       try {
+        workerTimeout = setTimeout(() => handleWorkerFailure(activeWorker,
+          clientError("building-mesh-worker-timeout", "Building mesh Worker timed out.")), Math.max(1, workerTimeoutMs));
         activeWorker.postMessage(job.request);
       } catch (error) {
         handleWorkerFailure(activeWorker, error);
@@ -98,7 +105,7 @@ export function createBuildingMeshWorkerClient({
   }
 
   function ensureWorker() {
-    if (worker || workerUnavailable || disposed) return worker;
+    if (worker || !workerMode()) return worker;
     let candidate = null;
     try {
       candidate = workerFactory
@@ -111,7 +118,7 @@ export function createBuildingMeshWorkerClient({
       return candidate;
     } catch {
       if (candidate) terminateWorker(candidate);
-      workerUnavailable = true;
+      noteWorkerFailure();
       worker = null;
       return null;
     }
@@ -120,6 +127,7 @@ export function createBuildingMeshWorkerClient({
   function handleMessage(source, event) {
     if (source !== worker) return;
     const response = event?.data;
+    if (settledRequestIds.get(source)?.has(response?.requestId)) return;
     const job = activeJob;
     if (!job) {
       handleWorkerFailure(source, clientError(
@@ -142,10 +150,11 @@ export function createBuildingMeshWorkerClient({
       ));
       return;
     }
+    if (job.validatingResponse) return;
     let outcome;
     try {
       outcome = response.ok
-        ? validateBuildingMeshResult(response.result, { request: job.request })
+        ? consumeSteps(validateBuildingMeshResultSteps(response.result, { request: job.request, workBudget: 128 }), job)
         : workerError(response.error);
     } catch (error) {
       handleWorkerFailure(source, response.ok
@@ -156,7 +165,26 @@ export function createBuildingMeshWorkerClient({
         : error);
       return;
     }
+    if (outcome instanceof Promise) {
+      job.validatingResponse = true;
+      void outcome.then(result => finishMessage(source, job, response, result), error => {
+        if (job !== activeJob || job.settled || source !== worker) return;
+        handleWorkerFailure(source, clientError("building-mesh-worker-protocol", String(error?.message || error)));
+      });
+      return;
+    }
+    finishMessage(source, job, response, outcome);
+  }
+
+  function finishMessage(source, job, response, outcome) {
+    if (source !== worker || job !== activeJob || job.settled) return;
     activeJob = null;
+    clearWorkerTimeout();
+    workerFailures = 0;
+    let settled = settledRequestIds.get(source);
+    if (!settled) settledRequestIds.set(source, settled = new Set());
+    settled.add(job.requestId);
+    while (settled.size > 64) settled.delete(settled.values().next().value);
     if (response.ok) settleJob(job, "resolve", outcome);
     else settleJob(job, "reject", outcome);
     pump();
@@ -166,8 +194,9 @@ export function createBuildingMeshWorkerClient({
     if (source !== worker) return;
     const job = activeJob;
     activeJob = null;
+    clearWorkerTimeout();
     terminateWorker(source);
-    workerUnavailable = true;
+    noteWorkerFailure();
     if (job) {
       const message = String(event?.message || event || "Building mesh worker failed.");
       const code = event?.code === "building-mesh-worker-protocol"
@@ -180,7 +209,8 @@ export function createBuildingMeshWorkerClient({
 
   async function runOnMainThread(job) {
     try {
-      const result = await buildOnMainThread(job.request, job.signal);
+      await yieldToMain();
+      const result = await buildOnMainThread(job.request, iterator => consumeSteps(iterator, job));
       if (job !== activeJob || job.settled) return;
       activeJob = null;
       settleJob(job, "resolve", result);
@@ -190,6 +220,50 @@ export function createBuildingMeshWorkerClient({
       settleJob(job, "reject", error);
     }
     pump();
+  }
+
+  function consumeSteps(iterator, job) {
+    try {
+      const first = advanceSteps(iterator, job);
+      if (first.done) { iterator.return?.(); return first.value; }
+    } catch (error) { iterator.return?.(); throw error; }
+    return continueSteps(iterator, job);
+  }
+
+  async function continueSteps(iterator, job) {
+    try {
+      for (;;) {
+        await yieldToMain();
+        job.sliceDeadline = null;
+        const result = advanceSteps(iterator, job);
+        if (result.done) return result.value;
+      }
+    } finally { iterator.return?.(); }
+  }
+
+  function advanceSteps(iterator, job) {
+    if (job !== activeJob || job.settled || job.signal?.aborted || disposed) throw abortError();
+    job.sliceDeadline ??= now() + Math.max(0.1, Math.min(5, Number(fallbackBudgetMs) || 2));
+    if (now() >= job.sliceDeadline) return { done: false };
+    let steps = 0, result;
+    do {
+      result = iterator.next(); steps++; fallbackSlices++;
+      if (result.done) return result;
+      if (job !== activeJob || job.settled || job.signal?.aborted || disposed) throw abortError();
+    } while (steps < 32 && now() < job.sliceDeadline);
+    return { done: false };
+  }
+
+  function workerMode() { return !disposed && workerAllowed && now() >= workerRetryAt; }
+
+  function noteWorkerFailure() {
+    workerFailures = Math.min(16, workerFailures + 1);
+    workerRetryAt = now() + Math.min(Math.max(1, workerRetryMaxMs), Math.max(1, workerRetryBaseMs) * 2 ** (workerFailures - 1));
+  }
+
+  function clearWorkerTimeout() {
+    if (workerTimeout !== null) clearTimeout(workerTimeout);
+    workerTimeout = null;
   }
 
   function cancelScope(scope) {
@@ -214,6 +288,7 @@ export function createBuildingMeshWorkerClient({
     if (queuedIndex >= 0) queue.splice(queuedIndex, 1);
     if (activeJob === job) {
       activeJob = null;
+      clearWorkerTimeout();
       if (worker) terminateWorker(worker);
     }
     settleJob(job, "reject", error);
@@ -233,7 +308,7 @@ export function createBuildingMeshWorkerClient({
     return Object.freeze({
       active: activeJob ? 1 : 0,
       queued: queue.length,
-      workerMode: !workerUnavailable,
+      workerMode: workerMode(),
       disposed,
     });
   }
@@ -253,33 +328,30 @@ export function createBuildingMeshWorkerClient({
     const error = clientError("building-mesh-disposed", "Building mesh worker was disposed.");
     if (activeJob) settleJob(activeJob, "reject", error);
     activeJob = null;
+    clearWorkerTimeout();
     for (const job of queue.splice(0)) settleJob(job, "reject", error);
     terminateWorker(worker);
-    workerUnavailable = true;
   }
 }
 
-async function buildOnMainThread(input, signal) {
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  if (signal?.aborted) throw abortError();
-  const building = parseNcm3Building(input.code, { id: input.buildingId || "" });
-  const placement = createBuildingPlacement(building, input.foundation, {
+async function buildOnMainThread(input, consume) {
+  const building = await consume(parseNcm3BuildingSteps(input.code, { id: input.buildingId || "", workBudget: 128 }));
+  const placement = await consume(createBuildingPlacementSteps(building, input.foundation, {
     quarterTurns: input.quarterTurns,
     placementId: input.placementId,
     materializeWorldVoxels: false,
     allowFoundationOverflow: input.allowFoundationOverflow === true,
     offsetX: input.offsetX,
     offsetZ: input.offsetZ,
-  });
-  const chunks = createBuildingChunkMeshes(placement, {
+    workBudget: 128,
+  }));
+  const chunks = await consume(createBuildingChunkMeshesSteps(placement, {
     chunkSize: input.chunkSize,
     revision: input.revision,
-  });
-  if (signal?.aborted) throw abortError();
-  return validateBuildingMeshResult(
-    createBuildingMeshResult(building, placement, chunks),
-    { request: input },
-  );
+    workBudget: 128,
+  }));
+  const result = await consume(createBuildingMeshResultSteps(building, placement, chunks, { workBudget: 128 }));
+  return consume(validateBuildingMeshResultSteps(result, { request: input, workBudget: 128 }));
 }
 
 function snapshotRequest(input, requestId) {

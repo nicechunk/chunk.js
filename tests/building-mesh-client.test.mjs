@@ -41,8 +41,10 @@ test("building mesh client keeps one worker job active and prioritizes queued wo
 
   assert.deepEqual(workers[0].messages.map((message) => message.buildingId), ["active"]);
   workers[0].succeed(0);
+  await first;
   assert.deepEqual(workers[0].messages.map((message) => message.buildingId), ["active", "high"]);
   workers[0].succeed(1);
+  await high;
   assert.deepEqual(workers[0].messages.map((message) => message.buildingId), ["active", "high", "low"]);
   workers[0].succeed(2);
 

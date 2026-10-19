@@ -21,8 +21,36 @@ const FACE_DEFS = Object.freeze([
 ]);
 const MATERIAL_RENDER_INFO = [];
 
+function drainBuildingSteps(iterator) {
+  let result = iterator.next();
+  while (!result.done) result = iterator.next();
+  return result.value;
+}
+
+function buildingWorkBudget(value = 256) {
+  if (!Number.isInteger(value) || value < 1 || value > 4096) throw new RangeError("Building workBudget must be an integer from 1 to 4096.");
+  return {limit: value, used: 0, last: 0};
+}
+
+function takeBuildingWork(work, amount = 1) {
+  work.used += amount;
+  if (work.used < work.limit) return false;
+  work.last = work.used; work.used = 0; return true;
+}
+
+function buildingStep(work, phase) {
+  return {phase, workUnits: work.last};
+}
+
 /** Build terrain-compatible GPU meshes without changing NCM3 voxel scale. */
-export function createBuildingChunkMeshes(placement, { chunkSize = 16, revision = 1 } = {}) {
+export function createBuildingChunkMeshes(placement, options = {}) {
+  return drainBuildingSteps(createBuildingChunkMeshesSteps(placement, options));
+}
+
+// A suspended build owns its lookup, light fields and mesh writers. The caller
+// retains the immutable placement and publishes only the completed result.
+export function* createBuildingChunkMeshesSteps(placement, { chunkSize = 16, revision = 1, workBudget = 256 } = {}) {
+  const work = buildingWorkBudget(workBudget);
   const materialized = placement?.worldVoxels instanceof Map;
   const compact = placement?.compact && placement?.building?.voxels instanceof Map;
   if (!materialized && !compact) throw new Error("A building placement with voxel data is required.");
@@ -30,7 +58,7 @@ export function createBuildingChunkMeshes(placement, { chunkSize = 16, revision 
   if (size > 16) throw new Error("Building chunkSize cannot exceed the 16-cell greedy mask width.");
   const chunks = new Map();
   const voxelLookup = createPlacementVoxelLookup(placement);
-  visitPlacementVoxels(placement, (x, y, z, material) => {
+  yield* visitPlacementVoxelsSteps(placement, (x, y, z, material) => {
     const coordinateX = decomposeBuildingCoordinate(x, size, "building voxel X");
     const coordinateZ = decomposeBuildingCoordinate(z, size, "building voxel Z");
     const worldY = safeIntegerCoordinate(y, "building voxel Y");
@@ -53,16 +81,40 @@ export function createBuildingChunkMeshes(placement, { chunkSize = 16, revision 
       coordinateX.local,
       coordinateZ.local,
     );
-  });
-  const lightSampler = createBuildingLightSampler(placement, voxelLookup);
+  }, work);
+  const lightSampler = yield* createBuildingLightSamplerSteps(placement, voxelLookup, work);
 
   const version = Math.max(1, Math.trunc(Number(revision) || 1));
-  return [...chunks.values()]
-    .sort((left, right) => left.chunkZ - right.chunkZ || left.chunkX - right.chunkX)
-    .map((chunk) => createBuildingChunkState(placement, chunk, size, version, voxelLookup, lightSampler));
+  const ordered = yield* orderedBuildingChunksSteps(chunks, work);
+  const result = [];
+  for (const chunk of ordered) result.push(yield* createBuildingChunkStateSteps(placement, chunk, size, version, voxelLookup, lightSampler, work));
+  return result;
 }
 
-function createBuildingChunkState(placement, chunk, chunkSize, version, voxelLookup, lightSampler) {
+function* orderedBuildingChunksSteps(chunks, work) {
+  let values = [];
+  for (const chunk of chunks.values()) {
+    if (takeBuildingWork(work)) yield buildingStep(work, "building-chunk-order");
+    values.push(chunk);
+  }
+  const compare = (left, right) => left.chunkZ - right.chunkZ || left.chunkX - right.chunkX;
+  if (values.length <= 256) return values.sort(compare);
+  let scratch = new Array(values.length);
+  for (let width = 1; width < values.length; width *= 2) {
+    for (let start = 0; start < values.length; start += width * 2) {
+      const middle = Math.min(values.length, start + width), end = Math.min(values.length, start + width * 2);
+      let left = start, right = middle;
+      for (let index = start; index < end; index++) {
+        if (takeBuildingWork(work)) yield buildingStep(work, "building-chunk-order");
+        scratch[index] = left < middle && (right >= end || compare(values[left], values[right]) <= 0) ? values[left++] : values[right++];
+      }
+    }
+    [values, scratch] = [scratch, values];
+  }
+  return values;
+}
+
+function* createBuildingChunkStateSteps(placement, chunk, chunkSize, version, voxelLookup, lightSampler, work) {
   const opaqueGroups = new Map();
   const visualGroups = new Map();
   const collisionHeight = chunk.maxY - chunk.minY + 1;
@@ -71,6 +123,7 @@ function createBuildingChunkState(placement, chunk, chunkSize, version, voxelLoo
   let visualBlockCount = 0;
   let collisionBlockCount = 0;
   for (let offset = 0; offset < chunk.voxels.length; offset += 6) {
+    if (takeBuildingWork(work)) yield buildingStep(work, "building-voxel-faces");
     const x = chunk.voxels[offset];
     const y = chunk.voxels[offset + 1];
     const z = chunk.voxels[offset + 2];
@@ -90,6 +143,7 @@ function createBuildingChunkState(placement, chunk, chunkSize, version, voxelLoo
       }
     }
     for (let faceIndex = 0; faceIndex < FACE_DEFS.length; faceIndex += 1) {
+      if (takeBuildingWork(work)) yield buildingStep(work, "building-voxel-faces");
       const face = FACE_DEFS[faceIndex];
       const neighborMaterial = voxelLookup.get(
         x + face.delta[0],
@@ -97,14 +151,14 @@ function createBuildingChunkState(placement, chunk, chunkSize, version, voxelLoo
         z + face.delta[2],
       );
       if (buildingFaceOccluded(renderMaterial.visual, neighborMaterial)) continue;
-      const light = lightSampler.faceLight(x, y, z, faceIndex);
+      const light = yield* lightSampler.faceLightSteps(x, y, z, faceIndex);
       addFaceCell(groups, faceIndex, localX, y, localZ, renderMaterial.layer, light);
     }
   }
 
-  const mesh = packBuildingMesh(opaqueGroups, chunk, chunkSize, placement, opaqueBlockCount, false);
+  const mesh = yield* packBuildingMeshSteps(opaqueGroups, chunk, chunkSize, placement, opaqueBlockCount, false, work);
   const visualMesh = visualGroups.size
-    ? packBuildingMesh(visualGroups, chunk, chunkSize, placement, visualBlockCount, true)
+    ? yield* packBuildingMeshSteps(visualGroups, chunk, chunkSize, placement, visualBlockCount, true, work)
     : null;
   return {
     id: `building:${placement.id}:${chunk.chunkX},${chunk.chunkZ}`,
@@ -145,12 +199,15 @@ function buildingChunkFrustumBounds(chunk, chunkSize) {
   });
 }
 
-function packBuildingMesh(groups, chunk, chunkSize, placement, blockCount, visual) {
+function* packBuildingMeshSteps(groups, chunk, chunkSize, placement, blockCount, visual, work) {
   let faceCellCount = 0;
-  for (const group of groups.values()) faceCellCount += group.cellCount;
+  for (const group of groups.values()) {
+    if (takeBuildingWork(work)) yield buildingStep(work, "building-pack-groups");
+    faceCellCount += group.cellCount;
+  }
   const writer = new PackedMeshWriter(Math.min(1_048_576, Math.max(320, faceCellCount * 8)));
-  for (const group of groups.values()) appendGreedyGroup(group, writer);
-  const { vertices, indices, vertexCount, quadCount } = writer.finish();
+  for (const group of groups.values()) yield* appendGreedyGroupSteps(group, writer, work);
+  const { vertices, indices, vertexCount, quadCount } = yield* writer.finishSteps(work);
   return Object.freeze({
     vertices,
     indices,
@@ -196,21 +253,21 @@ function materialRenderInfo(materialId) {
   return cached;
 }
 
-function createBuildingLightSampler(placement, voxelLookup) {
+function* createBuildingLightSamplerSteps(placement, voxelLookup, work) {
   const bounds = placement.bounds;
-  const bakedSky = bakeBuildingSkyLight(bounds, voxelLookup);
+  const bakedSky = yield* bakeBuildingSkyLightSteps(bounds, voxelLookup, work);
   const fallbackSky = bakedSky ? null : new Map();
   const rawFaceLightCaches = FACE_DEFS.map(() => new Map());
   return {
-    faceLight(x, y, z, faceIndex) {
-      const center = rawFaceLight(x, y, z, faceIndex);
+    *faceLightSteps(x, y, z, faceIndex) {
+      const center = yield* rawFaceLightSteps(x, y, z, faceIndex);
       if (center === null) return 0;
       let sunTotal = ((center >>> 4) & 0x0f) * 4;
       let skyTotal = (center & 0x0f) * 4;
       let weightTotal = 4;
       let edgeDetected = false;
       for (const [uOffset, vOffset] of GAUSSIAN_CARDINAL_OFFSETS) {
-        const sample = offsetFaceLight(x, y, z, faceIndex, uOffset, vOffset);
+        const sample = yield* offsetFaceLightSteps(x, y, z, faceIndex, uOffset, vOffset);
         if (sample === null) continue;
         sunTotal += ((sample >>> 4) & 0x0f) * 2;
         skyTotal += (sample & 0x0f) * 2;
@@ -219,7 +276,7 @@ function createBuildingLightSampler(placement, voxelLookup) {
       }
       if (!edgeDetected) return center;
       for (const [uOffset, vOffset] of GAUSSIAN_DIAGONAL_OFFSETS) {
-        const sample = offsetFaceLight(x, y, z, faceIndex, uOffset, vOffset);
+        const sample = yield* offsetFaceLightSteps(x, y, z, faceIndex, uOffset, vOffset);
         if (sample === null) continue;
         sunTotal += (sample >>> 4) & 0x0f;
         skyTotal += sample & 0x0f;
@@ -232,13 +289,14 @@ function createBuildingLightSampler(placement, voxelLookup) {
   };
 
   // Blur only across exposed coplanar faces, so softness never leaks through a wall.
-  function offsetFaceLight(x, y, z, faceIndex, uOffset, vOffset) {
-    if (faceIndex <= 1) return rawFaceLight(x, y + vOffset, z + uOffset, faceIndex);
-    if (faceIndex <= 3) return rawFaceLight(x + uOffset, y, z + vOffset, faceIndex);
-    return rawFaceLight(x + uOffset, y + vOffset, z, faceIndex);
+  function* offsetFaceLightSteps(x, y, z, faceIndex, uOffset, vOffset) {
+    if (faceIndex <= 1) return yield* rawFaceLightSteps(x, y + vOffset, z + uOffset, faceIndex);
+    if (faceIndex <= 3) return yield* rawFaceLightSteps(x + uOffset, y, z + vOffset, faceIndex);
+    return yield* rawFaceLightSteps(x + uOffset, y + vOffset, z, faceIndex);
   }
 
-  function rawFaceLight(x, y, z, faceIndex) {
+  function* rawFaceLightSteps(x, y, z, faceIndex) {
+    if (takeBuildingWork(work)) yield buildingStep(work, "building-face-light");
     const cache = rawFaceLightCaches[faceIndex];
     const key = voxelLookup.key(x, y, z);
     if (key < 0) return null;
@@ -257,12 +315,12 @@ function createBuildingLightSampler(placement, voxelLookup) {
     const adjacentZ = z + face.delta[2];
     const skyLevel = bakedSky
       ? bakedSky.levelAt(adjacentX, adjacentY, adjacentZ)
-      : fallbackSkyLightLevel(adjacentX, adjacentY, adjacentZ, bounds, voxelLookup, fallbackSky);
+      : yield* fallbackSkyLightLevelSteps(adjacentX, adjacentY, adjacentZ, bounds, voxelLookup, fallbackSky, work);
     const sunFacing = face.delta[0] * MAIN_GAME_SUN_DIRECTION[0]
       + face.delta[1] * MAIN_GAME_SUN_DIRECTION[1]
       + face.delta[2] * MAIN_GAME_SUN_DIRECTION[2];
     const sunLevel = sunFacing > 0.0001
-      ? quantizedLightLevel(traceFaceSunlight(x, y, z, face, bounds, voxelLookup))
+      ? quantizedLightLevel(yield* traceFaceSunlightSteps(x, y, z, face, bounds, voxelLookup, work))
       : MAX_LIGHT_LEVEL;
     const light = (sunLevel << 4) | skyLevel;
     cache.set(key, light);
@@ -270,7 +328,7 @@ function createBuildingLightSampler(placement, voxelLookup) {
   }
 }
 
-function bakeBuildingSkyLight(bounds, voxelLookup) {
+function* bakeBuildingSkyLightSteps(bounds, voxelLookup, work) {
   const width = positiveInteger(bounds.width, "placement width") + 2;
   const height = positiveInteger(bounds.height, "placement height") + 2;
   const depth = positiveInteger(bounds.depth, "placement depth") + 2;
@@ -292,6 +350,7 @@ function bakeBuildingSkyLight(bounds, voxelLookup) {
       const worldX = minX + localX;
       let verticalLight = MAX_LIGHT_LEVEL;
       for (let localY = height - 1; localY >= 0; localY -= 1) {
+        if (takeBuildingWork(work)) yield buildingStep(work, "building-sky-columns");
         const materialId = voxelLookup.get(worldX, minY + localY, worldZ);
         const renderInfo = materialId ? materialRenderInfo(materialId) : null;
         const index = indexAt(localX, localY, localZ);
@@ -314,6 +373,7 @@ function bakeBuildingSkyLight(bounds, voxelLookup) {
   for (let level = MAX_LIGHT_LEVEL; level > 1; level -= 1) {
     const bucket = buckets[level];
     for (let cursor = 0; cursor < bucket.length; cursor += 1) {
+      if (takeBuildingWork(work)) yield buildingStep(work, "building-sky-spread");
       const index = bucket[cursor];
       if (light[index] !== level) continue;
       const localY = Math.floor(index / layerSize);
@@ -351,7 +411,7 @@ function bakeBuildingSkyLight(bounds, voxelLookup) {
   }
 }
 
-function fallbackSkyLightLevel(x, y, z, bounds, voxelLookup, cache) {
+function* fallbackSkyLightLevelSteps(x, y, z, bounds, voxelLookup, cache, work) {
   const key = `${x},${y},${z}`;
   const cached = cache.get(key);
   if (cached !== undefined) return cached;
@@ -365,7 +425,7 @@ function fallbackSkyLightLevel(x, y, z, bounds, voxelLookup, cache) {
   ];
   let visibility = 0;
   for (const direction of directions) {
-    visibility = Math.max(visibility, traceVoxelTransmission(start, direction, bounds, voxelLookup));
+    visibility = Math.max(visibility, yield* traceVoxelTransmissionSteps(start, direction, bounds, voxelLookup, work));
     if (visibility >= 0.999) break;
   }
   const level = quantizedLightLevel(visibility);
@@ -373,16 +433,16 @@ function fallbackSkyLightLevel(x, y, z, bounds, voxelLookup, cache) {
   return level;
 }
 
-function traceFaceSunlight(x, y, z, face, bounds, voxelLookup) {
+function* traceFaceSunlightSteps(x, y, z, face, bounds, voxelLookup, work) {
   const start = [
     x + 0.5 + face.delta[0] * 0.50001,
     y + 0.5 + face.delta[1] * 0.50001,
     z + 0.5 + face.delta[2] * 0.50001,
   ];
-  return traceVoxelTransmission(start, MAIN_GAME_SUN_DIRECTION, bounds, voxelLookup);
+  return yield* traceVoxelTransmissionSteps(start, MAIN_GAME_SUN_DIRECTION, bounds, voxelLookup, work);
 }
 
-function traceVoxelTransmission(start, direction, bounds, voxelLookup) {
+function* traceVoxelTransmissionSteps(start, direction, bounds, voxelLookup, work) {
   const length = Math.hypot(direction[0], direction[1], direction[2]);
   if (!(length > 0)) return 0;
   const dx = direction[0] / length;
@@ -404,6 +464,7 @@ function traceVoxelTransmission(start, direction, bounds, voxelLookup) {
   let transmission = 1;
 
   for (let step = 0; step < maxSteps; step += 1) {
+    if (takeBuildingWork(work)) yield buildingStep(work, "building-light-ray");
     if (!insideBounds(cellX, cellY, cellZ, bounds)) return transmission;
     const materialId = voxelLookup.get(cellX, cellY, cellZ);
     if (materialId) {
@@ -583,22 +644,27 @@ function faceGroupKey(faceIndex, plane, layer, light) {
   return geometryKey * 256 + light;
 }
 
-function appendGreedyGroup(group, writer) {
+function* appendGreedyGroupSteps(group, writer, work) {
   for (let v = group.minV; v <= group.maxV; v += 1) {
+    if (takeBuildingWork(work)) yield buildingStep(work, "building-greedy-faces");
     let row = group.rows.get(v) ?? 0;
     while (row) {
       const u = lowestSetBitIndex(row);
       const width = contiguousWidth(row, u);
       const runMask = (((1 << width) - 1) << u) & 0xffff;
       let height = 1;
-      while (((group.rows.get(v + height) ?? 0) & runMask) === runMask) height += 1;
+      while (((group.rows.get(v + height) ?? 0) & runMask) === runMask) {
+        if (takeBuildingWork(work)) yield buildingStep(work, "building-greedy-faces");
+        height += 1;
+      }
       for (let offset = 0; offset < height; offset += 1) {
+        if (takeBuildingWork(work)) yield buildingStep(work, "building-greedy-faces");
         const rowV = v + offset;
         const remaining = ((group.rows.get(rowV) ?? 0) & ~runMask) & 0xffff;
         if (remaining) group.rows.set(rowV, remaining);
         else group.rows.delete(rowV);
       }
-      writer.appendQuad(group, u, v, width, height);
+      yield* writer.appendQuadSteps(group, u, v, width, height, work);
       row = group.rows.get(v) ?? 0;
     }
   }
@@ -621,6 +687,11 @@ class PackedMeshWriter {
     this.view = new DataView(this.bytes.buffer);
     this.vertexCount = 0;
     this.quadCount = 0;
+  }
+
+  *appendQuadSteps(group, u, v, width, height, work) {
+    yield* this.ensureBytesSteps(4 * VERTEX_STRIDE_BYTES, work);
+    this.appendQuad(group, u, v, width, height);
   }
 
   appendQuad(group, u, v, width, height) {
@@ -688,23 +759,30 @@ class PackedMeshWriter {
     this.vertexCount += 1;
   }
 
-  ensureBytes(additionalBytes) {
+  *ensureBytesSteps(additionalBytes, work) {
     const required = this.vertexCount * VERTEX_STRIDE_BYTES + additionalBytes;
     if (required <= this.bytes.byteLength) return;
     let capacity = this.bytes.byteLength;
     while (capacity < required) capacity *= 2;
     const next = new Uint8Array(capacity);
-    next.set(this.bytes);
+    yield* copyPackedBuildingBytesSteps(next, this.bytes, this.bytes.byteLength, work);
     this.bytes = next;
     this.view = new DataView(next.buffer);
   }
 
-  finish() {
-    const vertices = this.bytes.slice(0, this.vertexCount * VERTEX_STRIDE_BYTES);
+  ensureBytes(additionalBytes) {
+    // appendQuadSteps reserves capacity cooperatively before these four writes.
+    if (this.vertexCount * VERTEX_STRIDE_BYTES + additionalBytes > this.bytes.byteLength) throw new Error("Building writer capacity was not prepared.");
+  }
+
+  *finishSteps(work) {
+    const vertices = new Uint8Array(this.vertexCount * VERTEX_STRIDE_BYTES);
+    yield* copyPackedBuildingBytesSteps(vertices, this.bytes, vertices.byteLength, work);
     const indices = this.vertexCount > 65535
       ? new Uint32Array(this.quadCount * 6)
       : new Uint16Array(this.quadCount * 6);
     for (let quad = 0; quad < this.quadCount; quad += 1) {
+      if (takeBuildingWork(work)) yield buildingStep(work, "building-pack-indices");
       const vertex = quad * 4;
       const offset = quad * 6;
       indices[offset] = vertex;
@@ -715,6 +793,15 @@ class PackedMeshWriter {
       indices[offset + 5] = vertex + 3;
     }
     return { vertices, indices, vertexCount: this.vertexCount, quadCount: this.quadCount };
+  }
+}
+
+function* copyPackedBuildingBytesSteps(target, source, length, work) {
+  const stride = Math.min(16384, work.limit * VERTEX_STRIDE_BYTES);
+  for (let offset = 0; offset < length; offset += stride) {
+    const end = Math.min(length, offset + stride);
+    if (takeBuildingWork(work, Math.ceil((end - offset) / VERTEX_STRIDE_BYTES))) yield buildingStep(work, "building-pack-vertices");
+    target.set(source.subarray(offset, end), offset);
   }
 }
 
@@ -756,9 +843,12 @@ function createPlacementVoxelLookup(placement) {
   };
 }
 
-function visitPlacementVoxels(placement, visitor) {
+function* visitPlacementVoxelsSteps(placement, visitor, work) {
   if (placement.worldVoxels instanceof Map) {
-    for (const voxel of placement.worldVoxels.values()) visitor(voxel.x, voxel.y, voxel.z, voxel.material);
+    for (const voxel of placement.worldVoxels.values()) {
+      if (takeBuildingWork(work)) yield buildingStep(work, "building-placement-voxels");
+      visitor(voxel.x, voxel.y, voxel.z, voxel.material);
+    }
     return;
   }
   const turn = placement.quarterTurns;
@@ -768,6 +858,7 @@ function visitPlacementVoxels(placement, visitor) {
   const originY = placement.origin.y;
   const originZ = placement.origin.z;
   for (const voxel of placement.building.voxels.values()) {
+    if (takeBuildingWork(work)) yield buildingStep(work, "building-placement-voxels");
     let rotatedX = voxel.x;
     let rotatedZ = voxel.z;
     if (turn === 1) {

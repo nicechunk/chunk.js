@@ -105,11 +105,37 @@ const MESH_KEYS = keySet([
 ]);
 const FRUSTUM_KEYS = keySet(["centerX", "centerY", "centerZ", "radius"]);
 
+function drainResultSteps(iterator) {
+  let result = iterator.next();
+  while (!result.done) result = iterator.next();
+  return result.value;
+}
+
+function resultWorkBudget(value = 256) {
+  if (!Number.isInteger(value) || value < 1 || value > 4096) throw new RangeError("Building result workBudget must be an integer from 1 to 4096.");
+  return {limit: value, used: 0};
+}
+
+function takeResultWork(work) {
+  if (++work.used < work.limit) return false;
+  work.used = 0; return true;
+}
+
 export function createBuildingMeshResult(building, placement, chunks) {
+  return drainResultSteps(createBuildingMeshResultSteps(building, placement, chunks));
+}
+
+export function* createBuildingMeshResultSteps(building, placement, chunks, {workBudget = 256} = {}) {
+  const work = resultWorkBudget(workBudget);
+  const summaries = [];
+  for (const chunk of chunks) {
+    if (takeResultWork(work)) yield {phase: "building-result-summary", workUnits: work.limit};
+    summaries.push(summarizeChunk(chunk));
+  }
   return {
     building: summarizeBuilding(building),
     placement: summarizePlacement(placement),
-    chunks: chunks.map(summarizeChunk),
+    chunks: summaries,
   };
 }
 
@@ -117,12 +143,20 @@ export function createBuildingMeshResult(building, placement, chunks) {
  * Validate an owned Worker result in place. Typed arrays are never copied;
  * callers receive the same result object and buffer views after validation.
  */
-export function validateBuildingMeshResult(input, { request = null } = {}) {
+export function validateBuildingMeshResult(input, options = {}) {
+  return drainResultSteps(validateBuildingMeshResultSteps(input, options));
+}
+
+export function* validateBuildingMeshResultSteps(input, { request = null, workBudget = 256 } = {}) {
+  // The caller owns input and keeps its fields/buffers immutable until done.
+  // No partial validation result is published and cancelling mutates no input.
+  const work = resultWorkBudget(workBudget);
   const result = assertShape(input, RESULT_KEYS, "building mesh result");
-  const building = validateBuilding(result.building);
+  const building = yield* validateBuildingSteps(result.building, work);
   const placement = validatePlacement(result.placement, building);
+  yield {phase: "building-result-request-binding", workUnits: 1};
   const binding = request === null ? null : validateRequestBinding(request, building, placement);
-  validateChunks(result.chunks, building, placement, binding);
+  yield* validateChunksSteps(result.chunks, building, placement, binding, work);
   return result;
 }
 
@@ -221,7 +255,7 @@ function summarizeFoundation(foundation) {
   };
 }
 
-function validateBuilding(input) {
+function* validateBuildingSteps(input, work) {
   const building = assertShape(input, BUILDING_KEYS, "building summary");
   requireString(building.id, "building id", MAX_RESULT_LABEL_LENGTH, true);
   requireString(building.name, "building name", MAX_RESULT_LABEL_LENGTH, true);
@@ -237,12 +271,12 @@ function validateBuilding(input) {
   if (typeof building.codeId !== "string" || !/^[0-9a-f]{8}$/.test(building.codeId)) {
     invalidResult("building codeId must be an eight-character lowercase hexadecimal string");
   }
-  requireEqual(building.codeId, stableCodeId(building.canonicalCode), "building codeId/canonicalCode binding");
+  requireEqual(building.codeId, yield* stableCodeIdSteps(building.canonicalCode, work), "building codeId/canonicalCode binding");
   const size = validateSize(building.size, "building size");
   const voxelCount = requireInteger(building.voxelCount, "building voxelCount", 0, NCM3_MAX_VOXELS);
   requireInteger(building.commandCount, "building commandCount", 0, NCM3_MAX_COMMANDS);
   validateContentBounds(building.contentBounds, size, voxelCount);
-  validateMaterials(building.materials, voxelCount);
+  yield* validateMaterialsSteps(building.materials, voxelCount, work);
   requireEqual(building.scale, 1, "building scale");
   return building;
 }
@@ -269,11 +303,12 @@ function validateContentBounds(input, size, voxelCount) {
   if (voxelCount > width * height * depth) invalidResult("building voxelCount exceeds contentBounds volume");
 }
 
-function validateMaterials(input, voxelCount) {
-  assertArrayShape(input, "building materials", Math.min(voxelCount, 0xffff));
+function* validateMaterialsSteps(input, voxelCount, work) {
+  yield* assertArrayShapeSteps(input, "building materials", Math.min(voxelCount, 0xffff), work);
   if ((voxelCount === 0) !== (input.length === 0)) invalidResult("building materials do not match voxelCount emptiness");
   let previous = 0;
   for (let index = 0; index < input.length; index += 1) {
+    if (takeResultWork(work)) yield {phase: "building-result-materials", workUnits: work.limit};
     if (!Object.hasOwn(input, index)) invalidResult("building materials must be a dense array");
     const material = input[index];
     const id = requireInteger(material, "building material id", 1, 0xffff);
@@ -441,8 +476,8 @@ function validateRequestBinding(input, building, placement) {
   return { chunkSize, revision, envelope };
 }
 
-function validateChunks(input, building, placement, binding) {
-  assertArrayShape(input, "building chunks", building.voxelCount);
+function* validateChunksSteps(input, building, placement, binding, work) {
+  yield* assertArrayShapeSteps(input, "building chunks", building.voxelCount, work);
   if ((building.voxelCount === 0) !== (input.length === 0)) {
     invalidResult("building chunk count does not match voxelCount emptiness");
   }
@@ -482,15 +517,16 @@ function validateChunks(input, building, placement, binding) {
   const coordinates = new Set();
   let commonVersion = binding?.revision ?? null;
   for (let index = 0; index < input.length; index += 1) {
+    if (takeResultWork(work)) yield {phase: "building-result-chunks", workUnits: work.limit};
     if (!Object.hasOwn(input, index)) invalidResult("building chunks must be a dense array");
-    const chunk = validateChunk(input[index], index, building, placement, {
+    const chunk = yield* validateChunkSteps(input[index], index, building, placement, {
       chunkSize,
       minChunkX,
       maxChunkX,
       minChunkZ,
       maxChunkZ,
       commonVersion,
-    }, limits);
+    }, limits, work);
     if (commonVersion === null) commonVersion = chunk.version;
     const coordinateKey = `${chunk.chunkX},${chunk.chunkZ}`;
     if (coordinates.has(coordinateKey)) invalidResult("building chunks contain duplicate coordinates");
@@ -504,7 +540,7 @@ function validateChunks(input, building, placement, binding) {
   validateMaterialClassTotals(building, limits);
 }
 
-function validateChunk(input, index, building, placement, expected, limits) {
+function* validateChunkSteps(input, index, building, placement, expected, limits, work) {
   const label = `building chunk ${index}`;
   const chunk = assertShape(input, CHUNK_KEYS, label);
   const chunkX = requireSafeInteger(chunk.chunkX, `${label}.chunkX`);
@@ -535,8 +571,8 @@ function validateChunk(input, index, building, placement, expected, limits) {
     chunkVoxelCount,
   );
 
-  validateCollisionMask(chunk, label, expected.chunkSize, height, chunkVoxelCount, limits);
-  const opaqueBlockCount = validateMesh(
+  yield* validateCollisionMaskSteps(chunk, label, expected.chunkSize, height, chunkVoxelCount, limits, work);
+  const opaqueBlockCount = yield* validateMeshSteps(
     chunk.mesh,
     `${label}.mesh`,
     chunk,
@@ -544,12 +580,13 @@ function validateChunk(input, index, building, placement, expected, limits) {
     false,
     chunkVoxelCount,
     limits,
+    work,
   );
   let representedVisualBlockCount = 0;
   if (chunk.visualMesh === null) {
     requireEqual(chunk.visualMeshVersion, -1, `${label}.visualMeshVersion`);
   } else {
-    representedVisualBlockCount = validateMesh(
+    representedVisualBlockCount = yield* validateMeshSteps(
       chunk.visualMesh,
       `${label}.visualMesh`,
       chunk,
@@ -557,6 +594,7 @@ function validateChunk(input, index, building, placement, expected, limits) {
       true,
       chunkVoxelCount,
       limits,
+      work,
     );
     requireEqual(representedVisualBlockCount, visualBlockCount, `${label}.visualBlockCount/visualMesh binding`);
   }
@@ -639,7 +677,7 @@ function validateMaterialClassPartition({
   requireEqual(secondCount, hasSecond ? total : 0, label);
 }
 
-function validateCollisionMask(chunk, label, chunkSize, height, voxelCount, limits) {
+function* validateCollisionMaskSteps(chunk, label, chunkSize, height, voxelCount, limits, work) {
   const mask = requireTypedArray(chunk.collisionMask, Uint32Array, `${label}.collisionMask`, limits.buffers);
   const expectedWords = Math.ceil((chunkSize * chunkSize * height) / 32);
   if (mask.length !== expectedWords) invalidResult(`${label}.collisionMask length is inconsistent with chunk dimensions`);
@@ -652,7 +690,10 @@ function validateCollisionMask(chunk, label, chunkSize, height, voxelCount, limi
     Math.min(voxelCount, chunkSize * chunkSize * height),
   );
   let setBits = 0;
-  for (const word of mask) setBits += popCount32(word);
+  for (const word of mask) {
+    if (takeResultWork(work)) yield {phase: "building-result-collision", workUnits: work.limit};
+    setBits += popCount32(word);
+  }
   if (setBits !== collisionBlockCount) invalidResult(`${label}.collisionMask does not match collisionBlockCount`);
   const usedTailBits = (chunkSize * chunkSize * height) & 31;
   if (usedTailBits && (mask[mask.length - 1] & ~(0xffffffff >>> (32 - usedTailBits)))) {
@@ -661,7 +702,7 @@ function validateCollisionMask(chunk, label, chunkSize, height, voxelCount, limi
   limits.collisionBlockCount += collisionBlockCount;
 }
 
-function validateMesh(input, label, chunk, placement, visual, voxelCount, limits) {
+function* validateMeshSteps(input, label, chunk, placement, visual, voxelCount, limits, work) {
   const mesh = assertShape(input, MESH_KEYS, label);
   const vertices = requireTypedArray(mesh.vertices, Uint8Array, `${label}.vertices`, limits.buffers);
   const indices = requireIndexArray(mesh.indices, `${label}.indices`, limits.buffers);
@@ -680,6 +721,7 @@ function validateMesh(input, label, chunk, placement, visual, voxelCount, limits
   const expectedIndexType = vertexCount > 0xffff ? Uint32Array : Uint16Array;
   if (!(indices instanceof expectedIndexType)) invalidResult(`${label}.indices use the wrong integer width`);
   for (const vertexIndex of indices) {
+    if (takeResultWork(work)) yield {phase: "building-result-indices", workUnits: work.limit};
     if (vertexIndex >= vertexCount) invalidResult(`${label}.indices contain an out-of-range vertex`);
   }
   requireEqual(mesh.chunkX, chunk.chunkX, `${label}.chunkX`);
@@ -764,9 +806,10 @@ function assertRecord(input, label) {
   return input;
 }
 
-function assertArrayShape(input, label, maxLength) {
+function* assertArrayShapeSteps(input, label, maxLength, work) {
   if (!Array.isArray(input) || input.length > maxLength) invalidResult(`${label} exceed their array bounds`);
   for (const key in input) {
+    if (takeResultWork(work)) yield {phase: "building-result-array-shape", workUnits: work.limit};
     if (!Object.hasOwn(input, key)) continue;
     const index = Number(key);
     if (!Number.isSafeInteger(index) || index < 0 || index >= input.length || String(index) !== key) {
@@ -850,9 +893,10 @@ function popCount32(input) {
   return (((value + (value >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
 }
 
-function stableCodeId(code) {
+function* stableCodeIdSteps(code, work) {
   let hash = 0x811c9dc5;
   for (let index = 0; index < code.length; index += 1) {
+    if (takeResultWork(work)) yield {phase: "building-result-code-id", workUnits: work.limit};
     hash ^= code.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }

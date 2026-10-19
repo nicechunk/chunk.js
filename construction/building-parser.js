@@ -2,25 +2,48 @@ import {
   decodeNcm3,
   encodeNcm3,
   payloadByteLength,
-  voxelize,
+  voxelizeSteps,
 } from "../ncm/blueprint-codec.js";
 
 export const BUILDING_QUARTER_TURNS = Object.freeze([0, 1, 2, 3]);
+
+function drainParserSteps(iterator) {
+  let result = iterator.next();
+  while (!result.done) result = iterator.next();
+  return result.value;
+}
+
+function parserWorkBudget(value = 256) {
+  if (!Number.isInteger(value) || value < 1 || value > 4096) throw new RangeError("Building parser workBudget must be an integer from 1 to 4096.");
+  return {limit: value, used: 0};
+}
+
+function takeParserWork(work) {
+  if (++work.used < work.limit) return false;
+  work.used = 0; return true;
+}
 
 /**
  * Parse a declarative NCM3 building without evaluating executable code.
  * One NCM3 voxel always remains one world voxel throughout this module.
  */
-export function parseNcm3Building(code, { id = "", name = "" } = {}) {
+export function parseNcm3Building(code, options = {}) {
+  return drainParserSteps(parseNcm3BuildingSteps(code, options));
+}
+
+export function* parseNcm3BuildingSteps(code, { id = "", name = "", workBudget = 256 } = {}) {
+  const work = parserWorkBudget(workBudget);
   const sourceCode = String(code ?? "").trim();
+  yield {phase: "building-decode-envelope", workUnits: 1};
   const blueprint = decodeNcm3(sourceCode);
+  yield {phase: "building-encode-envelope", workUnits: 1};
   const canonicalCode = encodeNcm3(blueprint);
-  const voxels = voxelize(blueprint);
+  const voxels = yield* voxelizeSteps(blueprint, undefined, {workBudget});
   const size = Object.freeze({ ...blueprint.size });
-  const analysis = analyzeVoxels(voxels, size);
+  const analysis = yield* analyzeVoxelsSteps(voxels, size, work);
   const contentBounds = Object.freeze(analysis.bounds);
   const materials = Object.freeze([...analysis.materials].sort((a, b) => a - b));
-  const codeId = stableCodeId(canonicalCode);
+  const codeId = yield* stableCodeIdSteps(canonicalCode, work);
 
   return Object.freeze({
     id: String(id || `ncm3-${codeId}`),
@@ -59,15 +82,22 @@ export function buildingFootprint(sizeInput, quarterTurns = 0) {
  * quarter-turn rotation. Oversized placement is only allowed for visual
  * previews and is never scaled.
  */
-export function createBuildingPlacement(buildingInput, foundationInput, {
+export function createBuildingPlacement(buildingInput, foundationInput, options = {}) {
+  return drainParserSteps(createBuildingPlacementSteps(buildingInput, foundationInput, options));
+}
+
+export function* createBuildingPlacementSteps(buildingInput, foundationInput, {
   quarterTurns = 0,
   placementId = "",
   materializeWorldVoxels = true,
   allowFoundationOverflow = false,
   offsetX = 0,
   offsetZ = 0,
+  workBudget = 256,
 } = {}) {
-  const building = normalizeBuilding(buildingInput);
+  const work = parserWorkBudget(workBudget);
+  const building = typeof buildingInput === "string"
+    ? yield* parseNcm3BuildingSteps(buildingInput, {workBudget}) : normalizeBuilding(buildingInput);
   const foundation = normalizeFoundation(foundationInput);
   const footprint = buildingFootprint(building.size, quarterTurns);
   const normalizedOffsetX = requireInteger(offsetX, "building X offset");
@@ -105,6 +135,7 @@ export function createBuildingPlacement(buildingInput, foundationInput, {
     const sizeX = building.size.x;
     const sizeZ = building.size.z;
     for (const voxel of building.voxels.values()) {
+      if (takeParserWork(work)) yield {phase: "building-world-voxels", workUnits: work.limit};
       const rotated = rotateLocalVoxelNormalized(voxel.x, voxel.z, sizeX, sizeZ, turn);
       const world = {
         x: originX + rotated.x,
@@ -210,7 +241,7 @@ function normalizeSize(input = {}) {
   };
 }
 
-function analyzeVoxels(voxels, size) {
+function* analyzeVoxelsSteps(voxels, size, work) {
   if (!voxels.size) return {
     bounds: { minX: 0, minY: 0, minZ: 0, maxX: -1, maxY: -1, maxZ: -1, width: 0, height: 0, depth: 0 },
     materials: new Set(),
@@ -223,6 +254,7 @@ function analyzeVoxels(voxels, size) {
   let maxZ = -1;
   const materials = new Set();
   for (const voxel of voxels.values()) {
+    if (takeParserWork(work)) yield {phase: "building-content-bounds", workUnits: work.limit};
     minX = Math.min(minX, voxel.x);
     minY = Math.min(minY, voxel.y);
     minZ = Math.min(minZ, voxel.z);
@@ -244,9 +276,10 @@ function rotateLocalVoxelNormalized(x, z, sizeX, sizeZ, turn) {
   return { x, z };
 }
 
-function stableCodeId(code) {
+function* stableCodeIdSteps(code, work) {
   let hash = 0x811c9dc5;
   for (let index = 0; index < code.length; index += 1) {
+    if (takeParserWork(work)) yield {phase: "building-code-id", workUnits: work.limit};
     hash ^= code.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
