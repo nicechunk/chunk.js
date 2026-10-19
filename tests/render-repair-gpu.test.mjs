@@ -66,6 +66,19 @@ test('motion suppresses speculative residency while visible gaps upload and idle
  assert.deepEqual(r.preparedRenderFrame.chunks,[front]);r.dispose();
 });
 
+test('speculative count, byte and memory budgets yield to visible gaps without changing draw selection',()=>{
+ const {r}=renderer();r.options.maxUploadCpuMs=10000;
+ const front=chunk('0,0'),back=chunk('0,3'),side=chunk('0,4');back.chunkZ=3;side.chunkZ=4;
+ const args={maxUploads:1,residencyChunks:[back,side],backgroundUploadBudget:{maxUploads:1,maxBytes:1000,maxCpuMs:10000,intervalMs:0}};
+ const first=r.prepareChunksForRender([front],args);
+ assert.equal(first.prefetchUploads,0);assert.ok(r.entryForChunk(front));assert.equal(r.entryForChunk(back),null);
+ const next=r.prepareChunksForRender([front],args);
+ assert.equal(next.prefetchUploads,1);assert.equal(next.prefetchBytes,92);
+ assert.ok(r.entryForChunk(back));assert.equal(r.entryForChunk(side),null);
+ r.prepareChunksForRender([front],{...args,backgroundUploadBudget:{...args.backgroundUploadBudget,maxBytes:0}});
+ assert.equal(r.entryForChunk(side),null);assert.deepEqual(r.preparedRenderFrame.chunks,[front]);r.dispose();
+});
+
 test('completed and staged chunk uploads validate once per stage and still reject GL allocation errors',()=>{
  const {gl,control}=mockGl(),manager=new BufferManager(gl);let polls=0;const getError=gl.getError;
  gl.getError=()=>{polls++;return getError();};

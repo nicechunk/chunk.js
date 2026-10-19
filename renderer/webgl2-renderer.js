@@ -1,7 +1,7 @@
 import { DEFAULT_VIEW_DISTANCE, MAX_DESKTOP_DPR, MAX_MOBILE_DPR } from "../core/constants.js";
 import { BLOCK_ID } from "../world/block-registry.js";
 import { cameraForward, cameraOrigin, cameraViewProjection } from "./camera.js";
-import { filterChunksByCameraFrustum, cameraRenderCenterChunk } from "./frustum.js";
+import { filterChunksByCameraFrustum, cameraRenderCenterChunk, prepareCameraFrustum, chunkIntersectsCameraFrustum } from "./frustum.js";
 import { avatarHoldsTransparentBlock, updateAvatarMeshVertices } from "./avatar-mesh.js";
 import { BufferManager } from "./buffer-manager.js";
 import { AsyncGpuTimer, GpuResourceLedger, instrumentGl, assertGpuUpload } from "./gpu-diagnostics.js";
@@ -141,6 +141,7 @@ export class WebGL2VoxelRenderer {
       maxPrefetchGpuBytes: options.maxPrefetchGpuBytes ?? 32 * 1024 * 1024,
       maxPrefetchUploadsPerFrame: options.maxPrefetchUploadsPerFrame ?? 2,
       prefetchIntervalMs: options.prefetchIntervalMs ?? 100,
+      prefetchWithFrameInFlight: options.prefetchWithFrameInFlight ?? false,
       uploadRetryMs: options.uploadRetryMs ?? 250,
       antialias: options.antialias ?? false,
     };
@@ -176,6 +177,8 @@ export class WebGL2VoxelRenderer {
     this.uploadDiagnostics = { failed: 0, bytes: 0, cpuMs: 0, oldestPendingMs: 0 };
     this.pendingUploadSince = new Map();
     this.pendingMeshSources = new Map();
+    this.prefetchQueueVersion = 0;
+    this.prefetchQueueCache = null;
     this.observedChunkCommits = new WeakMap();
     this.lastPrefetchAt = -Infinity;
     this.avatarFrameStates = new Map();
@@ -231,6 +234,7 @@ export class WebGL2VoxelRenderer {
     this.avatarResourceCache = new WeakMap();
     this.retryUploads.clear(); this.uploadStaging.clear();
     this.pendingMeshSources.clear(); this.pendingUploadSince.clear();
+    this.prefetchQueueCache = null;
     this.observedChunkCommits = new WeakMap();
     this.uploadValidationFence = null;
     this.frameCompletionFences.length = 0;
@@ -602,6 +606,7 @@ export class WebGL2VoxelRenderer {
   removeChunk(chunkId) {
     this.cpuMeshBytesDirty=true;
     this.observedChunkCommits = new WeakMap();
+    this.prefetchQueueCache = null;
     this.preparedRenderFrame = null;
     for (const buffers of [this.chunkBuffers, this.visualChunkBuffers]) {
       for (const [id, entry] of buffers) if (id === chunkId || entry.parentId === chunkId) {
@@ -650,12 +655,13 @@ export class WebGL2VoxelRenderer {
         const key = `${visual ? 'visual' : 'opaque'}:${section.id}`;
         if (!this.pendingUploadSince.has(key)) this.pendingUploadSince.set(key,performance.now());
         this.pendingMeshSources.set(key,{chunk:section,visual,parent:chunk});
+        this.prefetchQueueVersion++;
       }
       if (revision != null) this.observedChunkCommits.set(chunk,{revision,generation:this.contextGeneration,mesh:chunk.mesh,visualMesh:chunk.visualMesh});
     }
   }
 
-  prepareChunksForRender(visibleChunks = [], { maxUploads = this.options.maxChunkUploadsPerFrame, cameraState = null, residencyChunks = [], allowBackgroundUploads = true } = {}) {
+  prepareChunksForRender(visibleChunks = [], { maxUploads = this.options.maxChunkUploadsPerFrame, cameraState = null, residencyChunks = [], allowBackgroundUploads = true, backgroundUploadBudget = null, prefetchFocus = null } = {}) {
     this.preparedRenderFrame = null;
     if (!this.gpuReady()) return { uploaded: 0, pendingUploads: 0, paused: true };
     const settlement = this.settleDeferredUploads();
@@ -676,43 +682,82 @@ export class WebGL2VoxelRenderer {
     this.preparedRenderFrame = {input:visibleChunks,camera:captureFrustumCamera(cameraState),chunks,viewDistance:this.options.viewDistance};
     const candidates = [];
     const center = cameraState ? cameraRenderCenterChunk(cameraState) : null;
-    const allowPrefetch = allowBackgroundUploads && performance.now()-this.lastPrefetchAt >= this.options.prefetchIntervalMs && !this.frameCompletionFences.length;
-    for (const [key, source] of this.pendingMeshSources) {
-      const {chunk,visual,parent} = source;
-      const mesh = chunk?.[visual ? 'visualMesh' : 'mesh'];
-      if (!mesh?.indexCount) continue;
-      const visible = visibleSections.has(chunk);
-      if (!visible && !residentSet.has(parent ?? chunk)) continue;
-      if (!visible && !allowPrefetch) continue;
-      if (!visible && this.resourceLedger.bufferBytes >= this.options.maxPrefetchGpuBytes) continue;
-      const distance = center ? Math.max(Math.abs(chunk.chunkX-center.chunkX),Math.abs(chunk.chunkZ-center.chunkZ)) : 0;
-      candidates.push({key,chunk,visual,visible,distance,order:visible ? visibleSections.get(chunk)*2+Number(visual) : candidates.length});
+    const backgroundLimit = Math.min(limit, Math.max(0, Math.trunc(backgroundUploadBudget?.maxUploads ?? this.options.maxPrefetchUploadsPerFrame)));
+    const backgroundBytes = Math.min(this.options.maxUploadBytesPerFrame, Math.max(0, backgroundUploadBudget?.maxBytes ?? this.options.maxUploadBytesPerFrame));
+    const backgroundCpuMs = Math.min(this.options.maxUploadCpuMs, Math.max(0, backgroundUploadBudget?.maxCpuMs ?? this.options.maxUploadCpuMs));
+    const intervalMs = Math.max(0, backgroundUploadBudget?.intervalMs ?? this.options.prefetchIntervalMs);
+    const allowPrefetch = allowBackgroundUploads && backgroundLimit > 0 && backgroundBytes > 0 && backgroundCpuMs > 0
+      && performance.now()-this.lastPrefetchAt >= intervalMs
+      && (this.options.prefetchWithFrameInFlight || !this.frameCompletionFences.length);
+    const focusX = Number.isFinite(prefetchFocus?.prefetchWorldX) ? Math.floor(prefetchFocus.prefetchWorldX / 16) : center?.chunkX;
+    const focusZ = Number.isFinite(prefetchFocus?.prefetchWorldZ) ? Math.floor(prefetchFocus.prefetchWorldZ / 16) : center?.chunkZ;
+    const forward = cameraState ? cameraForward(cameraState) : null;
+    const viewKey = forward ? [Math.round(Math.atan2(forward[0],forward[2])*12/Math.PI),Math.round(forward[1]*10),
+      Math.floor((cameraState.worldY||0)/4),cameraState.fov,cameraState.aspect,cameraState.far].join(':') : '';
+    // The foreground is already ordered. Avoid scanning and sorting the whole
+    // preload ring on every camera frame to find these few urgent channels.
+    for (const chunk of chunks) for (const visual of [false,true]) {
+      const key = `${visual ? 'visual' : 'opaque'}:${chunk.id}`;
+      if (this.pendingMeshSources.get(key)?.chunk === chunk) candidates.push({key,chunk,visual,visible:true});
     }
-    candidates.sort((a,b)=>Number(b.visible)-Number(a.visible) || (a.visible ? a.order-b.order : a.distance-b.distance || a.order-b.order));
+    if (allowPrefetch && this.resourceLedger.bufferBytes < this.options.maxPrefetchGpuBytes) {
+      let cache=this.prefetchQueueCache;
+      if (!cache || cache.version!==this.prefetchQueueVersion || cache.x!==center?.chunkX || cache.z!==center?.chunkZ
+        || cache.focusX!==focusX || cache.focusZ!==focusZ || cache.viewKey!==viewKey) {
+        const ordered=[];
+        const forecastCamera=cameraState?captureFrustumCamera(cameraState):null;
+        if(forecastCamera) {
+          const dx=((focusX??center.chunkX)-center.chunkX)*16,dz=((focusZ??center.chunkZ)-center.chunkZ)*16;
+          forecastCamera.worldX+=dx;forecastCamera.worldZ+=dz;
+          if(Number.isFinite(forecastCamera.targetWorldX))forecastCamera.targetWorldX+=dx;
+          if(Number.isFinite(forecastCamera.targetWorldZ))forecastCamera.targetWorldZ+=dz;
+          // Only the speculative upload order uses the wider projection.
+          forecastCamera.fov=Math.min(110,(Number(cameraState.fov)||58)+24);
+        }
+        const forecastFrustum=forecastCamera?prepareCameraFrustum(forecastCamera):null;
+        for (const [key,source] of this.pendingMeshSources) {
+          const {chunk,visual}=source;
+          if (!chunk?.[visual?'visualMesh':'mesh']?.indexCount) continue;
+          const distance=center?Math.max(Math.abs(chunk.chunkX-center.chunkX),Math.abs(chunk.chunkZ-center.chunkZ)):0;
+          const predicted=focusX==null||focusZ==null?distance:Math.max(Math.abs(chunk.chunkX-focusX),Math.abs(chunk.chunkZ-focusZ));
+          const imminent=forecastCamera&&chunkIntersectsCameraFrustum(chunk,forecastCamera,forecastFrustum);
+          ordered.push({...source,key,visible:false,distance:Math.min(distance,predicted+0.25)-(imminent?10000:0),order:ordered.length});
+        }
+        ordered.sort((a,b)=>a.distance-b.distance||a.order-b.order);
+        cache=this.prefetchQueueCache={version:this.prefetchQueueVersion,x:center?.chunkX,z:center?.chunkZ,focusX,focusZ,viewKey,ordered};
+      }
+      for (const candidate of cache.ordered) {
+        if (visibleSections.has(candidate.chunk) || !residentSet.has(candidate.parent??candidate.chunk)) continue;
+        if (this.pendingMeshSources.get(candidate.key)?.chunk!==candidate.chunk) continue;
+        candidates.push(candidate);
+      }
+    }
     let uploaded=settlement.uploaded, bytes=0, attempts=0,pendingUploads=0, oldestPendingMs=0;
     // A task is one chunk/section channel. Region membership never causes repacking.
     // Finish both channels of nearer sections before distant opaque work. A
     // completed validation can feed this frame's bounded batch immediately;
     // no draw/upload occurs behind an outstanding validation fence.
-    let prefetchUploads=0;
+    let prefetchUploads=0, prefetchBytes=0, backgroundStartedAt=null;
     for (const {key,chunk,visual,visible} of candidates) {
       const mesh=chunk?.[visual?'visualMesh':'mesh']; if(!mesh?.indexCount)continue;
       const existing=this.entryForChunk(chunk,visual);
       if(existing?.token===meshIdentity(chunk,visual) && chunk[visual?'visualGpuUploaded':'gpuUploaded'])continue;
       const overBudget=attempts>=limit || bytes>=this.options.maxUploadBytesPerFrame || (attempts>0 && performance.now()-startedAt>=this.options.maxUploadCpuMs);
-      if(overBudget) {if(visible)pendingUploads++;oldestPendingMs=Math.max(oldestPendingMs,performance.now()-this.pendingUploadSince.get(key));continue;}
-      if (!visible && prefetchUploads >= this.options.maxPrefetchUploadsPerFrame) continue;
+      if(overBudget) {if(!visible)break;pendingUploads++;oldestPendingMs=Math.max(oldestPendingMs,performance.now()-this.pendingUploadSince.get(key));continue;}
+      if (!visible && (prefetchUploads >= backgroundLimit || prefetchBytes >= backgroundBytes
+        || (backgroundStartedAt !== null && performance.now()-backgroundStartedAt >= backgroundCpuMs))) break;
       if (!visible && this.resourceLedger.bufferBytes + mesh.vertices.byteLength + mesh.indices.byteLength > this.options.maxPrefetchGpuBytes) continue;
       const region = this.options.useRegionBatching && regionBatchEligible(chunk) ? this.getRegionGroups([chunk],visual?'visualMesh':'mesh')[0] : null;
-      const remainingBytes=Math.max(1,this.options.maxUploadBytesPerFrame-bytes);
+      if (!visible && backgroundStartedAt === null) backgroundStartedAt=performance.now();
+      const remainingBytes=Math.max(1,Math.min(this.options.maxUploadBytesPerFrame-bytes, visible ? Infinity : backgroundBytes-prefetchBytes));
       const result=region?this.uploadRegion(region,undefined,{visual,maxBytes:remainingBytes}):this.uploadChannel(chunk,visual,null,remainingBytes);
       attempts++;bytes+=this.lastUploadAttemptBytes;
-      if (!visible) prefetchUploads++;
+      if (!visible) {prefetchUploads++;prefetchBytes+=this.lastUploadAttemptBytes;}
       if(result)uploaded++;else {if(visible)pendingUploads++;oldestPendingMs=Math.max(oldestPendingMs,performance.now()-(this.pendingUploadSince.get(key)??performance.now()));}
     }
     if (prefetchUploads) this.lastPrefetchAt=performance.now();
     this.uploadDiagnostics.oldestPendingMs=oldestPendingMs;
-    return {uploaded,pendingUploads,prefetchUploads,uploadedBytes:bytes,cpuMs:performance.now()-startedAt,oldestPendingMs};
+    return {uploaded,pendingUploads,prefetchUploads,prefetchBytes,uploadedBytes:bytes,cpuMs:performance.now()-startedAt,oldestPendingMs};
   }
 
   uploadRegion(region, signature = null, { visual = false, maxBytes=Infinity } = {}) {
@@ -1453,7 +1498,7 @@ export class WebGL2VoxelRenderer {
     if(this.disposed)return;
     this.disposed=true;
     this.releaseContextResources();
-    this.avatarMeshes.clear(); this.retryUploads.clear(); this.pendingUploadSince.clear();this.pendingMeshSources.clear();this.avatarFrameStates.clear();
+    this.avatarMeshes.clear(); this.retryUploads.clear(); this.pendingUploadSince.clear();this.pendingMeshSources.clear();this.prefetchQueueCache=null;this.avatarFrameStates.clear();
     this.avatarSnapshotCache = new WeakMap();
     this.detachContextListeners();
   }

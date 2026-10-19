@@ -85,6 +85,7 @@ export class ChunkManager {
     maxQueuedBuilds = DEFAULT_MAX_BUILD_QUEUE,
     visibilityLingerFrames = DEFAULT_VISIBILITY_LINGER_FRAMES,
     maxCachedMeshBytes = 32 * 1024 * 1024,
+    maxPredictivePreloadChunks = 0,
   } = {}) {
     this.config = createWorldGeneratorConfig({ worldSeed, chunkSize, height, minY, maxBuildY, seaLevel, maxTerrainHeight, generationVersion, resourceRuleVersion });
     managerWorldSeeds.set(this, this.config.worldSeed);
@@ -99,6 +100,9 @@ export class ChunkManager {
     this.viewDistance = boundedManagerInteger(viewDistance, 1, CHUNK_MANAGER_LIMITS.maxViewDistance, "view distance");
     this.preloadMargin = boundedManagerInteger(preloadMargin, 0, CHUNK_MANAGER_LIMITS.maxPreloadMargin, "preload margin");
     this.preloadDistance = this.viewDistance + this.preloadMargin;
+    this.maxPredictivePreloadChunks = boundedManagerInteger(maxPredictivePreloadChunks, 0, 4, "predictive preload distance");
+    this.prefetchChunkX = 0;
+    this.prefetchChunkZ = 0;
     this.seaLevel = this.config.seaLevel;
     this.maxTerrainHeight = this.config.maxTerrainHeight;
     this.generationVersion = this.config.generationVersion;
@@ -248,7 +252,15 @@ export class ChunkManager {
     const coord = worldToChunk(worldX, worldY, worldZ, this.chunkSize);
     if (Number.isFinite(options.directionX) || Number.isFinite(options.directionZ)) this.setLoadDirection(options.directionX, options.directionZ);
     if (coord.chunkX !== this.centerChunkX || coord.chunkZ !== this.centerChunkZ) this.buildQueueNeedsSort = true;
-    const nextRangeKey = `${coord.chunkX}:${coord.chunkZ}:${this.preloadDistance}`;
+    const maxAhead = this.maxPredictivePreloadChunks;
+    const forecast = (value, center) => Number.isFinite(value)
+      ? Math.max(center - maxAhead, Math.min(center + maxAhead, Math.floor(value / this.chunkSize))) : center;
+    const prefetchX = forecast(options.prefetchWorldX, coord.chunkX);
+    const prefetchZ = forecast(options.prefetchWorldZ, coord.chunkZ);
+    const nextRangeKey = `${coord.chunkX}:${coord.chunkZ}:${this.preloadDistance}:${prefetchX}:${prefetchZ}`;
+    if (prefetchX !== this.prefetchChunkX || prefetchZ !== this.prefetchChunkZ) this.buildQueueNeedsSort = true;
+    this.prefetchChunkX = prefetchX;
+    this.prefetchChunkZ = prefetchZ;
     this.centerChunkX = coord.chunkX;
     this.centerChunkZ = coord.chunkZ;
     if (nextRangeKey !== this.lastEnsuredRangeKey) {
@@ -259,17 +271,26 @@ export class ChunkManager {
   }
 
   ensureChunkRange(centerX = this.centerChunkX, centerZ = this.centerChunkZ, { force = false } = {}) {
-    const rangeKey = `${centerX}:${centerZ}:${this.preloadDistance}`;
+    // Keep the complete current ring. Prediction adds identities; it never
+    // replaces the current view or shifts the authoritative player center.
+    const forecastX = Math.max(centerX - this.maxPredictivePreloadChunks, Math.min(centerX + this.maxPredictivePreloadChunks, this.prefetchChunkX));
+    const forecastZ = Math.max(centerZ - this.maxPredictivePreloadChunks, Math.min(centerZ + this.maxPredictivePreloadChunks, this.prefetchChunkZ));
+    const rangeKey = `${centerX}:${centerZ}:${this.preloadDistance}:${forecastX}:${forecastZ}`;
     if (!force && rangeKey === this.lastEnsuredRangeKey) {
       this.dispatchBuilds();
       return;
     }
     this.lastEnsuredRangeKey = rangeKey;
-    for (const offset of buildLoadOffsets(this.preloadDistance, this.loadDirX, this.loadDirZ)) {
+    const offsets = buildLoadOffsets(this.preloadDistance, this.loadDirX, this.loadDirZ);
+    for (const offset of offsets) {
       // Reserve identities immediately, but do not reconstruct every new base
       // column in this call when Workers are unavailable. The normal dirty
       // scheduler generates near bases progressively under its task budget.
       this.ensureChunk(centerX + offset.dx, centerZ + offset.dz, { deferBase: true });
+    }
+    if (forecastX !== centerX || forecastZ !== centerZ) for (const offset of offsets) {
+      const x = forecastX + offset.dx, z = forecastZ + offset.dz;
+      if (Math.max(Math.abs(x - centerX), Math.abs(z - centerZ)) > this.preloadDistance) this.ensureChunk(x, z, { deferBase: true });
     }
     this.dispatchBuilds();
   }
@@ -383,7 +404,10 @@ export class ChunkManager {
   unloadFarChunks(centerX, centerZ) {
     const limit = this.preloadDistance + 2;
     for (const [id, chunk] of Array.from(this.chunks.entries())) {
-      if (Math.max(Math.abs(chunk.chunkX - centerX), Math.abs(chunk.chunkZ - centerZ)) > limit) {
+      const currentDistance = Math.max(Math.abs(chunk.chunkX - centerX), Math.abs(chunk.chunkZ - centerZ));
+      const predictedDistance = this.maxPredictivePreloadChunks > 0 && centerX === this.centerChunkX && centerZ === this.centerChunkZ
+        ? Math.max(Math.abs(chunk.chunkX - this.prefetchChunkX), Math.abs(chunk.chunkZ - this.prefetchChunkZ)) : currentDistance;
+      if (currentDistance > limit && predictedDistance > limit) {
         const edits=[...chunk.getFinalDeltaMap().values()];
         this.retainReusableMesh(chunk);
         this.chunks.delete(id);
@@ -1982,7 +2006,10 @@ function taskPriority(task, manager, now) {
     && Math.max(Math.abs(task.chunkX-center.chunkX),Math.abs(task.chunkZ-center.chunkZ))<=manager.viewDistance
     && (near || manager.chunkInBuildFrustum(chunk));
   const visiblePriority=manager.buildCamera && (near||inView) ? -20000 : 0;
-  return remeshPriority + visiblePriority + offsetPriority(task.chunkX - manager.centerChunkX, task.chunkZ - manager.centerChunkZ, manager.loadDirX, manager.loadDirZ) - Math.min(40000, age * 4);
+  const predictive = manager.maxPredictivePreloadChunks > 0
+    && (manager.prefetchChunkX !== manager.centerChunkX || manager.prefetchChunkZ !== manager.centerChunkZ)
+    && Math.max(Math.abs(task.chunkX-manager.prefetchChunkX),Math.abs(task.chunkZ-manager.prefetchChunkZ)) <= manager.viewDistance;
+  return remeshPriority + visiblePriority + (predictive ? -8000 : 0) + offsetPriority(task.chunkX - manager.centerChunkX, task.chunkZ - manager.centerChunkZ, manager.loadDirX, manager.loadDirZ) - Math.min(40000, age * 4);
 }
 
 function offsetPriority(dx, dz, dirX, dirZ) {
