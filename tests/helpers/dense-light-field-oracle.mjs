@@ -47,12 +47,15 @@ export function bakeDenseLightingOracle(chunk, section, access, meshes, options 
     if(!mesh)continue;
     const data=new DataView(mesh.vertices.buffer,mesh.vertices.byteOffset,mesh.vertices.byteLength);
     for(let v=0;v<mesh.vertexCount;v+=4) {
-      const n=[data.getInt8(v*20+8)/127,data.getInt8(v*20+9)/127,data.getInt8(v*20+10)/127],p=[0,0,0];
+      const n=[data.getInt8(v*20+8)/127,data.getInt8(v*20+9)/127,data.getInt8(v*20+10)/127];
       const corners=Math.min(4,mesh.vertexCount-v);
-      for(let j=0;j<corners;j++){const o=(v+j)*20,s=data.getInt16(o+6,true);for(let a=0;a<3;a++)p[a]+=(data.getInt16(o+a*2,true)/s+(a===1?(mesh.originY??0):0))/corners;}
-      p[0]+=chunk.chunkX*chunk.chunkSize+n[0]*.1;p[1]+=n[1]*.1;p[2]+=chunk.chunkZ*chunk.chunkSize+n[2]*.1;
-      const light=sample(p),encoded=128|((light.sun*16+light.sky)<<8)|(light.local<<3);
-      for(let j=0;j<corners;j++){const o=(v+j)*20+18;data.setUint16(o,(data.getUint16(o,true)&7)|encoded,true);}
+      for(let j=0;j<corners;j++) {
+        const offset=(v+j)*20,scale=data.getInt16(offset+6,true);
+        const origin=[chunk.chunkX*chunk.chunkSize,mesh.originY??0,chunk.chunkZ*chunk.chunkSize];
+        const point=origin.map((value,axis)=>value+data.getInt16(offset+axis*2,true)/scale+n[axis]*.1);
+        const light=sample(point),encoded=128|((light.sun*16+light.sky)<<8)|(light.local<<3);
+        data.setUint16(offset+18,(data.getUint16(offset+18,true)&7)|encoded,true);
+      }
     }
     mesh.lightEncoding="sun4-sky4-local4-v1";
   }

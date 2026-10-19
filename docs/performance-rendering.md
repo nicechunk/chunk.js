@@ -34,5 +34,12 @@ aspect ratio; screen-space raycasting continues using the CSS rectangle, so HUD
 layout and pointer coordinates do not scale with the GPU buffer. The default cap
 is unlimited for standalone engine users.
 
-The game uses this configuration by default. Selected view distance, loaded world
-geometry, mining and placement rules are independent of this configuration.
+This reduced-detail configuration remains an optional engine API. Gameplay uses
+the original detailed effects, balanced textures and default DPR limits, with no
+pixel-area cap. Selected view distance, loaded world geometry, mining and placement
+rules are independent of these rendering options.
+
+`gpuTiming: false` avoids continuous elapsed-query diagnostics in normal gameplay.
+The default engine value remains true for callers that request renderer timing;
+the gameplay client explicitly disables it. Transparent rendering reuses state
+and merges only adjacent compatible ranges after global sorting.

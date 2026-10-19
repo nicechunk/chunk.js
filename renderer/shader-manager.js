@@ -104,6 +104,9 @@ float waterSparkleCell(vec2 p, float cellSize, float density, float seed, int in
   ivec2 seedOffset = ivec2(int(seed), int(seed * 1.731));
   float pick = waterHash(cell + seedOffset);
   float cellActive = step(1.0 - density, pick);
+  // Most cells have no sparkle. Their exact contribution is zero; skip the
+  // remaining hashes, box filters and animated sine instead of multiplying by 0.
+  if (cellActive < 0.5) return 0.0;
   vec2 center = vec2(
     waterHash(cell + seedOffset + ivec2(11.13, 5.91)),
     waterHash(cell + seedOffset + ivec2(3.77, 17.41))
@@ -251,9 +254,12 @@ void main() {
       float viewSparkleFade = 1.0 - smoothstep(0.70, 1.0, distanceFactor);
       float smallSparkleDensity = clamp(0.003 + tailSparkleBand * 0.007 + edgeSparkleBand * 0.052, 0.0, 0.08);
       float wideSparkleDensity = clamp(0.002 + tailSparkleBand * 0.005 + edgeSparkleBand * 0.020, 0.0, 0.034);
-      float sparkleCells = waterSparkleCell(p, 0.52, smallSparkleDensity, 43.0, 3)
-        + waterSparkleCell(p + vec2(19.0, -11.0), 0.86, wideSparkleDensity, 87.0, 4) * 0.82
-        + waterSparkleCell(p + vec2(-7.0, 23.0), 1.42, 0.002 + tailSparkleBand * 0.003 + edgeSparkleBand * 0.009, 131.0, 5) * 0.42;
+      float sparkleCells = 0.0;
+      if (cleanWater > 0.0 && viewSparkleFade > 0.0) {
+        sparkleCells = waterSparkleCell(p, 0.52, smallSparkleDensity, 43.0, 3)
+          + waterSparkleCell(p + vec2(19.0, -11.0), 0.86, wideSparkleDensity, 87.0, 4) * 0.82
+          + waterSparkleCell(p + vec2(-7.0, 23.0), 1.42, 0.002 + tailSparkleBand * 0.003 + edgeSparkleBand * 0.009, 131.0, 5) * 0.42;
+      }
       float sparkleGlow = clamp(sparkleCells * cleanWater * viewSparkleFade * (0.82 + sunTrail * 0.72 + sharpSpecular * 0.18) * (0.76 + ripple * 0.14), 0.0, 0.72);
       float sparkleCore = pow(clamp(sparkleGlow, 0.0, 1.0), 1.28);
       float sparkleHalo = sparkleGlow * (0.22 + edgeSparkleBand * 0.38 + tailSparkleBand * 0.18);

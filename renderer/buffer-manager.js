@@ -11,7 +11,6 @@ export class BufferManager {
   }
   beginChunkBuffers(mesh) {
     const gl = this.gl;
-    assertGpuUpload(gl, 'before chunk upload');
     const prepared = prepareMeshDrawRanges(mesh);
     let vao=null,vbo=null,ibo=null;
     try {
@@ -27,7 +26,6 @@ export class BufferManager {
       gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3,2,gl.UNSIGNED_SHORT,false,CHUNK_VERTEX_STRIDE_BYTES,16);
       gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4,1,gl.UNSIGNED_BYTE,true,CHUNK_VERTEX_STRIDE_BYTES,11);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,prepared.indices.byteLength,gl.STATIC_DRAW);
-      assertGpuUpload(gl, 'chunk upload');
       const handle={vao,vbo,ibo,indexCount:prepared.indexCount,indexType:prepared.indices instanceof Uint32Array?gl.UNSIGNED_INT:gl.UNSIGNED_SHORT,indexBytes:prepared.indices.BYTES_PER_ELEMENT,byteLength:prepared.vertices.byteLength+prepared.indices.byteLength,triangleCount:prepared.triangleCount,drawRanges:prepared.drawRanges,blendUnits:prepared.blendUnits,bounds:prepared.bounds,originY:mesh.originY??0};
       return {handle,vertices:prepared.vertices,indices:new Uint8Array(prepared.indices.buffer,prepared.indices.byteOffset,prepared.indices.byteLength),vertexOffset:0,indexOffset:0,done:false,uploadedBytes:0};
     } catch(error) {this.disposeChunkBuffers({vao,vbo,ibo});throw error;}
@@ -35,7 +33,6 @@ export class BufferManager {
   }
   advanceChunkBuffers(transaction,maxBytes=Infinity){
     const gl=this.gl,t=transaction;let remaining=Math.max(0,maxBytes),uploaded=0;
-    assertGpuUpload(gl,"before staged upload");
     for(const channel of ['vertex','index']){
       const source=channel==='vertex'?t.vertices:t.indices;
       const offsetKey=channel==='vertex'?'vertexOffset':'indexOffset';
@@ -44,6 +41,8 @@ export class BufferManager {
       const count=Math.min(source.byteLength-t[offsetKey],remaining);
       if(count>0){gl.bindVertexArray(t.handle.vao);gl.bindBuffer(target,buffer);gl.bufferSubData(target,t[offsetKey],source.subarray(t[offsetKey],t[offsetKey]+count));t[offsetKey]+=count;remaining-=count;uploaded+=count;}
     }
+    // Validate allocations and this stage's transfers together before the caller
+    // can publish a handle. A single check also catches earlier queued GL errors.
     gl.bindVertexArray(null);assertGpuUpload(gl,"staged chunk upload");
     t.done=t.vertexOffset===t.vertices.byteLength&&t.indexOffset===t.indices.byteLength;t.uploadedBytes+=uploaded;
     return {done:t.done,uploadedBytes:uploaded};

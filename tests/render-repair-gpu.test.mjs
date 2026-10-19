@@ -27,6 +27,16 @@ function mesh(x=0, layer=3) {const vertices=new Uint8Array(4*20);const v=new Dat
 function chunk(id='0,0', x=0) {return {id,chunkX:x,chunkZ:0,chunkSize:16,version:1,meshVersion:1,mesh:mesh(),gpuUploaded:false};}
 function renderer() {const r=new WebGL2VoxelRenderer(canvas(),{useRegionBatching:false});const {gl,control}=mockGl();r.gl=gl;r.initialized=true;r.bufferManager=new BufferManager(gl);return {r,gl,control};}
 
+test('completed and staged chunk uploads validate once per stage and still reject GL allocation errors',()=>{
+ const {gl,control}=mockGl(),manager=new BufferManager(gl);let polls=0;const getError=gl.getError;
+ gl.getError=()=>{polls++;return getError();};
+ const handle=manager.createChunkBuffers(mesh());assert.equal(polls,1);manager.disposeChunkBuffers(handle);
+ const transaction=manager.beginChunkBuffers(mesh());assert.equal(polls,1);
+ assert.equal(manager.advanceChunkBuffers(transaction,32).done,false);assert.equal(polls,2);
+ assert.equal(manager.advanceChunkBuffers(transaction,1000).done,true);assert.equal(polls,3);manager.disposeChunkBuffers(transaction.handle);
+ control.fail='data';assert.throws(()=>manager.createChunkBuffers(mesh()),/WebGL error/);assert.equal(polls,4);
+});
+
 test('R03: same coordinate/count/revision replacement never reuses stale source',()=>{const {r}=renderer();const a=chunk(),b={...a,mesh:mesh(2)};const first=r.getRegionGroups([a]);const second=r.getRegionGroups([b]);assert.notEqual(second,first);assert.equal(second[0].chunks[0],b);r.uploadChunk(a);const next=r.updateChunk(b);assert.equal(next.source,b);assert.equal(next.mesh,b.mesh);r.dispose();});
 test('R07: render and completed uploads during loss do not initialize or detach recovery',()=>{const {r}=renderer();let inits=0;r.init=()=>{inits++;throw Error('must not initialize');};r.contextLost=true;r.initialized=false;assert.doesNotThrow(()=>r.render({},[]));assert.doesNotThrow(()=>r.uploadChunk(chunk()));assert.equal(inits,0);assert.equal(r.canvas.listeners.size,2);r.dispose();});
 test('R09: null and GL allocation errors retain old handle, do not commit flags, and retry',()=>{for(const fail of ['vao','buffer','data']) {const {r,control}=renderer();const c=chunk();const first=r.uploadChunk(c);c.mesh=mesh(2);c.meshVersion++;c.gpuUploaded=false;control.fail=fail;assert.doesNotThrow(()=>r.uploadChunk(c));assert.equal(r.chunkBuffers.get(c.id),first);assert.equal(c.gpuUploaded,false);assert.equal(control.deleted.includes(first.handle.vbo),false);control.fail='';r.retryUploads?.clear();r.uploadChunk(c);assert.equal(c.gpuUploaded,true);assert.notEqual(r.chunkBuffers.get(c.id),first);r.dispose();}});

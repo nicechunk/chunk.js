@@ -116,6 +116,7 @@ export class WebGL2VoxelRenderer {
       maxRenderPixels: options.maxRenderPixels ?? Infinity,
       environmentEffects: options.environmentEffects ?? true,
       waterEffects: options.waterEffects ?? true,
+      gpuTiming: options.gpuTiming ?? true,
       textureTileSize: options.textureTileSize ?? 32,
       textureSeed: options.textureSeed ?? "nicechunk-materials-v1",
       viewDistance: options.viewDistance ?? DEFAULT_VIEW_DISTANCE,
@@ -246,7 +247,7 @@ export class WebGL2VoxelRenderer {
       if (rawGl.isContextLost?.()) { this.pauseContext(); return this; }
       const gl = instrumentGl(rawGl, this.resourceLedger);
       this.gl = gl;
-      this.gpuTimer = new AsyncGpuTimer(gl, { generation: this.contextGeneration });
+      this.gpuTimer = this.options.gpuTiming ? new AsyncGpuTimer(gl, { generation: this.contextGeneration }) : null;
       runStage("shader programs", () => {
         this.program = createProgram(gl, OPAQUE_VERTEX_SHADER,
           this.options.waterEffects ? OPAQUE_FRAGMENT_SHADER : FAST_FLUID_FRAGMENT_SHADER);
@@ -710,7 +711,7 @@ export class WebGL2VoxelRenderer {
       // Count all resident resources, including screen-excluded buffers and shared avatars once.
       bufferMemory: this.resourceLedger.snapshot().bufferBytes,
       ...this.resourceLedger.snapshot(),
-      ...this.gpuTimer?.snapshot(),
+      ...(this.gpuTimer?.snapshot() ?? { gpuTimeMs: null, gpuTimerStatus: "disabled", gpuQueriesPending: 0 }),
       cpuDrawSubmitMs: performance.now()-drawSubmitStartedAt,
       uploadDiagnostics: {...this.uploadDiagnostics},
       cpuMeshBytes:this.residentCpuMeshBytes(),
@@ -825,11 +826,44 @@ export class WebGL2VoxelRenderer {
     queue.sort((a,b)=>b.depth-a.depth||a.key.localeCompare(b.key)||a.order-b.order);
     gl.enable(gl.DEPTH_TEST);gl.depthMask(false);gl.enable(gl.CULL_FACE);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
     let drawCalls=0,triangles=0;
-    for(const item of queue){if(item.kind==='terrain'){const {entry,unit,offset}=item;gl.useProgram(this.program);gl.uniformMatrix4fv(this.uniforms.uViewProjection,false,vp);applyLightingUniforms(gl,this.uniforms,lighting);gl.uniform1f(this.uniforms.uOpacity,item.opacity);gl.uniform1f(this.uniforms.uSurfacePass,0);this.textureArray?.bind(0);gl.uniform3f(this.uniforms.uChunkOrigin,...offset);gl.bindVertexArray(entry.handle.vao);gl.drawElements(gl.TRIANGLES,unit.count,entry.handle.indexType,unit.offset*(entry.handle.indexBytes??2));drawCalls++;triangles+=unit.count/3;}
-      else if(item.kind==='avatar'){const stats=this.renderAvatars(camera,[item.avatar],vp,origin,lighting,{transparentOnly:true,drawRange:item.range,vertexSnapshot:item.snapshot});drawCalls+=stats.drawCalls;triangles+=stats.triangles;}
-      else {const stats=this.voxelParticles.render({viewProjection:vp,origin,lighting,textureArray:this.textureArray,particles:[item.particle]});drawCalls+=stats.drawCalls;triangles+=stats.triangles;}
-      // Helpers restore their own state; the queue owns its blend/depth policy.
-      gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);gl.depthMask(false);
+    let terrainActive = false, boundHandle = null, boundOffset = null, boundOpacity = null;
+    const sameOffset = (a, b) => a && b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+    for (let index = 0; index < queue.length; index++) {
+      const item = queue[index];
+      if (item.kind === 'terrain') {
+        const { entry, unit, offset, opacity } = item;
+        // Only merge adjacent ranges in the already sorted queue. Never reorder
+        // triangles or cross an intervening avatar, particle, preview or origin.
+        let count = unit.count;
+        while (index + 1 < queue.length) {
+          const next = queue[index + 1];
+          if (next.kind !== 'terrain' || next.entry.handle !== entry.handle || next.opacity !== opacity
+            || !sameOffset(next.offset, offset) || next.unit.offset !== unit.offset + count) break;
+          count += next.unit.count;
+          index++;
+        }
+        if (!terrainActive) {
+          gl.useProgram(this.program);
+          gl.uniformMatrix4fv(this.uniforms.uViewProjection, false, vp);
+          applyLightingUniforms(gl, this.uniforms, lighting);
+          gl.uniform1f(this.uniforms.uSurfacePass, 0);
+          this.textureArray?.bind(0);
+          terrainActive = true; boundHandle = null; boundOffset = null; boundOpacity = null;
+        }
+        if (boundOpacity !== opacity) { gl.uniform1f(this.uniforms.uOpacity, opacity); boundOpacity = opacity; }
+        if (!sameOffset(boundOffset, offset)) { gl.uniform3f(this.uniforms.uChunkOrigin, ...offset); boundOffset = offset; }
+        if (boundHandle !== entry.handle) { gl.bindVertexArray(entry.handle.vao); boundHandle = entry.handle; }
+        gl.drawElements(gl.TRIANGLES, count, entry.handle.indexType, unit.offset * (entry.handle.indexBytes ?? 2));
+        drawCalls++; triangles += count / 3;
+      } else {
+        const stats = item.kind === 'avatar'
+          ? this.renderAvatars(camera, [item.avatar], vp, origin, lighting, { transparentOnly: true, drawRange: item.range, vertexSnapshot: item.snapshot })
+          : this.voxelParticles.render({ viewProjection: vp, origin, lighting, textureArray: this.textureArray, particles: [item.particle] });
+        drawCalls += stats.drawCalls; triangles += stats.triangles;
+        terrainActive = false;
+        // Auxiliary helpers restore their own state; the queue owns blending.
+        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+      }
     }
     gl.bindVertexArray(null);gl.depthMask(true);gl.disable(gl.BLEND);gl.enable(gl.CULL_FACE);return {drawCalls,triangles,bufferMemory:0};
   }

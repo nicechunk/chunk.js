@@ -19,9 +19,9 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
   const ox=chunk.chunkX*chunk.chunkSize+Math.floor(minX)-radius,oy=Math.floor(minY)-radius,oz=chunk.chunkZ*chunk.chunkSize+Math.floor(minZ)-radius;
   const count=width*width*height;
   const solid=new Uint8Array(count);solid.fill(255);
-  const emissive=new Uint8Array(count),seen=new Uint32Array(count),distance=new Uint8Array(count),queue=new Uint32Array(count);
+  const emissive=new Uint8Array(count);
   const tops=new Map(),samples=new Map();
-  let sampledCells=0,skySeeds=0,localSeeds=0,walkId=0;
+  let sampledCells=0,skySeeds=0,localSeeds=0;
   const index=(x,y,z)=>x+z*width+y*width*width;
   const columnTop=(x,z)=>{
     const key=x+z*width;
@@ -38,6 +38,25 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     if(emissive[i])localSeeds++;
   };
   const maxDistance=Math.floor(14/attenuation);
+  // Cache finite-radius transport by cell and remaining distance. Adjacent wall
+  // corners reuse the same subproblems instead of each walking the air volume.
+  const transportCache=Array.from({length:maxDistance+1},()=>new Uint16Array(count));
+  const transport=(i,x,y,z,remaining)=>{
+    const cached=transportCache[remaining][i];
+    if(cached)return cached-1;
+    readCell(i,x,y,z);
+    let sky=!solid[i]&&oy+y>columnTop(x,z)?15:0,local=emissive[i]?15:0;
+    if(remaining>0&&!solid[i])for(const [dx,dy,dz]of STEPS){
+      const nx=x+dx,ny=y+dy,nz=z+dz;
+      if(nx<0||ny<0||nz<0||nx>=width||nz>=width||ny>=height)continue;
+      const value=transport(index(nx,ny,nz),nx,ny,nz,remaining-1);
+      sky=Math.max(sky,(value>>>4)-attenuation);local=Math.max(local,(value&15)-attenuation);
+      if(sky===15&&local===15)break;
+    }
+    const encoded=(sky<<4)|local;
+    transportCache[remaining][i]=encoded+1;
+    return encoded;
+  };
   const sample=(p)=>{
     const x=Math.floor(p[0])-ox,y=Math.floor(p[1])-oy,z=Math.floor(p[2])-oz;
     if(x<0||y<0||z<0||x>=width||z>=width||y>=height)return {sun:0,sky:0,local:0};
@@ -45,33 +64,28 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     if(cached)return cached;
     readCell(first,x,y,z);
     const light={sun:!solid[first]&&oy+y>columnTop(x,z)?15:0,sky:0,local:0};
-    walkId++;seen[first]=walkId;distance[first]=0;queue[0]=first;
-    for(let q=0,end=1;q<end;q++){
-      const i=queue[q],cy=Math.floor(i/(width*width)),rem=i-cy*width*width,cz=Math.floor(rem/width),cx=rem-cz*width;
-      readCell(i,cx,cy,cz);
-      const depth=distance[i],value=15-depth*attenuation;
-      if(!solid[i]&&oy+cy>columnTop(cx,cz))light.sky=Math.max(light.sky,value);
-      if(emissive[i])light.local=Math.max(light.local,value);
-      if(depth>=maxDistance||solid[i]||(light.sky===15&&light.local===15))continue;
-      for(const [dx,dy,dz]of STEPS){
-        const nx=cx+dx,ny=cy+dy,nz=cz+dz;
-        if(nx<0||ny<0||nz<0||nx>=width||nz>=width||ny>=height)continue;
-        const n=index(nx,ny,nz);if(seen[n]===walkId)continue;
-        seen[n]=walkId;distance[n]=depth+1;queue[end++]=n;
-      }
-    }
+    const value=transport(first,x,y,z,maxDistance);
+    light.sky=value>>>4;light.local=value&15;
     samples.set(first,light);return light;
   };
   for(const mesh of meshes) {
     if(!mesh)continue;
     const data=new DataView(mesh.vertices.buffer,mesh.vertices.byteOffset,mesh.vertices.byteLength);
     for(let v=0;v<mesh.vertexCount;v+=4) {
-      const n=[data.getInt8(v*20+8)/127,data.getInt8(v*20+9)/127,data.getInt8(v*20+10)/127],p=[0,0,0];
+      const n=[data.getInt8(v*20+8)/127,data.getInt8(v*20+9)/127,data.getInt8(v*20+10)/127];
       const corners=Math.min(4,mesh.vertexCount-v);
-      for(let j=0;j<corners;j++){const o=(v+j)*20,s=data.getInt16(o+6,true);for(let a=0;a<3;a++)p[a]+=(data.getInt16(o+a*2,true)/s+(a===1?(mesh.originY??0):0))/corners;}
-      p[0]+=chunk.chunkX*chunk.chunkSize+n[0]*.1;p[1]+=n[1]*.1;p[2]+=chunk.chunkZ*chunk.chunkSize+n[2]*.1;
-      const light=sample(p),encoded=128|((light.sun*16+light.sky)<<8)|(light.local<<3);
-      for(let j=0;j<corners;j++){const o=(v+j)*20+18;data.setUint16(o,(data.getUint16(o,true)&7)|encoded,true);}
+      // A greedy wall may cross a roof/window lighting boundary. Sampling only
+      // its center incorrectly made the whole wall equally dark or bright.
+      // Shared world-space corners sample the same air cell across section seams;
+      // the existing vertex interpolants provide the gradient without more faces.
+      for(let j=0;j<corners;j++) {
+        const o=(v+j)*20,s=data.getInt16(o+6,true);
+        const p=[chunk.chunkX*chunk.chunkSize+data.getInt16(o,true)/s+n[0]*.1,
+          (mesh.originY??0)+data.getInt16(o+2,true)/s+n[1]*.1,
+          chunk.chunkZ*chunk.chunkSize+data.getInt16(o+4,true)/s+n[2]*.1];
+        const light=sample(p),encoded=128|((light.sun*16+light.sky)<<8)|(light.local<<3);
+        data.setUint16(o+18,(data.getUint16(o+18,true)&7)|encoded,true);
+      }
     }
     mesh.lightEncoding="sun4-sky4-local4-v1";
   }
