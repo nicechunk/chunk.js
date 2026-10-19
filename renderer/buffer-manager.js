@@ -31,7 +31,7 @@ export class BufferManager {
     } catch(error) {this.disposeChunkBuffers({vao,vbo,ibo});throw error;}
     finally {gl.bindVertexArray(null);}
   }
-  advanceChunkBuffers(transaction,maxBytes=Infinity){
+  advanceChunkBuffers(transaction,maxBytes=Infinity,{validate=true}={}){
     const gl=this.gl,t=transaction;let remaining=Math.max(0,maxBytes),uploaded=0;
     for(const channel of ['vertex','index']){
       const source=channel==='vertex'?t.vertices:t.indices;
@@ -43,7 +43,9 @@ export class BufferManager {
     }
     // Validate allocations and this stage's transfers together before the caller
     // can publish a handle. A single check also catches earlier queued GL errors.
-    gl.bindVertexArray(null);assertGpuUpload(gl,"staged chunk upload");
+    gl.bindVertexArray(null);
+    if(validate)assertGpuUpload(gl,"staged chunk upload");
+    else if(gl.isContextLost?.())throw new Error("staged chunk upload: WebGL context lost");
     t.done=t.vertexOffset===t.vertices.byteLength&&t.indexOffset===t.indices.byteLength;t.uploadedBytes+=uploaded;
     return {done:t.done,uploadedBytes:uploaded};
   }

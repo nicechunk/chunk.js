@@ -28,8 +28,8 @@ import {
   normalizeDelta,
 } from "./chunk-delta.js";
 import { meshChunkOpaqueFast, meshChunkVisual } from "./chunk-mesher.js";
-import { ensureRenderSections, buildRenderSection, commitRenderSection, sectionRevision, sectionDeltaValues, invalidateRenderSections, prepareRenderSnapshotInvalidation } from "./render-sections.js";
-import { chunkIntersectsCameraFrustum } from "../renderer/frustum.js";
+import { ensureRenderSections, buildRenderSection, commitRenderSection, updateChunkSectionSummary, sectionRevision, sectionDeltaValues, invalidateRenderSections, prepareRenderSnapshotInvalidation } from "./render-sections.js";
+import { chunkIntersectsCameraFrustum, prepareCameraFrustum } from "../renderer/frustum.js";
 import { RenderStageStats } from "../debug/stats.js";
 
 const DEFAULT_MAX_BUILD_QUEUE = 768;
@@ -344,6 +344,7 @@ export class ChunkManager {
     const chunks = [];
     const frame = ++this.visibilityFrame;
     const cameraChunk = visibilityCenterChunk(cameraState, this.chunkSize);
+    const frustum = cameraState ? prepareCameraFrustum(cameraState) : null;
     for (const chunk of this.chunks.values()) {
       const distance = Math.max(Math.abs(chunk.chunkX - cameraChunk.chunkX), Math.abs(chunk.chunkZ - cameraChunk.chunkZ));
       if (!chunk.mesh) continue;
@@ -351,7 +352,7 @@ export class ChunkManager {
         this.visibleChunkMemory.delete(chunk.id);
         continue;
       }
-      if (chunkIntersectsCameraFrustum(chunk, cameraState)) {
+      if (chunkIntersectsCameraFrustum(chunk, cameraState, frustum)) {
         this.visibleChunkMemory.set(chunk.id, frame);
         chunks.push(chunk);
         continue;
@@ -527,7 +528,7 @@ export class ChunkManager {
     } else chunk.visualBuildError=null;
   }
 
-  rebuildDirtyChunks(budgetMs = DEFAULT_MESH_BUDGET_MS) {
+  rebuildDirtyChunks(budgetMs = DEFAULT_MESH_BUDGET_MS, { synchronousNearField = false } = {}) {
     const start = performance.now();
     const rebuilt = this.drainCompletedBuilds();
     const dirty = Array.from(this.chunks.values())
@@ -538,7 +539,11 @@ export class ChunkManager {
         if (chunk.buildState === "error" && !this.prepareWorkerBuildRetry(chunk, start)) continue;
         if (chunk.baseBlocksReady && chunk.renderSections) {
           const near=Math.max(Math.abs(chunk.chunkX-this.centerChunkX),Math.abs(chunk.chunkZ-this.centerChunkZ))<=1;
-          if(near) {
+          // A section build is indivisible and can exceed the entire frame
+          // budget. Interactive Worker clients keep the committed mesh visible
+          // until a revision-checked replacement arrives. Explicit offline
+          // callers may still request immediate synchronous compensation.
+          if(near && synchronousNearField) {
             const sections=[...chunk.renderSections.values()].filter(section=>section.dirty&&section.mesh).sort((a,b)=>(a.oldestDirtyAt??Infinity)-(b.oldestDirtyAt??Infinity));
             for(const section of sections) {
               const revision=sectionRevision(section,this.materialVersion);
@@ -1236,7 +1241,9 @@ export class ChunkManager {
     const activeLimit = Math.max(0, Math.min(this.workerCount, Math.trunc(this.activeBuildLimit || 0)));
     if (this.inFlightBuilds.size >= activeLimit) return;
     if (this.buildQueueNeedsSort || this.buildQueue.length) {
-      this.buildQueue.sort((a, b) => taskPriority(a, this) - taskPriority(b, this));
+      const now = performance.now();
+      for(const task of this.buildQueue)task.dispatchPriority=taskPriority(task,this,now);
+      this.buildQueue.sort((a, b) => a.dispatchPriority - b.dispatchPriority);
       this.buildQueueNeedsSort = false;
     }
     while (this.idleWorkers.length && this.buildQueue.length && this.inFlightBuilds.size < activeLimit) {
@@ -1455,7 +1462,8 @@ export class ChunkManager {
       if(message.baseProfile)chunk.setBaseProfile(message.baseProfile,message.treeInstances,this.baseBlockResolverForChunk(message.chunkX,message.chunkZ,message.baseProfile));
       const sections=ensureRenderSections(chunk);
       if(!timingTask || (chunk===timingTask.chunk&&chunk.version===timingTask.version&&message.materialVersion===this.materialVersion)) {
-        for(const result of message.sectionResults){const section=sections.get(result.sectionIndex);if(section)commitRenderSection(chunk,section,result,sectionRevision(section,this.materialVersion));}
+        for(const result of message.sectionResults){const section=sections.get(result.sectionIndex);if(section)commitRenderSection(chunk,section,result,sectionRevision(section,this.materialVersion),{updateSummary:false});}
+        updateChunkSectionSummary(chunk);
         this.completedBuilds.push(chunk);
       } else {chunk.markBuildStale();this.staleBuildResults++;}
       return;
@@ -1729,10 +1737,12 @@ function buildLoadOffsets(viewDistance, dirX, dirZ) {
   return offsets;
 }
 
-function taskPriority(task, manager) {
-  const age = Math.max(0, performance.now() - (task.queuedAt ?? performance.now()));
+function taskPriority(task, manager, now) {
+  const age = Math.max(0, now - (task.queuedAt ?? now));
   const near = Math.max(Math.abs(task.chunkX-manager.centerChunkX),Math.abs(task.chunkZ-manager.centerChunkZ)) <= 1;
-  const remeshPriority = near && (task.mode === "remesh" || task.mode === "section") ? -2000 : 0;
+  // Nearby edits must reach a Worker before an old background streaming ring;
+  // they no longer receive an unbudgeted main-thread compensation build.
+  const remeshPriority = near && (task.mode === "remesh" || task.mode === "section") ? -50000 : 0;
   return remeshPriority + offsetPriority(task.chunkX - manager.centerChunkX, task.chunkZ - manager.centerChunkZ, manager.loadDirX, manager.loadDirZ) - Math.min(40000, age * 4);
 }
 

@@ -202,7 +202,14 @@ export class ChunkState {
     return { applied: true, changed: true, boundaryMask };
   }
 
-  expireRemoteDeltas(now = this.authorityNow()) {
+  expireRemoteDeltas(now) {
+    // Most voxel reads have no temporary remote hints. Do not read the clock
+    // for every meshing/light/collision sample when there is nothing to expire.
+    if (!this.remoteDeltas.size) {
+      this.remoteDeltaExpiryAt = Infinity;
+      return { changed: false, boundaryMask: 0 };
+    }
+    now ??= this.authorityNow();
     if (now < this.remoteDeltaExpiryAt) return { changed: false, boundaryMask: 0 };
     const expired = [];
     let nextExpiry = Infinity;

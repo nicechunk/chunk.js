@@ -117,6 +117,7 @@ export class WebGL2VoxelRenderer {
       environmentEffects: options.environmentEffects ?? true,
       waterEffects: options.waterEffects ?? true,
       gpuTiming: options.gpuTiming ?? true,
+      deferredChunkUploads: options.deferredChunkUploads ?? false,
       textureTileSize: options.textureTileSize ?? 32,
       textureSeed: options.textureSeed ?? "nicechunk-materials-v1",
       viewDistance: options.viewDistance ?? DEFAULT_VIEW_DISTANCE,
@@ -157,6 +158,8 @@ export class WebGL2VoxelRenderer {
     this.disposed = false;
     this.retryUploads = new Map();
     this.uploadStaging = new Map();
+    this.uploadValidationFence = null;
+    this.frameCompletionFences = [];
     this.lastUploadAttemptBytes=0;
     this.resourceLedger = new GpuResourceLedger();
     this.gpuTimer = null;
@@ -217,6 +220,8 @@ export class WebGL2VoxelRenderer {
     this.regionGroupCache.clear(); this.frustumFilterCache = null;
     this.avatarResourceCache = new WeakMap();
     this.retryUploads.clear(); this.uploadStaging.clear();
+    this.uploadValidationFence = null;
+    this.frameCompletionFences.length = 0;
   }
 
   init() {
@@ -398,15 +403,131 @@ export class WebGL2VoxelRenderer {
     return this.initialized && Boolean(this.gl) && !this.contextLost;
   }
 
-  uploadChannel(chunk, visual = false, target = null, maxBytes = Infinity) {
+  deferredUploadsSupported() {
+    return this.options.deferredChunkUploads && typeof this.gl?.fenceSync === "function"
+      && typeof this.gl?.clientWaitSync === "function" && typeof this.gl?.deleteSync === "function";
+  }
+
+  hasUnvalidatedUploads() {
+    for(const stage of this.uploadStaging.values())if(stage.awaitingValidation)return true;
+    return false;
+  }
+
+  pollFrameCompletion() {
+    const gl=this.gl;
+    while(this.frameCompletionFences.length) {
+      const fence=this.frameCompletionFences[0];
+      const status=gl.clientWaitSync(fence,0,0);
+      if(status===gl.TIMEOUT_EXPIRED)break;
+      gl.deleteSync(fence);this.frameCompletionFences.shift();
+    }
+  }
+
+  fenceSubmittedFrame() {
+    if(!this.deferredUploadsSupported())return;
+    const fence=this.gl.fenceSync(this.gl.SYNC_GPU_COMMANDS_COMPLETE,0);
+    if(fence){this.frameCompletionFences.push(fence);if(!this.hasUnvalidatedUploads())this.gl.flush();}
+  }
+
+  // Wait only by polling with timeout zero. No later draw/upload is submitted
+  // behind this fence, so the eventual error check cannot wait on a newer frame.
+  // Old committed handles stay visible until the entire upload batch validates.
+  settleDeferredUploads() {
+    const fence = this.uploadValidationFence;
+    if (!fence) return { waiting: false, validated: false, uploaded: 0 };
+    const gl = this.gl;
+    const status = gl.clientWaitSync(fence, 0, 0);
+    if (status === gl.TIMEOUT_EXPIRED) return { waiting: true, validated: false, uploaded: 0 };
+    gl.deleteSync(fence);
+    this.uploadValidationFence = null;
+    let error = null, uploaded = 0;
+    try {
+      if (status === gl.WAIT_FAILED) throw new Error("GPU upload fence failed");
+      assertGpuUpload(gl, "completed asynchronous chunk uploads");
+    } catch (failure) { error = failure; }
+    for (const [key, stage] of this.uploadStaging) {
+      if (!stage.awaitingValidation) continue;
+      stage.awaitingValidation = false;
+      const current = stage.generation === this.contextGeneration
+        && stage.token === meshIdentity(stage.source, stage.visual);
+      if (error || !current) {
+        this.bufferManager.disposeChunkBuffers(stage.transaction.handle);
+        this.uploadStaging.delete(key);
+        if (error) this.noteUploadFailure(stage.source, stage.visual, error);
+        continue;
+      }
+      if (stage.transaction.done) {
+        this.commitChannelUpload(stage.source, stage.visual, stage.mesh, stage.transaction.handle,
+          stage.generation, null, stage.region);
+        this.uploadStaging.delete(key);
+        uploaded++;
+      }
+    }
+    return { waiting: false, validated: true, uploaded };
+  }
+
+  sealDeferredUploads() {
+    if (this.uploadValidationFence || ![...this.uploadStaging.values()].some(stage => stage.awaitingValidation)) return;
+    const gl = this.gl;
+    try {
+      const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      if (!fence) throw new Error("GPU upload fence allocation returned null");
+      this.uploadValidationFence = fence;
+      gl.flush();
+    } catch (error) {
+      for (const [key, stage] of this.uploadStaging) if (stage.awaitingValidation) {
+        this.bufferManager.disposeChunkBuffers(stage.transaction.handle);
+        this.uploadStaging.delete(key);
+        this.noteUploadFailure(stage.source, stage.visual, error);
+      }
+      if(this.uploadValidationFence)gl.deleteSync(this.uploadValidationFence);
+      this.uploadValidationFence = null;
+    }
+  }
+
+  noteUploadFailure(chunk, visual, error) {
+    chunk[visual ? "visualGpuUploaded" : "gpuUploaded"] = false;
+    this.retryUploads.set(`${visual ? "visual" : "opaque"}:${chunk.id}`, performance.now() + this.options.uploadRetryMs);
+    this.uploadDiagnostics.failed++;
+    this.lastUploadError = error;
+    this.logRenderEvent("upload-error", { chunkId: chunk.id, message: String(error?.message ?? error) });
+  }
+
+  commitChannelUpload(chunk, visual, mesh, handle, generation, target = null, region = null) {
+    const regions = visual ? this.visualRegionBuffers : this.regionBuffers;
+    const previousRegion = region ? regions.get(region.id) : null;
+    const buffers = region ? new Map(previousRegion?.members ?? [])
+      : target ?? (visual ? this.visualChunkBuffers : this.chunkBuffers);
+    const existing = buffers.get(chunk.id);
+    const key = `${visual ? "visual" : "opaque"}:${chunk.id}`;
+    const entry = { id: chunk.id, source: chunk, mesh, token: meshIdentity(chunk, visual),
+      version: committedMeshVersion(chunk, visual), instanceGeneration: chunk.generation ?? 0, generation,
+      chunkX: chunk.chunkX, chunkZ: chunk.chunkZ, originY: mesh.originY ?? chunk.originY ?? 0,
+      parentId: chunk.parentId ?? chunk.parentChunkId ?? chunk.id, handle };
+    buffers.set(chunk.id, entry);
+    if (region) regions.set(region.id, { ...region, members: buffers,
+      chunkIds: new Set(buffers.keys()), chunkVersions: new Map([...buffers].map(([id, member]) => [id, member.version])),
+      signature: [...buffers.values()].map(member => member.token).join('|'), handle: buffers.values().next().value?.handle });
+    this.cpuMeshBytesDirty = true;
+    this.lastUploadError = null;
+    if (existing) this.bufferManager.disposeChunkBuffers(existing.handle);
+    chunk[visual ? "visualGpuUploaded" : "gpuUploaded"] = true;
+    this.retryUploads.delete(key);
+    this.pendingUploadSince.delete(key);
+    this.pendingMeshSources.delete(key);
+    this.uploadDiagnostics.bytes += handle.byteLength;
+    return entry;
+  }
+
+  uploadChannel(chunk, visual = false, target = null, maxBytes = Infinity, region = null) {
     this.lastUploadAttemptBytes=0;
+    if(this.uploadValidationFence)return null;
     const mesh = chunk?.[visual ? "visualMesh" : "mesh"];
     if (!mesh?.indexCount || !this.gpuReady()) return null;
     const key = `${visual ? "visual" : "opaque"}:${chunk.id}`;
     if ((this.retryUploads.get(key) ?? 0) > performance.now()) return null;
     const startedAt = performance.now();
     const buffers = target ?? (visual ? this.visualChunkBuffers : this.chunkBuffers);
-    const existing = buffers.get(chunk.id);
     let handle = null;
     try {
       const generation = this.contextGeneration;
@@ -417,9 +538,11 @@ export class WebGL2VoxelRenderer {
         if(staging && (staging.token!==token || staging.generation!==generation)){
           this.bufferManager.disposeChunkBuffers(staging.transaction.handle);this.uploadStaging.delete(key);staging=null;
         }
-        if(!staging){staging={token,generation,transaction:this.bufferManager.beginChunkBuffers(mesh),source:chunk};this.uploadStaging.set(key,staging);}
-        const progress=this.bufferManager.advanceChunkBuffers(staging.transaction,Math.max(1,maxBytes));
+        if(!staging){staging={token,generation,transaction:this.bufferManager.beginChunkBuffers(mesh),source:chunk,mesh,visual,region};this.uploadStaging.set(key,staging);}
+        const deferred = this.deferredUploadsSupported();
+        const progress=this.bufferManager.advanceChunkBuffers(staging.transaction,Math.max(1,maxBytes),{validate:!deferred});
         this.lastUploadAttemptBytes=progress.uploadedBytes;
+        if(deferred){staging.awaitingValidation=true;return null;}
         if(!progress.done)return null;
         handle=staging.transaction.handle;this.uploadStaging.delete(key);
       }else{handle = this.bufferManager.createChunkBuffers(mesh);this.lastUploadAttemptBytes=handle.byteLength;}
@@ -427,17 +550,7 @@ export class WebGL2VoxelRenderer {
       if (this.contextLost || this.disposed || generation !== this.contextGeneration || this.gl.isContextLost?.()) {
         throw new Error("GPU context changed during upload");
       }
-      const entry = { id: chunk.id, source: chunk, mesh, token: meshIdentity(chunk, visual),
-        version: committedMeshVersion(chunk, visual), instanceGeneration: chunk.generation??0, generation, chunkX: chunk.chunkX,
-        chunkZ: chunk.chunkZ, originY: mesh.originY ?? chunk.originY ?? 0,
-        parentId: chunk.parentId ?? chunk.parentChunkId ?? chunk.id, handle };
-      buffers.set(chunk.id, entry);
-      this.cpuMeshBytesDirty=true;this.lastUploadError=null;
-      if (existing) this.bufferManager.disposeChunkBuffers(existing.handle);
-      chunk[visual ? "visualGpuUploaded" : "gpuUploaded"] = true;
-      this.retryUploads.delete(key);
-      this.pendingUploadSince.delete(key);this.pendingMeshSources.delete(key);
-      this.uploadDiagnostics.bytes += handle.byteLength;
+      const entry = this.commitChannelUpload(chunk,visual,mesh,handle,generation,buffers);
       this.uploadDiagnostics.cpuMs += performance.now() - startedAt;
       this.stageStats.record("chunk-upload-cpu",performance.now()-startedAt);
       this.logRenderEvent("chunk-upload", { chunkId: chunk.id, meshType: visual ? "visual" : "opaque", bytes: handle.byteLength,
@@ -446,11 +559,7 @@ export class WebGL2VoxelRenderer {
     } catch (error) {
       if (handle) this.bufferManager?.disposeChunkBuffers(handle);
       const staging=this.uploadStaging.get(key);if(staging){this.bufferManager?.disposeChunkBuffers(staging.transaction.handle);this.uploadStaging.delete(key);}
-      chunk[visual ? "visualGpuUploaded" : "gpuUploaded"] = false;
-      this.retryUploads.set(key, performance.now() + this.options.uploadRetryMs);
-      this.uploadDiagnostics.failed += 1;
-      this.lastUploadError = error;
-      this.logRenderEvent("upload-error", { chunkId: chunk.id, message: String(error?.message ?? error) });
+      this.noteUploadFailure(chunk,visual,error);
       return null;
     }
   }
@@ -483,15 +592,26 @@ export class WebGL2VoxelRenderer {
     const dead = new Set();
     for (const buffers of [this.chunkBuffers, this.visualChunkBuffers]) for (const [id, entry] of buffers) if (!live.has(id) && !live.has(entry.parentId)) dead.add(entry.parentId ?? id);
     for (const regions of [this.regionBuffers, this.visualRegionBuffers]) for (const region of regions.values()) for (const [id,entry] of region.members ?? []) if (!live.has(id) && !live.has(entry.parentId)) dead.add(entry.parentId ?? id);
+    for (const { source } of this.uploadStaging.values()) if(!live.has(source.id) && !live.has(source.parentId))dead.add(source.parentId ?? source.id);
     for (const id of dead) this.removeChunk(id);
     for (const [key,groups] of this.regionGroupCache) if(groups.some(group=>group.chunks.some(c=>!live.has(c.id)&&!live.has(c.parentId)))) this.regionGroupCache.delete(key);
   }
 
   prepareChunksForRender(visibleChunks = [], { maxUploads = this.options.maxChunkUploadsPerFrame, cameraState = null } = {}) {
     if (!this.gpuReady()) return { uploaded: 0, pendingUploads: 0, paused: true };
+    const settlement = this.settleDeferredUploads();
+    if(settlement.waiting || settlement.validated) return { uploaded: settlement.uploaded,
+      pendingUploads: this.pendingUploadSince.size, uploadedBytes: 0, validationPending: settlement.waiting };
+    if(this.deferredUploadsSupported()) {
+      this.pollFrameCompletion();
+      if(this.frameCompletionFences.length>=2)return {uploaded:0,pendingUploads:this.pendingUploadSince.size,uploadedBytes:0,frameDeferred:true};
+    }
     this.restoreAvatarUploads();
-    const chunks = this.filterChunksForCamera(flattenRenderSections(visibleChunks), cameraState);
-    retireCommittedEmptyChunkBuffers(this, chunks);
+    const sections = flattenRenderSections(visibleChunks);
+    retireCommittedEmptyChunkBuffers(this, sections);
+    // Empty committed sections have no pixels. Retire their old/staged handles
+    // above, then keep them out of repeated frustum/pass traversal.
+    const chunks = this.filterChunksForCamera(sections.filter(chunk=>chunk?.mesh?.indexCount || chunk?.visualMesh?.indexCount), cameraState);
     const startedAt = performance.now(), limit = Math.max(0, Math.trunc(maxUploads ?? 0));
     let uploaded=0, bytes=0, attempts=0,pendingUploads=0, oldestPendingMs=0;
     // A task is one chunk/section channel. Region membership never causes repacking.
@@ -517,6 +637,10 @@ export class WebGL2VoxelRenderer {
 
   uploadRegion(region, signature = null, { visual = false, maxBytes=Infinity } = {}) {
     if(!region?.chunks?.length || !this.gpuReady()) return null;
+    if(Number.isFinite(maxBytes) && this.deferredUploadsSupported()) {
+      for(const chunk of region.chunks)this.uploadChannel(chunk,visual,null,maxBytes,region);
+      return null;
+    }
     const target=visual?this.visualRegionBuffers:this.regionBuffers;
     const previous=target.get(region.id), members=new Map(previous?.members ?? []);
     let changed=false;
@@ -541,6 +665,9 @@ export class WebGL2VoxelRenderer {
   uploadAvatarMesh(id, mesh) {
     if(!mesh?.vertices || !mesh?.indices || this.disposed)return null;
     const key=String(id||mesh.name||'avatar');this.avatarMeshes.set(key,mesh);this.cpuMeshBytesDirty=true;
+    // A synchronous avatar upload must not consume a pending terrain error or
+    // enqueue work after its completion fence. CPU registrations remain queued.
+    if(this.uploadValidationFence || this.hasUnvalidatedUploads())return null;
     if(!this.gpuReady())return null;
     const retryKey=`avatar:${key}`;
     if((this.retryUploads.get(retryKey)??0)>performance.now())return null;
@@ -558,6 +685,7 @@ export class WebGL2VoxelRenderer {
   }
   restoreAvatarUploads() {
     if(this.contextLost||this.disposed||!this.initialized)return;
+    if(this.uploadValidationFence || this.hasUnvalidatedUploads())return;
     let attempted=0,bytes=0;
     for(const [id,mesh]of this.avatarMeshes){const entry=this.avatarBuffers.get(id);if(entry?.mesh===mesh&&entry.generation===this.contextGeneration)continue;
       if((this.retryUploads.get(`avatar:${id}`)??0)>performance.now())continue;
@@ -590,6 +718,12 @@ export class WebGL2VoxelRenderer {
 
   render(cameraState, visibleChunks = [], avatars = [], overlays = []) {
     if (!this.gpuReady() || !this.program) return this.stats;
+    // Keep at most two frames in flight. Without this bound the browser can
+    // accumulate seconds of old camera frames before the next upload fence.
+    // Polling never waits; controls/physics continue on animation callbacks.
+    if(this.deferredUploadsSupported())this.pollFrameCompletion();
+    if(this.uploadValidationFence) return { ...this.stats, renderDeferred: true, cpuDrawSubmitMs: 0 };
+    if(this.frameCompletionFences.length>=2)return { ...this.stats, renderDeferred:true, cpuDrawSubmitMs:0 };
     this.restoreAvatarUploads();
     const drawSubmitStartedAt=performance.now();
     this.gpuTimer?.begin();
@@ -597,7 +731,7 @@ export class WebGL2VoxelRenderer {
     if (this.options.autoResizeEachFrame) this.resize();
     cameraState.aspect = Math.max(1, this.canvas.width) / Math.max(1, this.canvas.height);
     const renderChunks = this.filterChunksForCamera(
-      filterChunksByRenderRadius(flattenRenderSections(visibleChunks), cameraState, this.options.viewDistance),
+      filterChunksByRenderRadius(flattenRenderSections(visibleChunks, { includeEmpty: false }), cameraState, this.options.viewDistance),
       cameraState,
     );
     const previewChunks = renderChunks.filter((chunk) => chunk?.buildingPreview === true);
@@ -723,6 +857,12 @@ export class WebGL2VoxelRenderer {
       underwaterBlend: this.underwaterBlend,
     };
     this.gpuTimer?.end();
+    this.fenceSubmittedFrame();
+    // Draw the last committed scene before sealing the new upload batch. This
+    // preserves a frame during streaming instead of holding the canvas still
+    // merely because a replacement is waiting to become publishable.
+    this.sealDeferredUploads();
+    this.stats.gpuFramesPending=this.frameCompletionFences.length;
     this.frustumFilterCache = null;
     return this.stats;
   }
@@ -1108,6 +1248,10 @@ export class WebGL2VoxelRenderer {
         // A failed delete must not prevent the rest of the owned resources from being released.
       }
     };
+    if(this.uploadValidationFence && !this.contextLost)safely(()=>this.gl?.deleteSync(this.uploadValidationFence));
+    this.uploadValidationFence = null;
+    if(!this.contextLost)for(const fence of this.frameCompletionFences)safely(()=>this.gl?.deleteSync(fence));
+    this.frameCompletionFences.length=0;
     for(const staging of this.uploadStaging.values())safely(()=>this.bufferManager?.disposeChunkBuffers(staging.transaction.handle));this.uploadStaging.clear();
     for (const entry of this.chunkBuffers.values()) safely(() => this.bufferManager?.disposeChunkBuffers(entry.handle));
     this.chunkBuffers.clear();
@@ -1339,7 +1483,11 @@ function retireCommittedEmptyChunkBuffers(renderer, chunks) {
       if (revision < 0 || mesh?.indexCount) return;
       const buffers = visual ? renderer.visualChunkBuffers : renderer.chunkBuffers;
       const regions=visual?renderer.visualRegionBuffers:renderer.regionBuffers;
-      const region=regions.get(regionIdForChunk(chunk,renderer.options.regionChunkSize));
+      const key=`${visual?'visual':'opaque'}:${chunk.id}`;
+      const staged=renderer.uploadStaging.get(key);
+      if(staged){renderer.bufferManager?.disposeChunkBuffers(staged.transaction.handle);renderer.uploadStaging.delete(key);}
+      renderer.pendingUploadSince.delete(key);renderer.pendingMeshSources.delete(key);
+      const region=regionBatchEligible(chunk)?regions.get(regionIdForChunk(chunk,renderer.options.regionChunkSize)):null;
       const member=region?.members?.get(chunk.id);
       if(member){renderer.bufferManager?.disposeChunkBuffers(member.handle);region.members.delete(chunk.id);region.chunkIds.delete(chunk.id);if(!region.members.size)regions.delete(region.id);}
       const existing = buffers.get(chunk.id);
@@ -1529,4 +1677,4 @@ function emptyStats() {
 const gpuObjectTokens=new WeakMap();let nextGpuObjectToken=1;
 function objectToken(object){if(!object||typeof object!=="object")return 0;if(!gpuObjectTokens.has(object))gpuObjectTokens.set(object,nextGpuObjectToken++);return gpuObjectTokens.get(object);}
 function meshIdentity(chunk, visual=false){const mesh=chunk?.[visual?"visualMesh":"mesh"];return `${objectToken(chunk)}:${chunk?.generation??0}:${committedMeshVersion(chunk,visual)}:${visual?chunk?.visualCommitToken??0:chunk?.meshCommitToken??0}:${objectToken(mesh)}:${objectToken(mesh?.vertices)}:${objectToken(mesh?.indices)}`;}
-export function flattenRenderSections(chunks){const out=[];for(const chunk of chunks??[]){if(chunk?.renderSections instanceof Map && chunk.renderSections.size){for(const section of chunk.renderSections.values()){if(section.parentId==null)section.parentId=chunk.id;out.push(section);}}else out.push(chunk);}return out;}
+export function flattenRenderSections(chunks,{includeEmpty=true}={}){const out=[];for(const chunk of chunks??[]){if(chunk?.renderSections instanceof Map && chunk.renderSections.size){for(const section of chunk.renderSections.values()){if(!includeEmpty&&!section.mesh?.indexCount&&!section.visualMesh?.indexCount)continue;if(section.parentId==null)section.parentId=chunk.id;out.push(section);}}else out.push(chunk);}return out;}

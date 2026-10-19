@@ -251,7 +251,7 @@ function emptySectionMesh(chunk,section) {
   return {vertices:new Uint8Array(),indices:new Uint16Array(),vertexCount:0,indexCount:0,triangleCount:0,quadCount:0,blockCount:0,vertexStrideBytes:20,chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,chunkSize:chunk.chunkSize,originY:section.originY};
 }
 
-export function commitRenderSection(chunk, section, result, expectedRevision = sectionRevision(section,chunk.materialVersion)) {
+export function commitRenderSection(chunk, section, result, expectedRevision = sectionRevision(section,chunk.materialVersion), { updateSummary = true } = {}) {
   if (sectionRevision(section,chunk.materialVersion)!==expectedRevision) return false;
   if(result.mesh) {
     section.mesh=result.mesh; section.meshVersion=section.dataRevision;
@@ -268,7 +268,7 @@ export function commitRenderSection(chunk, section, result, expectedRevision = s
   section.materialVersion=chunk.materialVersion;
   section.buildTaskId=null;section.buildState="ready";
   if(!section.dirty&&!section.visualDirty)section.oldestDirtyAt=null;
-  updateChunkSectionSummary(chunk);
+  if(updateSummary)updateChunkSectionSummary(chunk);
   return true;
 }
 
@@ -289,6 +289,20 @@ function combinedSectionMesh(chunk,sections,field) {
   if(!meshes.length)return null;
   const summary={chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,chunkSize:chunk.chunkSize,minY:chunk.minY,height:chunk.height,originY:0,
     vertexStrideBytes:20,vertexCount:meshes.reduce((a,m)=>a+m.vertexCount,0),indexCount:meshes.reduce((a,m)=>a+m.indexCount,0),triangleCount:meshes.reduce((a,m)=>a+m.triangleCount,0),sectionSummary:true};
+  // Aggregate immutable committed bounds once, instead of traversing every
+  // section/channel in each visibility and render pass. Keep legacy lazy mesh
+  // materialization independent of the summary's world-height bounds.
+  const bounded = meshes.filter(mesh => mesh.vertexCount);
+  if (bounded.length && bounded.every(mesh => mesh.bounds)) {
+    summary.bounds = {
+      minX: Math.min(...bounded.map(mesh => mesh.bounds.minX)),
+      maxX: Math.max(...bounded.map(mesh => mesh.bounds.maxX)),
+      minZ: Math.min(...bounded.map(mesh => mesh.bounds.minZ)),
+      maxZ: Math.max(...bounded.map(mesh => mesh.bounds.maxZ)),
+      minY: Math.min(...bounded.map(mesh => mesh.bounds.minY + (mesh.originY ?? 0))),
+      maxY: Math.max(...bounded.map(mesh => mesh.bounds.maxY + (mesh.originY ?? 0))),
+    };
+  }
   let materialized=null;
   const build=()=>materialized??=(mergeMeshes(meshes));
   Object.defineProperties(summary,{

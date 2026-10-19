@@ -4,7 +4,7 @@ import { ChunkManager } from "../chunk/chunk-manager.js";
 import { BLOCK_ID } from "../world/block-registry.js";
 import { expectedFaces,actualFaces } from "./helpers/face-oracle.mjs";
 
-test("eight edits before a Worker completes remain accurately visible and reject the old result",()=>{
+test("explicit synchronous compensation keeps eight edits visible and rejects the old result",()=>{
   const previous=globalThis.Worker,workers=[];
   globalThis.Worker=class {
     constructor(){this.messages=[];workers.push(this);}
@@ -25,7 +25,7 @@ test("eight edits before a Worker completes remain accurately visible and reject
     manager.centerChunkX=0;
     for(let edit=0;edit<8;edit++) {
       manager.applyPendingDelta([{worldX:1+edit%2,worldY:6+Math.floor(edit/2),worldZ:1,blockId:BLOCK_ID.air}],`edit-${edit}`);
-      manager.rebuildDirtyChunks(10000);
+      manager.rebuildDirtyChunks(10000, { synchronousNearField: true });
       assert.deepEqual(actualFaces(chunk.mesh),expectedFaces(chunk,(...p)=>manager.getBlockAtWorld(...p)));
       assert.equal(chunk.meshVersion,chunk.version);
     }

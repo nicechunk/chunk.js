@@ -23,15 +23,15 @@ export function filterChunksByCameraFrustum(chunks, cameraState) {
   });
 }
 
-export function chunkIntersectsCameraFrustum(chunk, cameraState) {
-  return !cameraState || boundsIntersectPreparedFrustum(chunkWorldBounds(chunk), prepareCameraFrustum(cameraState));
+export function chunkIntersectsCameraFrustum(chunk, cameraState, prepared = null) {
+  return !cameraState || boundsIntersectPreparedFrustum(chunkWorldBounds(chunk), prepared ?? prepareCameraFrustum(cameraState));
 }
 
 export function aabbIntersectsCameraFrustum(bounds, cameraState) {
   return !cameraState || boundsIntersectPreparedFrustum(bounds, prepareCameraFrustum(cameraState));
 }
 
-function prepareCameraFrustum(cameraState) {
+export function prepareCameraFrustum(cameraState) {
   const matrix = cameraViewProjection(cameraState);
   const origin = cameraOrigin(cameraState);
   const planes = [];
@@ -71,12 +71,16 @@ export function chunkWorldBounds(chunk) {
   const oz = Number(chunk?.chunkZ) * chunkSize;
   if (![chunkSize, ox, oz].every(Number.isFinite) || chunkSize <= 0) return null;
   let bounds = null;
-  const channels = [chunk?.mesh?.sectionSummary ? null : chunk?.mesh, chunk?.visualMesh?.sectionSummary ? null : chunk?.visualMesh];
-  for (const section of (chunk?.renderSections ?? chunk?.sections)?.values?.() ?? []) channels.push(section.mesh, section.visualMesh);
+  const summaries = [chunk?.mesh, chunk?.visualMesh];
+  const summarized = summaries.some(mesh => mesh?.sectionSummary)
+    && summaries.every(mesh => !mesh || !mesh.sectionSummary || mesh.bounds || mesh.vertexCount === 0);
+  const channels = summarized ? summaries.filter(mesh => !mesh?.sectionSummary || mesh.bounds)
+    : summaries.filter(mesh => !mesh?.sectionSummary);
+  if (!summarized) for (const section of (chunk?.renderSections ?? chunk?.sections)?.values?.() ?? []) channels.push(section.mesh, section.visualMesh);
   for (const mesh of channels) {
     const local = committedMeshBounds(mesh);
     if (!local) continue;
-    const originY = Number(mesh.originY) || 0;
+    const originY = mesh.sectionSummary ? 0 : Number(mesh.originY) || 0;
     bounds = unionBounds(bounds, {
       minX: ox + local.minX, maxX: ox + local.maxX,
       minY: originY + local.minY, maxY: originY + local.maxY,

@@ -4,20 +4,23 @@ export class FrameStatsCounter {
     this.frames = 0;
     this.lastSampleTime = 0;
     this.fps = 0;
+    this.sampleCount = 0;
   }
 
   reset(now = performance.now()) {
     this.frames = 0;
     this.lastSampleTime = now;
     this.fps = 0;
+    this.sampleCount = 0;
   }
 
   frame(now = performance.now(), extra = {}) {
     if (!this.lastSampleTime) this.lastSampleTime = now;
-    this.frames += 1;
+    if (!extra.renderDeferred) this.frames += 1;
     const elapsed = now - this.lastSampleTime;
     if (elapsed < this.sampleMs) return null;
     this.fps = Math.round((this.frames * 1000) / elapsed);
+    this.sampleCount += 1;
     this.frames = 0;
     this.lastSampleTime = now;
     return { fps: this.fps, ...extra };
