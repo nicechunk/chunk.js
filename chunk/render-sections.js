@@ -306,23 +306,9 @@ export function* buildRenderSectionSteps(chunk, section, access = {}, { visualOn
   // and other buried opaque cells just to reject them in the visual pass.
   // Explicit edits still enumerate every visual cell, including underground.
   if(access.generatedTerrain && chunk.generationVersion===5 && chunk.baseProfile && !chunk.baseBlocks) {
-    const size=chunk.chunkSize,mask=new Uint8Array(size*size*section.height);
-    const editedColumns=new Set();
-    for(let z=0;z<size;z++)for(let x=0;x<size;x++) {
-      const column=x+z*size,surface=chunk.baseProfile.surfaceY[column],water=chunk.baseProfile.waterY[column];
-      const end=Math.min(section.originY+section.height-1,Math.max(surface,water===chunk.baseProfile.noWater?surface:water));
-      for(let y=Math.max(section.originY,surface);y<=end;y++) {
-        mask[x+z*size+(y-section.originY)*size*size]=1;
-        if(++units>=workBudget){units=0;yield {phase:"section-visual-mask",workUnits:workBudget};}
-      }
-      if(++units>=workBudget){units=0;yield {phase:"section-visual-columns",workUnits:workBudget};}
-    }
-    for(const delta of localDeltas.values()) {
-      editedColumns.add(delta.localX+delta.localZ*size);
-      const y=delta.localY;
-      if(y>=section.originY&&y<section.originY+section.height&&isVisualBlock(delta.blockId))mask[delta.localX+delta.localZ*size+(y-section.originY)*size*size]=1;
-    }
-    view.generatedVisualProfile={profile:chunk.baseProfile,editedColumns,mask};
+    // Only certify the source here. The final-state candidate pass owns the
+    // mask and edited-column Set for this section snapshot.
+    view.generatedVisualProfile={profile:chunk.baseProfile};
   }
   const margin=chunk.shadows===false?8:SUNLIGHT_HORIZONTAL_REACH,verticalMargin=8,width=chunk.chunkSize+margin*2,cacheHeight=section.height+verticalMargin*2;
   const originX=chunk.chunkX*chunk.chunkSize-margin,originZ=chunk.chunkZ*chunk.chunkSize-margin,originY=section.originY-verticalMargin;
@@ -371,6 +357,11 @@ export function* buildRenderSectionSteps(chunk, section, access = {}, { visualOn
   try {
     const candidates = yield* buildGeneratedVisualCandidatesSteps(view, { finalDeltas: localDeltas, workBudget });
     view.visualCandidates = candidates;
+    // Ground detail scans still need the same final edited-column summary.
+    // A null summary uses the full final-state fallback without a partial mask.
+    view.generatedVisualProfile = candidates ? {
+      profile: chunk.baseProfile, editedColumns: candidates.editedColumns, mask: candidates.mask,
+    } : null;
     visualMesh = candidates
       ? candidates.empty ? { ...emptySectionMesh(chunk, section), blockCount: candidates.blockCount } : yield* meshChunkVisualSteps(view, snapshotAccess)
       : visualPossible ? yield* meshChunkVisualSteps(view, snapshotAccess) : emptySectionMesh(chunk, section);

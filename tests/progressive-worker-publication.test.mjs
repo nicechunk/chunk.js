@@ -21,7 +21,11 @@ test("actual progressive Worker retains its profile and matches the complete col
     const reference = await worker.build(input);
     const packets = [];
     const streamed = await worker.build({ ...input, progressiveSections: true }, { onProgress: packet => packets.push(packet) });
-    assert.equal(packets.length, reference.sectionResults.length);
+    assert.equal(packets.reduce((count, packet) => count + packet.sectionResults.length, 0), reference.sectionResults.length);
+    assert.ok(packets.length < reference.sectionResults.length, "empty layers share bounded transport packets");
+    assert.ok(packets.every(packet => packet.sectionResults.length <= 8));
+    assert.ok(packets.filter(packet => packet.sectionResults.length > 1).every(packet =>
+      packet.sectionResults.every(result => !result.mesh?.indexCount && !result.visualMesh?.indexCount && !result.visualError)));
     assert.equal(packets[0].completedSections, 1);
     assert.ok(packets[0].completedSections < packets[0].totalSections);
     assert.equal(packets[0].baseProfile.surfaceY.length, 16);
@@ -70,7 +74,7 @@ test("progress packets are budgeted, ordered, deduplicated and keep the Worker s
     manager.handleWorkerMessage(stub, { ...response, sectionResults: undefined, progress: undefined, taskId: request.taskId });
     assert.equal(manager.inFlightBuilds.size, 1, "terminal arrival does not bypass the commit deadline");
     manager.consecutiveWorkerFailures = 2;
-    for (let index = 0; index < packets.length + 2 && manager.inFlightBuilds.size; index++) manager.drainWorkerProgress(0);
+    for (let index = 0; index < response.progressMessageCount + 2 && manager.inFlightBuilds.size; index++) manager.drainWorkerProgress(0);
     assert.equal(manager.inFlightBuilds.size, 0);
     assert.equal(manager.idleWorkers.length, 1);
     assert.equal(manager.consecutiveWorkerFailures, 0, "a successful progressive task clears consecutive Worker failure debt");
@@ -119,9 +123,32 @@ test('changed decoration revisions reject old progressive meshes while accepting
  await withProgressiveHarness(({manager,chunk,stub,packets,terminal})=>{
   manager.setSurfaceDecorationRules(DEFAULT_SURFACE_DECORATION_RULES,{revision:1});
   for(const packet of packets)manager.handleWorkerMessage(stub,packet);manager.handleWorkerMessage(stub,terminal);
-  for(let i=0;i<packets.length+2&&manager.inFlightBuilds.size;i++)manager.drainWorkerProgress(0);
+  for(let i=0;i<terminal.progressMessageCount+2&&manager.inFlightBuilds.size;i++)manager.drainWorkerProgress(0);
   assert.equal(chunk.baseBlocksReady,true);assert.equal(manager.progressiveSectionsCommitted,0);
   assert.ok(chunk.dirty);assert.ok(manager.staleBuildResults>0);assert.equal(manager.idleWorkers.length,1);
+ });
+});
+
+test('empty transport batches remain section-budgeted and skip unchanged initial summary traversal',async()=>{
+ await withProgressiveHarness(({manager,chunk,stub,request,packets,terminal})=>{
+  assert.ok(packets.some(packet=>packet.sectionResults.length>1));
+  for(const packet of packets)manager.handleWorkerMessage(stub,packet);
+  let emptyCommits=0,geometryCommits=0;
+  for(let i=0;i<terminal.progressMessageCount;i++){
+   const task=manager.inFlightBuilds.get(request.taskId);
+   const message=task.pendingProgress.get(task.nextProgressToApply);
+   const result=message.sectionResults[0];
+   const empty=!result.mesh?.indexCount&&!result.visualMesh?.indexCount&&!result.visualError;
+   const revision=chunk.renderSectionCommitRevision??0,committed=manager.progressiveSectionsCommitted;
+   manager.drainWorkerProgress(0);
+   assert.equal(manager.progressiveSectionsCommitted,committed+1,'one logical section per zero-budget drain');
+   if(empty){emptyCommits++;assert.equal(chunk.renderSectionCommitRevision??0,revision,'empty-to-empty cannot change visible summary');}
+   else{geometryCommits++;assert.ok(chunk.renderSectionCommitRevision>revision);}
+  }
+  assert.ok(emptyCommits>geometryCommits&&geometryCommits>0);
+  assert.equal(manager.inFlightBuilds.size,1,'batch reception and logical commits do not settle without terminal');
+  manager.handleWorkerMessage(stub,terminal);manager.drainWorkerProgress(0);
+  assert.equal(manager.inFlightBuilds.size,0);assert.equal(chunk.dirty,false);
  });
 });
 

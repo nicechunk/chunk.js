@@ -92,23 +92,39 @@ self.onmessage = (event) => {
           : baseProfile.surfaceY.reduce((sum, y) => sum + y, 0) / baseProfile.surfaceY.length;
         jobs.sort((a, b) => Math.abs(sections.get(a.sectionIndex).originY + 8 - preferredY)
           - Math.abs(sections.get(b.sectionIndex).originY + 8 - preferredY) || a.sectionIndex - b.sectionIndex);
+        let packet = [], packetSequence = 0, packetCount = 0;
+        const publishPacket = () => {
+          if (!packet.length) return;
+          // Sequence numbers address logical sections, including those carried
+          // together in one bounded empty packet. Main-thread commits still
+          // consume one section at a time under their frame deadline.
+          const response = { type: "chunkProgress", taskId: task.taskId, chunkX: task.chunkX, chunkZ: task.chunkZ,
+            mode: task.mode || "base", taskVersion: task.taskVersion, materialVersion: task.materialVersion,
+            progressSequence: packetSequence, completedSections: packetSequence + packet.length, totalSections: jobs.length,
+            baseProfile: packetSequence === 0 && task.mode === "base" ? structuredClone(baseProfile) : null,
+            treeInstances: packetSequence === 0 && task.mode === "base" ? treeInstances : null,
+            sectionResults: packet, elapsedMs: performance.now() - startedAt };
+          self.postMessage(response, transferablesForBuild(response));
+          packetCount++;
+          packet = [];
+        };
         for (let sequence = 0; sequence < jobs.length; sequence++) {
           const job = jobs[sequence];
           const result = { sectionIndex: job.sectionIndex, sectionRevision: job.sectionRevision,
             ...buildRenderSection(chunk, sections.get(job.sectionIndex), access, { visualOnly: Boolean(job.visualOnly) }) };
-          // Only the clone is transferred. The profile used by later sections
-          // remains owned by this Worker until the task reaches its terminal.
-          const response = { type: "chunkProgress", taskId: task.taskId, chunkX: task.chunkX, chunkZ: task.chunkZ,
-            mode: task.mode || "base", taskVersion: task.taskVersion, materialVersion: task.materialVersion,
-            progressSequence: sequence, completedSections: sequence + 1, totalSections: jobs.length,
-            baseProfile: sequence === 0 && task.mode === "base" ? structuredClone(baseProfile) : null,
-            treeInstances: sequence === 0 && task.mode === "base" ? treeInstances : null,
-            sectionResults: [result], elapsedMs: performance.now() - startedAt };
-          self.postMessage(response, transferablesForBuild(response));
+          const visible = Boolean(result.mesh?.indexCount || result.visualMesh?.indexCount || result.visualError);
+          if (visible) publishPacket();
+          if (!packet.length) packetSequence = sequence;
+          packet.push(result);
+          // The first result and every nonempty/error result are sent at once.
+          // Only consecutive empty results share a transport packet (max8).
+          if (sequence === 0 || visible || packet.length === 8) publishPacket();
         }
+        publishPacket();
         self.postMessage({ type: "chunkBuilt", taskId: task.taskId, chunkX: task.chunkX, chunkZ: task.chunkZ,
           mode: task.mode || "base", taskVersion: task.taskVersion, materialVersion: task.materialVersion,
           progressComplete: true, progressMessageCount: jobs.length, visualPending: false,
+          progressPacketCount: packetCount,
           elapsedMs: performance.now() - startedAt });
         return;
       }

@@ -42,6 +42,8 @@ The current request contains these conceptual fields:
 | `sectionIndex`, `sectionRevision` | bounded render section and its captured dependency stamp |
 | `lightingDeltas`, `columnTopHalo` | separate finite local light and sun-column dependencies |
 | `baseProfile`, `treeInstances` | captured immutable base input for a section remesh |
+| `progressiveSections`, `preferredSectionY` | opt-in incremental initial results, prioritized around the current camera height |
+| `sectionJobs` | captured section identities and dependency revisions for the complete task |
 
 Packed delta arrays use `Int32Array`. X/Z must already fit signed 32-bit, Y signed 16-bit, and block IDs unsigned 16-bit before packing; the sender rejects an out-of-range value rather than allowing typed-array wrapping. One payload contains at most `262144` entries. A known larger collection is rejected before typed-array allocation, while an unknown-size iterable is consumed only through that bound. The implementation may transfer the backing buffers.
 
@@ -51,9 +53,9 @@ A successful response includes task/chunk/version identity, optional base profil
 
 The base profile/tree data may be omitted for a remesh when the manager already owns them. Mesh vertex and index buffers are transferred back to the main thread.
 
-Each task starts in the chunk phase, where only `chunkBuilt` or `chunkBuildError` is valid. A `chunkBuilt` response with `visualPending: true` advances that same owned task to the visual phase, where only `visualBuilt` or `visualBuildError` is valid. A response with the wrong owner, coordinates, phase, type, or echoed identity is a protocol failure. The manager quarantines that sender and recovers only work actually owned by it; it never consumes another Worker's task or advertises the faulty Worker as idle.
+Each task starts in the chunk phase, where `chunkBuilt`, `chunkProgress` or `chunkBuildError` is valid. A `chunkBuilt` response with `visualPending: true` advances that same owned task to the visual phase, where only `visualBuilt` or `visualBuildError` is valid. A response with the wrong owner, coordinates, phase, type, or echoed identity is a protocol failure. The manager quarantines that sender and recovers only work actually owned by it; it never consumes another Worker's task or advertises the faulty Worker as idle.
 
-Unloading a chunk marks its in-flight task canceled but retains Worker ownership until a terminal response arrives. Its payload is then discarded and the Worker can be released normally. Recently settled task IDs are remembered per Worker so a late duplicate from an old/canceled task is ignored without releasing or corrupting a newer task assigned to the same Worker. An unrecognized task ID is not treated as a harmless late response.
+Unloading marks the in-flight task canceled, terminates its synchronous Worker before reusing that slot, clears private queued results and creates a replacement as needed. Posting a cancel message alone cannot interrupt that synchronous Worker. Recently settled task IDs are remembered per Worker so a late duplicate from an old/canceled task is ignored without releasing or corrupting a newer task assigned to the same Worker. An unrecognized task ID is not treated as a harmless late response.
 
 The manager must ignore a result that no longer matches the current dependency
 stamp. Whole-chunk tasks use the chunk revision. Section tasks echo that revision
@@ -66,6 +68,35 @@ Worker error is diagnostic data, not permission to accept incomplete authoritati
 state. Error responses quarantine the sender; chunk-phase errors release the exact
 task and transition it out of `building`. See [render-sections.md](render-sections.md)
 for coordinate, input, commit and near-field compensation details.
+
+### Progressive initial publication
+
+The first response, every nonempty result and every visual error publish promptly.
+At most eight consecutive empty section results may share a physical message.
+`progressSequence` identifies the first logical section slot in that message;
+the following `sectionResults` occupy consecutive logical slots. A message does
+not reorder or omit the task's captured section set. `completedSections` is the
+end of that logical span, and `totalSections` is the complete captured count.
+
+For compatibility, terminal `progressMessageCount` counts logical section slots,
+including slots batched in one physical message. Optional `progressPacketCount`
+reports physical messages. The receiver accepts the earlier one-result message
+shape and rejects oversized, overlapping, repeated-section or nonempty batches.
+Exact duplicate spans are ignored. Out-of-order spans wait for their predecessor.
+
+Message callbacks validate and queue only. The manager expands the bounded empty
+span into independently checked logical section slots; even a zero-budget drain
+consumes at most one section. A batch cannot bypass the frame deadline. Initial
+empty-to-empty results do not change visible summaries; nonempty publication and
+terminal completion update summaries. Each section retains its own revision and
+commit token, so an unrelated edit cannot discard the rest of the valid task.
+
+The first initial response transfers a clone of the deterministic base profile,
+leaving the Worker's private profile available for later sections. The manager
+adopts base data once without replacing section identities. Worker ownership is
+released only after terminal receipt and logical packet consumption. A 30-second
+inactivity watchdog recovers a silent or incomplete protocol; a fully received
+task waiting for its frame-budgeted commits is not a silent Worker.
 
 ## Buffer ownership
 
@@ -94,11 +125,19 @@ Fallback rules:
 - performance may degrade, but correctness must not;
 - failure must be observable rather than silently returning a partial result.
 
-Chunk-manager retry state is bounded and must not create an infinite hot loop. A Worker build failure leaves the previous mesh in place and enters backoff; it does not run an expensive synchronous replacement in the same frame. Construction failure, `messageerror`, synchronous `postMessage()` failure, and runtime `error` all release their in-flight ownership. When Worker use becomes unavailable, queued/building states are reset and later dirty-build work uses the manager's synchronous path under its normal frame budget. The manager itself remains usable; Worker initialization failure is not engine disposal. Disposal cancels future dispatch by clearing ownership state and terminating the pool.
+Chunk-manager retry state is bounded and must not create an infinite hot loop. A Worker build failure leaves the previous mesh in place and enters backoff; it does not run an expensive synchronous replacement in the same frame. Construction failure, `messageerror`, synchronous `postMessage()` failure, and runtime `error` all release their in-flight ownership. When Worker use becomes unavailable, queued/building states are reset and later dirty-build work uses one resumable private fallback job under the shared frame deadline. Snapshot capture, base/tree generation, meshing, light transport and material partitioning yield in bounded work units; publication validates the captured instance/dependencies. The manager itself remains usable; Worker initialization failure is not engine disposal. Disposal cancels future dispatch by clearing ownership state and terminating the pool.
 
 ## Building Worker
 
 `createBuildingMeshWorkerClient()` serializes one active building job at a time, supports priority/queueing, optional cancellation scope and `AbortSignal`, and falls back to main-thread parsing/meshing when a Worker is unavailable.
+
+Failed Workers retry after exponential cooldown (default 1 second, capped at 30
+seconds), while queued work can progress through cooperative fallback. A 30-second
+watchdog releases silent ownership. Parser, voxel expansion, placement, light
+transport, mesh/result assembly and validation use resumable Steps iterators.
+Validation may therefore settle asynchronously after receipt; a message callback
+does not promise synchronous dispatch of the next queued job. The result schema,
+identity checks and buffer ownership remain identical on Worker and fallback paths.
 
 Both execution paths use the canonical NCM3 decoder. It rejects more than 4,096 commands or a declared expanded-operation budget above 262,144 before voxel materialization and meshing; the materialized map is independently capped at 131,072 unique voxels. Declaring a large 256-cubed blueprint therefore does not authorize a 256-cubed allocation.
 

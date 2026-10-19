@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Exclude known hidden avatar ranges, batch contiguous globally sorted transparent
+  geometry and particles, retain independent actor pose buffers, and cache exact
+  NCM4 bone transforms without changing formats or animation frequency.
+- Avoid unrelated empty-neighbor invalidation and duplicate visual candidate
+  preparation while preserving final-state face, light and pickup semantics.
 - Add bounded shared GPU pages with independently replaceable section channels,
   exact integer origin offsets, material-pass tags and ordered cross-column draws.
   Reuse released slices, retain validated geometry during failed uploads and
@@ -22,6 +27,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Opt-in progressive initial section publication with captured revisions, cloned
+  base ownership and bounded empty-result transport batches. Logical section
+  slots remain independently validated and frame-budgeted.
+- Resumable terrain/building generation, meshing, lighting and result validation,
+  with bounded Worker watchdogs/retry and synchronous consumer compatibility.
 - Terrain-aware batched foundation overlays with per-cell surface heights, stepped boundaries, bounded GPU buffers, and optional x-ray grid lines.
 - Public `ChunkManager.getWaterLevelAtWorld()` queries for overlays and other hosts that must distinguish water surfaces from terrain floors.
 - Reproducible, self-contained browser runtime and chunk Worker bundles for latency-sensitive static deployments.

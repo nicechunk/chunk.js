@@ -1910,22 +1910,38 @@ export class ChunkManager {
       return;
     }
     const sequence = message.progressSequence;
+    const results = message.sectionResults;
     if (!Number.isSafeInteger(sequence) || sequence < 0 || sequence >= count
-      || !Array.isArray(message.sectionResults) || message.sectionResults.length !== 1) {
+      || !Array.isArray(results) || results.length < 1 || results.length > 8 || sequence + results.length > count) {
       throw new Error("Invalid progressive Worker section packet.");
     }
-    if (task.receivedProgress.has(sequence)) return;
-    const result = message.sectionResults[0];
-    const job = task.progressiveJobs.find(candidate => candidate.sectionIndex === result.sectionIndex);
+    if (results.every((_, index) => task.receivedProgress.has(sequence + index))) return;
     task.receivedProgressSections ??= new Set();
-    if (!job || result.sectionRevision !== job.sectionRevision || task.receivedProgressSections.has(result.sectionIndex)
-      || sequence !== 0 && message.baseProfile) throw new Error("Progressive Worker section does not match its captured job.");
-    task.receivedProgress.add(sequence);
-    task.receivedProgressSections.add(result.sectionIndex);
-    task.pendingProgress.set(sequence, message);
-    message.receivedAt = performance.now();
-    task.firstProgressReceivedAt ??= message.receivedAt;
-    task.progressBytesQueued = (task.progressBytesQueued ?? 0) + progressivePacketBytes(message);
+    const packetSections = new Set();
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index];
+      const job = task.progressiveJobs.find(candidate => candidate.sectionIndex === result?.sectionIndex);
+      if (!job || result.sectionRevision !== job.sectionRevision || task.receivedProgress.has(sequence + index)
+        || task.receivedProgressSections.has(result.sectionIndex) || packetSections.has(result.sectionIndex)
+        || sequence !== 0 && message.baseProfile
+        || results.length > 1 && (result.mesh?.indexCount || result.visualMesh?.indexCount || result.visualError)) {
+        throw new Error("Progressive Worker section does not match its captured job.");
+      }
+      packetSections.add(result.sectionIndex);
+    }
+    const receivedAt = performance.now();
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index];
+      const sectionMessage = results.length === 1 ? message : { ...message, progressSequence: sequence + index,
+        baseProfile: index === 0 ? message.baseProfile : null, treeInstances: index === 0 ? message.treeInstances : null,
+        sectionResults: [result] };
+      sectionMessage.receivedAt = receivedAt;
+      task.receivedProgress.add(sequence + index);
+      task.receivedProgressSections.add(result.sectionIndex);
+      task.pendingProgress.set(sequence + index, sectionMessage);
+      task.progressBytesQueued = (task.progressBytesQueued ?? 0) + progressivePacketBytes(sectionMessage);
+    }
+    task.firstProgressReceivedAt ??= receivedAt;
   }
 
   drainWorkerProgress(budgetMs = 1) {
@@ -1969,7 +1985,10 @@ export class ChunkManager {
           if (!task.cancelled && message.materialVersion === this.materialVersion) {
             const result = message.sectionResults[0];
             const section = chunk.renderSections.get(result.sectionIndex);
-            if (section && commitRenderSection(chunk, section, result, result.sectionRevision)) {
+            const changesGeometry = section?.mesh?.indexCount || section?.visualMesh?.indexCount
+              || result.mesh?.indexCount || result.visualMesh?.indexCount || result.visualError;
+            const updateSummary = task.mode !== "base" || Boolean(changesGeometry);
+            if (section && commitRenderSection(chunk, section, result, result.sectionRevision, { updateSummary })) {
               committed++; this.progressiveSectionsCommitted++;
               this.completedBuilds.push(chunk);
               this.logRenderEvent("section-worker-progress", { chunkId: chunk.id, section: section.sectionIndex,
