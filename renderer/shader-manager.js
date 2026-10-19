@@ -19,7 +19,6 @@ out float vLayer;
 out float vAo;
 out float vSunVisibility;
 out float vSkyVisibility;
-out float vFogDepth;
 out vec3 vViewPosition;
 out float vLocalLight;
 
@@ -39,7 +38,6 @@ void main() {
   float bakedSky = mod(packedLight, 16.0) / 15.0;
   vSunVisibility = mix(1.0, bakedSun, hasBakedLight);
   vSkyVisibility = mix(1.0, bakedSky, hasBakedLight);
-  vFogDepth = max(0.0, gl_Position.w);
   vViewPosition = p;
   vLocalLight = mod(floor(baseFlags / 8.0), 16.0) / 15.0;
 }
@@ -55,8 +53,6 @@ uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform vec3 uSkyLightColor;
 uniform vec3 uGroundLightColor;
-uniform vec3 uFogColor;
-uniform vec2 uFogNearFar;
 uniform vec4 uLightParams;
 uniform float uTime;
 uniform float uOpacity;
@@ -75,12 +71,12 @@ in float vLayer;
 in float vAo;
 in float vSunVisibility;
 in float vSkyVisibility;
-in float vFogDepth;
 in vec3 vViewPosition;
 in float vLocalLight;
 
 out vec4 outColor;
 
+#ifndef NICECHUNK_FAST_WATER
 float waterHash(ivec2 p) {
   uvec2 v=uvec2(p);
   uint h=v.x*0x8da6b343u ^ v.y*0xd8163841u;
@@ -129,6 +125,8 @@ float waterSparkleCell(vec2 p, float cellSize, float density, float seed, int in
   return cellActive * glowBox * (0.30 + blink * 0.70) * (0.68 + pick * 0.32);
 }
 
+#endif
+
 vec3 animeGrade(vec3 color) {
   float luma = dot(color, vec3(0.299, 0.587, 0.114));
   color = mix(vec3(luma), color, 0.98);
@@ -150,9 +148,7 @@ void main() {
   if (uSurfacePass > 0.5) texel.a = 1.0;
   if (texel.a < 0.08) discard;
   if (isShadowLayer) {
-    float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);
-    vec3 shadowColor = mix(vec3(0.020, 0.028, 0.018), uFogColor * 0.22, fog * 0.36);
-    outColor = vec4(shadowColor, texel.a * clamp(vAo, 0.0, 1.0) * (1.0 - fog * 0.48));
+    outColor = vec4(0.020, 0.028, 0.018, texel.a * clamp(vAo, 0.0, 1.0));
     return;
   }
   vec3 normal = normalize(vNormal);
@@ -177,6 +173,21 @@ void main() {
     color *= mix(1.0, 0.925, sideShade);
   }
 #ifndef NICECHUNK_SOLID_PASS
+#ifdef NICECHUNK_FAST_WATER
+  // Keep water types, depth tint, underside and alpha; omit animated noise,
+  // waves, specular powers and sparkle cells from the compiled program.
+  if (isWaterSurface) {
+    vec3 waterTint = layer == 18.0 ? vec3(0.13, 0.39, 0.35)
+      : layer == 19.0 ? vec3(0.17, 0.46, 0.29) : vec3(0.08, 0.52, 0.76);
+    float depth = clamp((vAo - 0.58) / 0.40, 0.0, 1.0);
+    color = waterTint * mix(1.18, 0.78, depth) * (ambient + hemi + direct);
+    if (isWaterUnderside) color *= vec3(0.74, 0.92, 0.98);
+    texel.a = isWaterUnderside ? 0.50 : 0.68;
+  } else if (layer == 20.0) {
+    color = texel.rgb * (ambient + hemi + direct);
+    texel.a = 0.84;
+  }
+#else
   if (layer >= 17.0 && layer <= 20.0) {
     vec2 p = vViewPosition.xz;
     vec2 d1 = normalize(vec2(0.68, 1.0));
@@ -268,6 +279,7 @@ void main() {
     }
   }
 #endif
+#endif
   color *= uLightParams.w;
   color = animeGrade(color);
   if (isWaterSurface && !isWaterUnderside) {
@@ -278,24 +290,11 @@ void main() {
     color = mix(color, vec3(1.0, 0.985, 0.82), glareCore * 0.24);
     color = min(color, vec3(1.34, 1.30, 1.18));
   }
-  float viewLength = max(length(vViewPosition-uCameraLocalEye), 0.001);
-  float horizonAngle = 1.0 - smoothstep(0.025, 0.145, abs(vViewPosition.y-uCameraLocalEye.y) / viewLength);
-  float horizonDistance = smoothstep(uFogNearFar.x * 0.60, uFogNearFar.y * 0.96, length(vViewPosition.xz-uCameraLocalEye.xz));
-  float horizonHaze = clamp(horizonAngle * horizonDistance, 0.0, 1.0);
-  vec3 horizonFog = mix(uFogColor, uSkyLightColor, 0.28);
-  color = mix(color, horizonFog, horizonHaze * 0.42);
-  if (isWaterSurface && !isWaterUnderside) {
-    texel.a = mix(texel.a, min(texel.a, 0.42), horizonHaze * 0.56);
-    color = mix(color, horizonFog, horizonHaze * 0.24);
-  }
   if (uUnderwater > 0.001 && !isWaterSurface) {
-    float absorptionDistance = smoothstep(0.0, max(1.0, uFogNearFar.y), vFogDepth);
-    float absorption = uUnderwater * mix(0.05, 0.20, absorptionDistance);
+    float absorption = uUnderwater * 0.12;
     vec3 absorbedColor = color * vec3(0.82, 0.95, 0.97) + vec3(0.025, 0.090, 0.105);
     color = mix(color, absorbedColor, absorption);
   }
-  float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);
-  color = mix(color, uFogColor, fog);
   outColor = vec4(color, texel.a * uOpacity);
 }
 `;
@@ -305,6 +304,10 @@ void main() {
 // complete water noise program through every terrain fragment.
 export const SOLID_FRAGMENT_SHADER = OPAQUE_FRAGMENT_SHADER.replace(
   '#version 300 es', '#version 300 es\n#define NICECHUNK_SOLID_PASS 1',
+);
+
+export const FAST_FLUID_FRAGMENT_SHADER = OPAQUE_FRAGMENT_SHADER.replace(
+  '#version 300 es', '#version 300 es\n#define NICECHUNK_FAST_WATER 1',
 );
 
 export function createProgram(gl, vertexSource, fragmentSource) {

@@ -20,14 +20,12 @@ uniform vec3 uCameraOrigin;
 
 out vec3 vNormal;
 out vec4 vColor;
-out float vFogDepth;
 
 void main() {
   vec3 p = aPosition - uCameraOrigin;
   gl_Position = uViewProjection * vec4(p, 1.0);
   vNormal = aNormal;
   vColor = aColor;
-  vFogDepth = max(0.0, gl_Position.w);
 }
 `;
 
@@ -38,14 +36,11 @@ uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform vec3 uSkyLightColor;
 uniform vec3 uGroundLightColor;
-uniform vec3 uFogColor;
-uniform vec2 uFogNearFar;
 uniform vec4 uLightParams;
 uniform float uOpacity;
 
 in vec3 vNormal;
 in vec4 vColor;
-in float vFogDepth;
 
 out vec4 outColor;
 
@@ -62,8 +57,7 @@ void main() {
   vec3 whiteCap = vec3(1.20, 1.18, 1.10);
   color = mix(color * shadow, color * whiteCap, topLight);
   color = mix(color, vec3(1.0, 1.0, 1.0), 0.30);
-  float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);
-  outColor = vec4(mix(color, uFogColor, fog * 0.62), min(vColor.a, 0.990) * uOpacity);
+  outColor = vec4(color, min(vColor.a, 0.990) * uOpacity);
 }
 `;
 
@@ -266,8 +260,6 @@ function collectCloudUniforms(gl, program) {
     "uSunColor",
     "uSkyLightColor",
     "uGroundLightColor",
-    "uFogColor",
-    "uFogNearFar",
     "uLightParams",
     "uOpacity",
   ];

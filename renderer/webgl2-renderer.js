@@ -9,7 +9,8 @@ import { waterPrecisionUniforms } from "./water-precision.js";
 import { RenderStageStats } from "../debug/stats.js";
 import { CloudLayer } from "./cloud-layer.js";
 import { applyLightingUniforms, createUnderwaterLighting, createWorldLighting } from "./lighting.js";
-import { createProgram, OPAQUE_FRAGMENT_SHADER, SOLID_FRAGMENT_SHADER, OPAQUE_VERTEX_SHADER } from "./shader-manager.js";
+import { createProgram, FAST_FLUID_FRAGMENT_SHADER, OPAQUE_FRAGMENT_SHADER, SOLID_FRAGMENT_SHADER, OPAQUE_VERTEX_SHADER } from "./shader-manager.js";
+import { renderResolution } from "./render-resolution.js";
 import { ProjectedShadowLayer } from "./projected-shadow-layer.js";
 import { SkyGradient } from "./sky-gradient.js";
 import { SunDisc } from "./sun-disc.js";
@@ -37,7 +38,6 @@ out vec4 vColor;
 out vec2 vUv;
 flat out float vTextureLayer;
 flat out float vTransparentSurface;
-out float vFogDepth;
 
 void main() {
   float c = cos(uAvatarYaw);
@@ -54,7 +54,6 @@ void main() {
   vUv = aUv;
   vTextureLayer = aTextureLayer;
   vTransparentSurface = aTransparentSurface;
-  vFogDepth = max(0.0, gl_Position.w);
 }
 `;
 
@@ -70,8 +69,6 @@ uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform vec3 uSkyLightColor;
 uniform vec3 uGroundLightColor;
-uniform vec3 uFogColor;
-uniform vec2 uFogNearFar;
 uniform vec4 uLightParams;
 uniform float uAvatarOpacity;
 uniform float uAvatarSurfacePass;
@@ -81,7 +78,6 @@ in vec4 vColor;
 in vec2 vUv;
 flat in float vTextureLayer;
 flat in float vTransparentSurface;
-in float vFogDepth;
 
 out vec4 outColor;
 
@@ -101,8 +97,7 @@ void main() {
   vec3 hemi = mix(uGroundLightColor, uSkyLightColor, hemiUp) * uLightParams.z;
   vec3 direct = uSunColor * (sun * uLightParams.y);
   vec3 color = surface.rgb * (ambient + hemi + direct) * uLightParams.w;
-  float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);
-  outColor = vec4(mix(color, uFogColor, fog), surface.a * uAvatarOpacity);
+  outColor = vec4(color, surface.a * uAvatarOpacity);
 }
 `;
 
@@ -118,6 +113,9 @@ export class WebGL2VoxelRenderer {
       dpr: options.dpr ?? null,
       maxMobileDpr: options.maxMobileDpr ?? MAX_MOBILE_DPR,
       maxDesktopDpr: options.maxDesktopDpr ?? MAX_DESKTOP_DPR,
+      maxRenderPixels: options.maxRenderPixels ?? Infinity,
+      environmentEffects: options.environmentEffects ?? true,
+      waterEffects: options.waterEffects ?? true,
       textureTileSize: options.textureTileSize ?? 32,
       textureSeed: options.textureSeed ?? "nicechunk-materials-v1",
       viewDistance: options.viewDistance ?? DEFAULT_VIEW_DISTANCE,
@@ -250,7 +248,8 @@ export class WebGL2VoxelRenderer {
       this.gl = gl;
       this.gpuTimer = new AsyncGpuTimer(gl, { generation: this.contextGeneration });
       runStage("shader programs", () => {
-        this.program = createProgram(gl, OPAQUE_VERTEX_SHADER, OPAQUE_FRAGMENT_SHADER);
+        this.program = createProgram(gl, OPAQUE_VERTEX_SHADER,
+          this.options.waterEffects ? OPAQUE_FRAGMENT_SHADER : FAST_FLUID_FRAGMENT_SHADER);
         this.solidProgram = createProgram(gl, OPAQUE_VERTEX_SHADER, SOLID_FRAGMENT_SHADER);
         this.avatarProgram = createProgram(gl, AVATAR_VERTEX_SHADER, AVATAR_FRAGMENT_SHADER);
         this.uniforms = collectUniforms(gl, this.program);
@@ -268,21 +267,23 @@ export class WebGL2VoxelRenderer {
         layers: this.textureArray.layerCount,
         tileSize: this.textureArray.tileSize,
       }));
-      this.cloudLayer = new CloudLayer(gl, {
-        seed: this.options.textureSeed,
-        baseHeight: this.options.cloudHeight,
-        radius: this.options.cloudRadius,
-        cellSize: this.options.cloudCellSize,
-      });
-      runStage("cloud geometry", () => this.cloudLayer.init());
-      this.skyGradient = new SkyGradient(gl);
-      runStage("sky gradient", () => this.skyGradient.init());
-      this.sunDisc = new SunDisc(gl);
-      runStage("sun disc", () => this.sunDisc.init());
-      this.projectedShadowLayer = new ProjectedShadowLayer(gl, {
-        maxCasters: this.options.maxDynamicShadowCasters ?? 8,
-      });
-      runStage("projected shadows", () => this.projectedShadowLayer.init());
+      if (this.options.environmentEffects) {
+        this.cloudLayer = new CloudLayer(gl, {
+          seed: this.options.textureSeed,
+          baseHeight: this.options.cloudHeight,
+          radius: this.options.cloudRadius,
+          cellSize: this.options.cloudCellSize,
+        });
+        runStage("cloud geometry", () => this.cloudLayer.init());
+        this.skyGradient = new SkyGradient(gl);
+        runStage("sky gradient", () => this.skyGradient.init());
+        this.sunDisc = new SunDisc(gl);
+        runStage("sun disc", () => this.sunDisc.init());
+        this.projectedShadowLayer = new ProjectedShadowLayer(gl, {
+          maxCasters: this.options.maxDynamicShadowCasters ?? 8,
+        });
+        runStage("projected shadows", () => this.projectedShadowLayer.init());
+      }
       this.voxelOverlay = new VoxelOverlay(gl);
       runStage("voxel overlays", () => this.voxelOverlay.init());
       this.voxelParticles = new VoxelParticleLayer(gl, {
@@ -326,8 +327,7 @@ export class WebGL2VoxelRenderer {
     const cssWidth = Math.max(1, Math.floor(width ?? rect.width ?? 1));
     const cssHeight = Math.max(1, Math.floor(height ?? rect.height ?? 1));
     const pixelRatio = this.clampedDpr(dpr);
-    const targetWidth = Math.max(1, Math.floor(cssWidth * pixelRatio));
-    const targetHeight = Math.max(1, Math.floor(cssHeight * pixelRatio));
+    const { width: targetWidth, height: targetHeight } = renderResolution(cssWidth, cssHeight, pixelRatio, this.options.maxRenderPixels);
     if (this.canvas.width === targetWidth && this.canvas.height === targetHeight) return false;
     this.canvas.width = targetWidth;
     this.canvas.height = targetHeight;
@@ -638,7 +638,9 @@ export class WebGL2VoxelRenderer {
     drawCalls += sunStats.drawCalls;
     triangles += sunStats.triangles;
     bufferMemory += sunStats.bufferMemory;
-    const cloudStats = this.renderClouds(this.cloudViewProjection(cameraState), origin, lighting);
+    const cloudStats = this.cloudLayer
+      ? this.renderClouds(this.cloudViewProjection(cameraState), origin, lighting)
+      : { drawCalls: 0, triangles: 0, bufferMemory: 0 };
     drawCalls += cloudStats.drawCalls;
     triangles += cloudStats.triangles;
     bufferMemory += cloudStats.bufferMemory;
@@ -653,10 +655,12 @@ export class WebGL2VoxelRenderer {
     gl.uniform3f(this.uniforms.uCameraLocalEye,cameraState.localOffsetX||0,cameraState.localOffsetY||0,cameraState.localOffsetZ||0);
     gl.uniform1f(this.uniforms.uCaveAmbientFloor,lighting.caveAmbientFloor??0.12);
     gl.uniform3f(this.uniforms.uLocalLightColor,...(lighting.localLightColor??[1.0,0.72,0.42]));
-    const water=waterPrecisionUniforms(origin);
-    gl.uniform2f(this.uniforms.uWaterOriginPhase,...water.originPhase);
-    gl.uniform2iv(this.uniforms.uWaterCellOrigin,water.cellOrigins);
-    gl.uniform2fv(this.uniforms.uWaterCellPhase,water.cellPhases);
+    if (this.options.waterEffects) {
+      const water = waterPrecisionUniforms(origin);
+      gl.uniform2f(this.uniforms.uWaterOriginPhase, ...water.originPhase);
+      gl.uniform2iv(this.uniforms.uWaterCellOrigin, water.cellOrigins);
+      gl.uniform2fv(this.uniforms.uWaterCellPhase, water.cellPhases);
+    }
     this.textureArray.bind(0);
 
     if(this.solidProgram) {
@@ -682,7 +686,9 @@ export class WebGL2VoxelRenderer {
     drawCalls+=avatarStats.drawCalls;triangles+=avatarStats.triangles;
     if(typeof gl.blendFunc === "function")gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
     gl.enable(gl.BLEND);gl.depthMask(false);
-    for(const visual of [false,true]){const shadowStats=this.renderMeshPass(worldChunks,origin,['shadow'],visual);drawCalls+=shadowStats.drawCalls;triangles+=shadowStats.triangles;}
+    if (this.options.environmentEffects) {
+      for(const visual of [false,true]){const shadowStats=this.renderMeshPass(worldChunks,origin,['shadow'],visual);drawCalls+=shadowStats.drawCalls;triangles+=shadowStats.triangles;}
+    }
     gl.disable(gl.BLEND);gl.depthMask(true);
     const projectedShadowStats=this.renderProjectedShadows(avatars,viewProjection,origin,lighting);
     drawCalls+=projectedShadowStats.drawCalls;triangles+=projectedShadowStats.triangles;
@@ -1252,8 +1258,6 @@ function collectUniforms(gl, program) {
     "uSunColor",
     "uSkyLightColor",
     "uGroundLightColor",
-    "uFogColor",
-    "uFogNearFar",
     "uLightParams",
     "uTime",
     "uOpacity",
@@ -1276,8 +1280,6 @@ function collectAvatarUniforms(gl, program) {
     "uSunColor",
     "uSkyLightColor",
     "uGroundLightColor",
-    "uFogColor",
-    "uFogNearFar",
     "uLightParams",
   ];
   const uniforms = {};

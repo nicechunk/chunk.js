@@ -27,7 +27,6 @@ uniform vec4 uLightParams;
 out vec2 vUv;
 out vec3 vNormal;
 out vec4 vTint;
-out float vFogDepth;
 flat out float vLayer;
 
 vec3 rotateByQuaternion(vec3 value, vec4 rotation) {
@@ -52,7 +51,6 @@ void main() {
   gl_Position = uViewProjection * vec4(worldRelative, 1.0);
   vNormal = normalize(rotateByQuaternion(aNormal, aRotation));
   vTint = aTint;
-  vFogDepth = max(0.0, gl_Position.w);
 }
 `;
 
@@ -65,14 +63,11 @@ uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform vec3 uSkyLightColor;
 uniform vec3 uGroundLightColor;
-uniform vec3 uFogColor;
-uniform vec2 uFogNearFar;
 uniform vec4 uLightParams;
 
 in vec2 vUv;
 in vec3 vNormal;
 in vec4 vTint;
-in float vFogDepth;
 flat in float vLayer;
 
 out vec4 outColor;
@@ -91,8 +86,7 @@ void main() {
   vec3 hemi = mix(uGroundLightColor, uSkyLightColor, hemiUp) * uLightParams.z;
   vec3 direct = uSunColor * (toonSun * uLightParams.y);
   vec3 lit = texel.rgb * vTint.rgb * (ambient + hemi + direct) * uLightParams.w;
-  float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);
-  outColor = vec4(mix(lit, uFogColor, fog * 0.42), alpha * (1.0 - fog * 0.55));
+  outColor = vec4(lit, alpha);
 }
 `;
 
@@ -386,15 +380,11 @@ export class VoxelParticleLayer {
       Number.isFinite(lighting?.hemiStrength) ? lighting.hemiStrength : 0.36,
       Number.isFinite(lighting?.exposure) ? lighting.exposure : 1.0,
     ];
-    const fog = lighting?.fogColor ?? [0.9, 0.97, 1.0];
-    const fogNearFar = lighting?.fogNearFar ?? [96, 340];
     gl.uniform3f(this.uniforms.uSunDirection, sun[0], sun[1], sun[2]);
     gl.uniform3f(this.uniforms.uSunColor, sunColor[0], sunColor[1], sunColor[2]);
     gl.uniform3f(this.uniforms.uSkyLightColor, sky[0], sky[1], sky[2]);
     gl.uniform3f(this.uniforms.uGroundLightColor, ground[0], ground[1], ground[2]);
     gl.uniform4f(this.uniforms.uLightParams, lightParams[0], lightParams[1], lightParams[2], lightParams[3]);
-    gl.uniform3f(this.uniforms.uFogColor, fog[0], fog[1], fog[2]);
-    gl.uniform2f(this.uniforms.uFogNearFar, fogNearFar[0], fogNearFar[1]);
     textureArray?.bind?.(0);
     gl.uniform1i(this.uniforms.uTextureArray, 0);
 
@@ -674,8 +664,6 @@ function collectUniforms(gl, program) {
     "uSkyLightColor",
     "uGroundLightColor",
     "uLightParams",
-    "uFogColor",
-    "uFogNearFar",
   ];
   const uniforms = {};
   for (const name of names) uniforms[name] = gl.getUniformLocation(program, name);

@@ -12,25 +12,20 @@ uniform mat4 uViewProjection;
 
 out vec2 vUv;
 out float vAlpha;
-out float vFogDepth;
 
 void main() {
   gl_Position = uViewProjection * vec4(aPosition, 1.0);
   vUv = aUv;
   vAlpha = aAlpha;
-  vFogDepth = max(0.0, gl_Position.w);
 }
 `;
 
 const SHADOW_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 
-uniform vec3 uFogColor;
-uniform vec2 uFogNearFar;
 
 in vec2 vUv;
 in float vAlpha;
-in float vFogDepth;
 
 out vec4 outColor;
 
@@ -41,9 +36,7 @@ void main() {
   float soft = 1.0 - smoothstep(0.26, 1.0, ellipse);
   float alpha = (core * 0.22 + soft * 0.78) * vAlpha;
   if (alpha < 0.012) discard;
-  float fog = smoothstep(uFogNearFar.x, uFogNearFar.y, vFogDepth);
-  vec3 color = mix(vec3(0.018, 0.025, 0.016), uFogColor * 0.18, fog * 0.34);
-  outColor = vec4(color, alpha * (1.0 - fog * 0.45));
+  outColor = vec4(0.018, 0.025, 0.016, alpha);
 }
 `;
 
@@ -89,10 +82,6 @@ export class ProjectedShadowLayer {
     this.ensureCapacity(vertices.length / SHADOW_VERTEX_STRIDE_FLOATS);
     gl.useProgram(this.program);
     gl.uniformMatrix4fv(this.uniforms.uViewProjection, false, viewProjection);
-    const fog = lighting?.fogColor ?? [0.9, 0.97, 1.0];
-    const fogNearFar = lighting?.fogNearFar ?? [96, 340];
-    gl.uniform3f(this.uniforms.uFogColor, fog[0], fog[1], fog[2]);
-    gl.uniform2f(this.uniforms.uFogNearFar, fogNearFar[0], fogNearFar[1]);
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertices);
@@ -171,7 +160,7 @@ function smoothstep(edge0, edge1, value) {
 }
 
 function collectUniforms(gl, program) {
-  const names = ["uViewProjection", "uFogColor", "uFogNearFar"];
+  const names = ["uViewProjection"];
   const uniforms = {};
   for (const name of names) uniforms[name] = gl.getUniformLocation(program, name);
   return uniforms;
