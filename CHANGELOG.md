@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Avoid repeated camera sweep voxel slab tests using at most 64 KiB of retained
+  visit scratch; preserve conservative near-plane geometry and reentrant queries.
+- Bypass tree crown evaluation for loaded air only when all possible root columns
+  exclude an occluding trunk, retaining edits, overlap order and missing-data fallback.
+
 - Let fresh centimetre-scale forge materials deform below the placement grid using canonical occupied cells, preserving exact geometric volume, material mass, painted faces, and editable draft restoration. Keep those thin shapes at workbench precision in gameplay and item previews.
 
 ### Added

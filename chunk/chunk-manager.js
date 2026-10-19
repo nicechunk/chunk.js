@@ -934,6 +934,20 @@ export class ChunkManager {
     if (this.supplementalCollisionProvider?.hasCollisionAtWorld?.(coord.worldX, coord.worldY, coord.worldZ)) return true;
     const chunk = this.chunks.get(coord.chunkId);
     if (chunk?.baseBlocksReady) {
+      // Hosts may replace the public voxel query. Keep that provider authoritative.
+      if (this.getBlockAtWorld !== ChunkManager.prototype.getBlockAtWorld) {
+        return isCameraOccluderBlock(this.getBlockAtWorld(coord.worldX, coord.worldY, coord.worldZ));
+      }
+      if (chunk.hasDeltaAt(coord.localX, coord.localY, coord.localZ)) {
+        return isCameraOccluderBlock(chunk.getFinalBlock(coord.localX, coord.localY, coord.localZ));
+      }
+      const base = chunk.getBaseBlock(coord.localX, coord.localY, coord.localZ);
+      if (base !== BLOCK_ID.air) return isCameraOccluderBlock(base);
+      // Tree crowns only contain leaves, which cannot occlude the camera. Prove
+      // the absence of a trunk without constructing/hash-testing those crowns.
+      // Missing neighbors and possible trunks retain the full legacy query,
+      // including its overlap order and generated fallback semantics.
+      if (this.loadedTreesCannotOccludeCameraAtWorld(coord.worldX, coord.worldY, coord.worldZ)) return false;
       return isCameraOccluderBlock(this.getBlockAtWorld(coord.worldX, coord.worldY, coord.worldZ));
     }
     if (chunk?.hasDeltaAt(coord.localX, coord.localY, coord.localZ)) {
@@ -944,6 +958,20 @@ export class ChunkManager {
     // still building this chunk. The cached height oracle avoids invoking the
     // full block/resource generator for every short sweep sample.
     return coord.worldY <= terrainSurfaceHeight(this.config, coord.worldX, coord.worldZ);
+  }
+
+  loadedTreesCannotOccludeCameraAtWorld(worldX, worldY, worldZ) {
+    const min = worldToChunk(worldX - 2, worldY, worldZ - 2, this.chunkSize);
+    const max = worldToChunk(worldX + 2, worldY, worldZ + 2, this.chunkSize);
+    for (let z = min.chunkZ; z <= max.chunkZ; z++) for (let x = min.chunkX; x <= max.chunkX; x++) {
+      const chunk = this.chunks.get(chunkId(x, z));
+      if (!chunk?.baseBlocksReady) return false;
+      for (const tree of chunk.treeInstances ?? []) {
+        if (tree.x !== worldX || tree.z !== worldZ) continue;
+        if (treeInstanceTrunkBlockAt(this.config, tree, worldX, worldY, worldZ) !== BLOCK_ID.air) return false;
+      }
+    }
+    return true;
   }
 
   getLoadedTreeBlockAtWorld(worldX, worldY, worldZ) {
