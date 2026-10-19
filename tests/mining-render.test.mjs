@@ -106,9 +106,9 @@ function hasFaceCovering(mesh, expected) {
         && view.getInt8(offset + 9) === expected.normal[1]
         && view.getInt8(offset + 10) === expected.normal[2];
       points.push([
-        view.getInt16(offset, true) / POSITION_PACK_SCALE,
-        view.getInt16(offset + 2, true) / POSITION_PACK_SCALE,
-        view.getInt16(offset + 4, true) / POSITION_PACK_SCALE,
+        view.getInt16(offset, true) / view.getInt16(offset + 6, true),
+        view.getInt16(offset + 2, true) / view.getInt16(offset + 6, true) + (mesh.originY ?? 0),
+        view.getInt16(offset + 4, true) / view.getInt16(offset + 6, true),
       ]);
     }
     if (!matchingNormal) continue;
@@ -499,12 +499,12 @@ async function assertWorkerBuildExposesBoundaryFace(manager, minedDelta) {
     });
     const result = await resultPromise;
     assert.equal(result.type, "chunkBuilt", result.error || "the worker boundary remesh should succeed");
-    assert.ok(hasFaceCovering(result.mesh, {
+    assert.ok((result.sectionResults?.map(section => section.mesh) ?? [result.mesh]).some(mesh => hasFaceCovering(mesh, {
       normal: [-127, 0, 0],
       x: [0, 0],
       y: [minedDelta.worldY, minedDelta.worldY + 1],
       z: [minedDelta.worldZ, minedDelta.worldZ + 1],
-    }), "the worker remesh must account for mined boundary deltas when exposing neighbor faces");
+    })), "the worker remesh must account for mined boundary deltas when exposing neighbor faces");
   } finally {
     await worker.terminate();
   }
@@ -536,6 +536,7 @@ function assertRegionBufferRevisionHandoff() {
   const events = [];
   let handleSerial = 0;
   renderer.initialized = true;
+  renderer.gl = {};
   renderer.bufferManager = {
     createChunkBuffers(mesh) {
       const handle = {
@@ -599,6 +600,7 @@ function assertBuildingUploadsDoNotInvalidateTerrainRegions() {
   const disposed = [];
   let handleSerial = 0;
   renderer.initialized = true;
+  renderer.gl = {};
   renderer.bufferManager = {
     createChunkBuffers(mesh) {
       return {
@@ -699,11 +701,14 @@ function renderOpaqueDrawCount(renderer, chunk) {
     uniformMatrix4fv() {},
     uniform1f() {},
     uniform2f() {},
+    uniform2iv() {},
+    uniform2fv() {},
     uniform3f() {},
     uniform4f() {},
     enable() {},
     disable() {},
     depthMask() {},
+    blendFunc() {},
     bindVertexArray() {},
     drawElements() { drawCalls += 1; },
   };

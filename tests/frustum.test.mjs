@@ -43,9 +43,9 @@ test("building frustum culling rejects chunks fully behind the camera", () => {
   assert.equal(chunkIntersectsCameraFrustum(buildingChunk(0, -3), camera), false);
 });
 
-test("building frustum culling keeps sphere intersections at camera edges", () => {
+test("building frustum culling keeps AABB intersections at camera edges", () => {
   const camera = forwardCamera({ aspect: 1 });
-  assert.equal(chunkIntersectsCameraFrustum(buildingChunk(2, 2), camera), true);
+  assert.equal(chunkIntersectsCameraFrustum(buildingChunk(1, 2), camera), true);
   assert.equal(chunkIntersectsCameraFrustum(buildingChunk(5, 2), camera), false);
 });
 
@@ -98,4 +98,65 @@ test("precomputed building bounds preserve frustum decisions", () => {
     },
   };
   assert.equal(chunkIntersectsCameraFrustum(prepared, camera), chunkIntersectsCameraFrustum(source, camera));
+});
+
+test("high-altitude downward view keeps the audit screen-space counterexample", () => {
+  const camera = forwardCamera({ worldX: 0, worldY: 226, worldZ: 0,
+    yaw: 0, pitch: 0.92, fov: 58, far: 420 });
+  const chunk = { ...buildingChunk(7, 1), minY: -32, height: 353 };
+  assert.equal(chunkIntersectsCameraFrustum(chunk, camera), true);
+});
+
+test("committed visual bounds outside the nominal chunk remain visible", async () => {
+  const { chunkWorldBounds } = await import("../renderer/frustum.js");
+  const mesh = { bounds: { minX: -2, maxX: 2, minY: 0, maxY: 1, minZ: 0, maxZ: 1 } };
+  const visual = { bounds: { minX: 0, maxX: 20, minY: 0, maxY: 40, minZ: -2, maxZ: 3 } };
+  const chunk = { ...buildingChunk(-1, -2), mesh, visualMesh: visual };
+  assert.deepEqual(chunkWorldBounds(chunk), { minX: -18, maxX: 4, minY: 0, maxY: 40, minZ: -34, maxZ: -29 });
+});
+
+test("projection AABB culling is conservative for visible points across pitch, aspect and negative coordinates", async () => {
+  const { aabbIntersectsCameraFrustum } = await import("../renderer/frustum.js");
+  const { cameraViewProjection, cameraOrigin } = await import("../renderer/camera.js");
+  for (const aspect of [9/19, 1, 16/9]) for (const pitch of [-1.5, -0.92, 0, 0.92, 1.5]) {
+    const camera = forwardCamera({ worldX: -145, worldY: 226, worldZ: -86, aspect, pitch, yaw: -1.7, far: 500 });
+    const m = cameraViewProjection(camera), origin = cameraOrigin(camera);
+    for (let x = -270; x <= 10; x += 17) for (let y = -32; y <= 320; y += 31) for (let z = -200; z <= 30; z += 19) {
+      const p = [x-origin.worldX,y-origin.worldY,z-origin.worldZ,1];
+      const clip = [0,1,2,3].map((row) => m[row]*p[0]+m[4+row]*p[1]+m[8+row]*p[2]+m[12+row]);
+      if (clip[3] <= 0 || clip.slice(0,3).some((value) => Math.abs(value) > clip[3])) continue;
+      assert.equal(aabbIntersectsCameraFrustum({ minX:x-1,maxX:x+1,minY:y-1,maxY:y+1,minZ:z-1,maxZ:z+1 },camera),true);
+    }
+  }
+});
+
+
+test("manager prefilter cannot discard the high-altitude screen-space counterexample", async () => {
+  const { ChunkManager } = await import("../chunk/chunk-manager.js");
+  const manager = new ChunkManager({ viewDistance: 7, useWorkers: false });
+  const chunk = { ...buildingChunk(7, 1), minY: -32, height: 353,
+    mesh: { bounds: { minX:0,maxX:16,minY:85,maxY:87,minZ:0,maxZ:16 } } };
+  manager.chunks.set(chunk.id, chunk);
+  const camera = forwardCamera({ worldX:0, worldY:226, worldZ:0, yaw:0, pitch:0.92, fov:58, far:420 });
+  assert.ok(manager.getVisibleChunks(camera).includes(chunk));
+  manager.dispose?.();
+});
+
+
+test("section visibility never materializes a lazy whole-chunk summary", async () => {
+  const { chunkWorldBounds } = await import("../renderer/frustum.js");
+  const summary = { sectionSummary: true, get vertices() { throw Error("unexpected full-chunk packing"); } };
+  const bounds = {minX:0,maxX:16,minY:0,maxY:16,minZ:0,maxZ:16};
+  const chunk = { ...buildingChunk(0,0), mesh: summary, visualMesh: summary,
+    renderSections: new Map([[0,{mesh:{bounds,originY:-32}}]]) };
+  assert.deepEqual(chunkWorldBounds(chunk),{minX:0,maxX:16,minY:-32,maxY:-16,minZ:0,maxZ:16});
+});
+
+
+test("legacy Float32 mesh bounds use its declared interleaved layout", async () => {
+  const {chunkWorldBounds}=await import("../renderer/frustum.js");
+  const vertices=new Float32Array(20);
+  vertices.set([-2,-17,3],0);vertices.set([18,9,20],10);
+  const chunk={...buildingChunk(-1,-2),mesh:{vertices,vertexCount:2,vertexStrideBytes:40,originY:32}};
+  assert.deepEqual(chunkWorldBounds(chunk),{minX:-18,maxX:2,minY:15,maxY:41,minZ:-29,maxZ:-12});
 });

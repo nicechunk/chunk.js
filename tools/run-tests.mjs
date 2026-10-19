@@ -55,7 +55,8 @@ if (unavailableHostFiles.length) {
   process.exit(1);
 }
 
-const result = spawnSync(process.execPath, ["--test", ...selected.map((test) => test.file)], {
+const concurrency=Math.max(1,Math.min(16,Number(process.env.NICECHUNK_TEST_CONCURRENCY)||4));
+const result = spawnSync(process.execPath, ["--test", `--test-concurrency=${concurrency}`, ...selected.map((test) => test.file)], {
   cwd: root,
   stdio: "inherit",
 });

@@ -39,6 +39,9 @@ The current request contains these conceptual fields:
 | `finalDeltas` | packed effective deltas for the target chunk |
 | `neighborDeltas` | packed boundary deltas required for culling |
 | `treeDeltas` | nearby edits that can affect tree volume |
+| `sectionIndex`, `sectionRevision` | bounded render section and its captured dependency stamp |
+| `lightingDeltas`, `columnTopHalo` | separate finite local light and sun-column dependencies |
+| `baseProfile`, `treeInstances` | captured immutable base input for a section remesh |
 
 Packed delta arrays use `Int32Array`. X/Z must already fit signed 32-bit, Y signed 16-bit, and block IDs unsigned 16-bit before packing; the sender rejects an out-of-range value rather than allowing typed-array wrapping. One payload contains at most `262144` entries. A known larger collection is rejected before typed-array allocation, while an unknown-size iterable is consumed only through that bound. The implementation may transfer the backing buffers.
 
@@ -52,7 +55,17 @@ Each task starts in the chunk phase, where only `chunkBuilt` or `chunkBuildError
 
 Unloading a chunk marks its in-flight task canceled but retains Worker ownership until a terminal response arrives. Its payload is then discarded and the Worker can be released normally. Recently settled task IDs are remembered per Worker so a late duplicate from an old/canceled task is ignored without releasing or corrupting a newer task assigned to the same Worker. An unrecognized task ID is not treated as a harmless late response.
 
-The manager must ignore a result that no longer matches the current chunk version. A Worker error is diagnostic data, not permission to accept incomplete authoritative state. Error responses quarantine the sender; chunk-phase errors release the exact task and transition its chunk out of `building`, while visual-phase errors preserve an already accepted opaque mesh.
+The manager must ignore a result that no longer matches the current dependency
+stamp. Whole-chunk tasks use the chunk revision. Section tasks echo that revision
+for request binding, but validate current section instance/data/halo/light/material
+revisions independently; an unrelated section edit does not stale them. Production
+base responses contain `sectionResults`, and a `mode: "section"` response contains
+one section result. A visual exception retains the previous visual channel and
+starts its bounded retry instead of committing a successful empty channel. A
+Worker error is diagnostic data, not permission to accept incomplete authoritative
+state. Error responses quarantine the sender; chunk-phase errors release the exact
+task and transition it out of `building`. See [render-sections.md](render-sections.md)
+for coordinate, input, commit and near-field compensation details.
 
 ## Buffer ownership
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { MATERIAL_ID } from "../world/block-registry.js";
 import {
   analyzeNcm3Envelope,
   createBlueprint,
@@ -73,11 +74,11 @@ const unsafe = createBlueprint({ x: 8, y: 8, z: 8 });
 unsafe.repeat(1, 0, 0, 0, 1, 1, 1, 999_999, 1, 0, 0);
 assert.throws(() => encodeNcm3(unsafe), /safety bounds/);
 
-for (const material of [55, 77, 96, 101]) {
+for (const material of [55, 77, 96, 101, MATERIAL_ID.twig]) {
   const materialBlueprint = createBlueprint({ x: 1, y: 1, z: 1 }).box(material, 0, 0, 0);
   assert.equal(decodeNcm3(encodeNcm3(materialBlueprint)).commands[0].material, material);
 }
-for (const material of [53, 54, 78]) {
+for (const material of [53, 54, Math.max(...Object.values(MATERIAL_ID)) + 1, 65_535]) {
   const internalMaterial = createBlueprint({ x: 1, y: 1, z: 1 }).box(material, 0, 0, 0);
   assert.throws(() => encodeNcm3(internalMaterial), /Unknown canonical material ID/);
 }

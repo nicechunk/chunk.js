@@ -73,6 +73,6 @@ export function cameraViewProjection(cameraState) {
   const forward = cameraForward(cameraState);
   const target = cameraTargetFloatPosition(cameraState) ?? [eye[0] + forward[0], eye[1] + forward[1], eye[2] + forward[2]];
   const projection = mat4Perspective((cameraState.fov * Math.PI) / 180, cameraState.aspect, cameraState.near, cameraState.far);
-  const view = mat4LookAt(eye, target, [0, 1, 0]);
+  const view = mat4LookAt(eye, target, Math.abs(forward[1]) > 0.999 ? [0, 0, 1] : [0, 1, 0]);
   return mat4Multiply(projection, view);
 }
