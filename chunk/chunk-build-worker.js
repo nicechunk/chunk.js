@@ -285,5 +285,9 @@ function unpackPackedDeltas(packed) {
 
 function capturedColumnTop(halo,x,z) {
   if(!halo)return null;const lx=x-halo.originX,lz=z-halo.originZ;
+  if(halo.columns) {
+    if(!halo.columnMap){halo.columnMap=new Map();for(let i=0;i<halo.columns.length;i+=3)halo.columnMap.set(`${halo.columns[i]}:${halo.columns[i+1]}`,halo.columns[i+2]);}
+    return halo.columnMap.get(`${x}:${z}`)??null;
+  }
   return lx>=0&&lz>=0&&lx<halo.width&&lz<halo.width?halo.tops[lx+lz*halo.width]:null;
 }

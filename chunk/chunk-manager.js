@@ -419,6 +419,31 @@ export class ChunkManager {
     return {originX,originZ,width,tops};
   }
 
+  captureWorkerColumnTopHalo(chunk) {
+    // The Worker reconstructs unchanged columns from the same captured seed and
+    // generator configuration. Only edited column tops need a main-thread read.
+    // Dense/custom base blocks retain the complete snapshot path.
+    const margin=15,width=this.chunkSize+2*margin;
+    const originX=chunk.chunkX*this.chunkSize-margin,originZ=chunk.chunkZ*this.chunkSize-margin;
+    const columns=[];
+    const radius=Math.ceil(margin/this.chunkSize);
+    for(let dz=-radius;dz<=radius;dz++)for(let dx=-radius;dx<=radius;dx++) {
+      const neighbor=this.chunks.get(chunkId(chunk.chunkX+dx,chunk.chunkZ+dz));
+      if(!neighbor)continue;
+      if(neighbor.baseBlocks)return this.captureColumnTopHalo(chunk);
+      if(!hasDeltas(neighbor))continue;
+      ensureRenderSections(neighbor);
+      for(const [column,deltas] of neighbor.renderDeltaColumns) {
+        if(!deltas.size)continue;
+        const x=neighbor.chunkX*this.chunkSize+column%this.chunkSize;
+        const z=neighbor.chunkZ*this.chunkSize+Math.floor(column/this.chunkSize);
+        if(x<originX||z<originZ||x>=originX+width||z>=originZ+width)continue;
+        columns.push(x,z,this.getOpaqueColumnTopAtWorld(x,z));
+      }
+    }
+    return {originX,originZ,width,tops:new Int32Array(),columns:Int32Array.from(columns)};
+  }
+
   *prepareSnapshotNeighborhood(source,changes) {
     const plans=new Map(),reach=15,radius=Math.ceil(reach/this.chunkSize);
     for(const delta of changes) {
@@ -480,14 +505,14 @@ export class ChunkManager {
     const neighborDeltas=this.neighborDeltasForWorker(chunk.chunkX,chunk.chunkZ,section.sectionIndex);
     const treeDeltas=this.treeNeighborDeltasForWorker(chunk.chunkX,chunk.chunkZ,section.sectionIndex);
     const lightingDeltas=this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,8,section.sectionIndex);
-    const columnTopHalo=this.captureColumnTopHalo(chunk);
+    const columnTopHalo=this.captureWorkerColumnTopHalo(chunk);
     try {
       worker.postMessage({type:"buildChunk",taskId,worldSeed:new Uint8Array(managerWorldSeed(this)),chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,
         generationVersion:this.generationVersion,resourceRuleVersion:this.resourceRuleVersion,materialVersion:this.materialVersion,
         options:this.workerOptions(),mode:"section",taskVersion:task.version,sectionIndex:section.sectionIndex,sectionRevision:revision,
         finalDeltas,neighborDeltas,treeDeltas,lightingDeltas,columnTopHalo,baseProfile:chunk.baseProfile,treeInstances:chunk.treeInstances,
         pickedSurfaceColumns:[...(chunk.pickedSurfaceColumns??[])],
-        visualOnly:!section.dirty},[finalDeltas.buffer,neighborDeltas.buffer,treeDeltas.buffer,lightingDeltas.buffer,columnTopHalo.tops.buffer]);
+        visualOnly:!section.dirty},[finalDeltas.buffer,neighborDeltas.buffer,treeDeltas.buffer,lightingDeltas.buffer,columnTopHalo.tops.buffer,...(columnTopHalo.columns?[columnTopHalo.columns.buffer]:[])]);
     } catch(error) {this.handleWorkerError(worker,error,{allowRestart:false});}
     return true;
   }
@@ -1291,13 +1316,14 @@ export class ChunkManager {
         neighborDeltas,
         treeDeltas,
         lightingDeltas: this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,8),
-        columnTopHalo: this.captureColumnTopHalo(chunk),
+        columnTopHalo: this.captureWorkerColumnTopHalo(chunk),
       };
       const transfer = [];
       if (finalDeltas.byteLength) transfer.push(finalDeltas.buffer);
       if (neighborDeltas.byteLength) transfer.push(neighborDeltas.buffer);
       if (treeDeltas.byteLength) transfer.push(treeDeltas.buffer);
       if (message.columnTopHalo) transfer.push(message.columnTopHalo.tops.buffer);
+      if (message.columnTopHalo?.columns) transfer.push(message.columnTopHalo.columns.buffer);
       if (message.lightingDeltas.byteLength) transfer.push(message.lightingDeltas.buffer);
       try {
         worker.postMessage(message, transfer);

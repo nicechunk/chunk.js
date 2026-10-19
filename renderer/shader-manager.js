@@ -138,7 +138,11 @@ vec3 animeGrade(vec3 color) {
 
 void main() {
   float layer = floor(vLayer + 0.5);
+#ifdef NICECHUNK_SOLID_PASS
+  bool isWaterSurface = false;
+#else
   bool isWaterSurface = layer >= 17.0 && layer <= 19.0;
+#endif
   bool isShadowLayer = layer == 54.0;
   vec2 tileUv = fract(vUv);
   vec4 texel = textureGrad(uTextureArray, vec3(tileUv, layer), dFdx(vUv), dFdy(vUv));
@@ -172,6 +176,7 @@ void main() {
     float sideShade = sideFace * (0.10 + (1.0 - toonSun) * 0.42);
     color *= mix(1.0, 0.925, sideShade);
   }
+#ifndef NICECHUNK_SOLID_PASS
   if (layer >= 17.0 && layer <= 20.0) {
     vec2 p = vViewPosition.xz;
     vec2 d1 = normalize(vec2(0.68, 1.0));
@@ -262,6 +267,7 @@ void main() {
       waterGlareHalo = 0.0;
     }
   }
+#endif
   color *= uLightParams.w;
   color = animeGrade(color);
   if (isWaterSurface && !isWaterUnderside) {
@@ -293,6 +299,13 @@ void main() {
   outColor = vec4(color, texel.a * uOpacity);
 }
 `;
+
+// Material partitions guarantee that the opaque/cutout/shadow passes contain
+// no fluid. Compile that contract into their shader instead of carrying the
+// complete water noise program through every terrain fragment.
+export const SOLID_FRAGMENT_SHADER = OPAQUE_FRAGMENT_SHADER.replace(
+  '#version 300 es', '#version 300 es\n#define NICECHUNK_SOLID_PASS 1',
+);
 
 export function createProgram(gl, vertexSource, fragmentSource) {
   let vertex = null;

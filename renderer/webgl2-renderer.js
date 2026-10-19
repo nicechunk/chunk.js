@@ -9,7 +9,7 @@ import { waterPrecisionUniforms } from "./water-precision.js";
 import { RenderStageStats } from "../debug/stats.js";
 import { CloudLayer } from "./cloud-layer.js";
 import { applyLightingUniforms, createUnderwaterLighting, createWorldLighting } from "./lighting.js";
-import { createProgram, OPAQUE_FRAGMENT_SHADER, OPAQUE_VERTEX_SHADER } from "./shader-manager.js";
+import { createProgram, OPAQUE_FRAGMENT_SHADER, SOLID_FRAGMENT_SHADER, OPAQUE_VERTEX_SHADER } from "./shader-manager.js";
 import { ProjectedShadowLayer } from "./projected-shadow-layer.js";
 import { SkyGradient } from "./sky-gradient.js";
 import { SunDisc } from "./sun-disc.js";
@@ -140,6 +140,8 @@ export class WebGL2VoxelRenderer {
     this.onInitStage = typeof options.onInitStage === "function" ? options.onInitStage : null;
     this.gl = null;
     this.program = null;
+    this.solidProgram = null;
+    this.solidUniforms = null;
     this.avatarProgram = null;
     this.uniforms = null;
     this.avatarUniforms = null;
@@ -249,8 +251,10 @@ export class WebGL2VoxelRenderer {
       this.gpuTimer = new AsyncGpuTimer(gl, { generation: this.contextGeneration });
       runStage("shader programs", () => {
         this.program = createProgram(gl, OPAQUE_VERTEX_SHADER, OPAQUE_FRAGMENT_SHADER);
+        this.solidProgram = createProgram(gl, OPAQUE_VERTEX_SHADER, SOLID_FRAGMENT_SHADER);
         this.avatarProgram = createProgram(gl, AVATAR_VERTEX_SHADER, AVATAR_FRAGMENT_SHADER);
         this.uniforms = collectUniforms(gl, this.program);
+        this.solidUniforms = collectUniforms(gl, this.solidProgram);
         this.avatarUniforms = collectAvatarUniforms(gl, this.avatarProgram);
       });
       this.bufferManager = new BufferManager(gl);
@@ -655,7 +659,20 @@ export class WebGL2VoxelRenderer {
     gl.uniform2fv(this.uniforms.uWaterCellPhase,water.cellPhases);
     this.textureArray.bind(0);
 
-    const renderedChunks = renderChunks.length;
+    if(this.solidProgram) {
+      gl.useProgram(this.solidProgram);
+      const uniforms=this.solidUniforms;
+      gl.uniformMatrix4fv(uniforms.uViewProjection,false,viewProjection);
+      gl.uniform1f(uniforms.uTileScale,1);gl.uniform1f(uniforms.uOpacity,1);
+      applyLightingUniforms(gl,uniforms,lighting);
+      gl.uniform1f(uniforms.uTime,frameTime*0.001);
+      gl.uniform1f(uniforms.uUnderwater,this.underwaterBlend);
+      gl.uniform3f(uniforms.uCameraLocalEye,cameraState.localOffsetX||0,cameraState.localOffsetY||0,cameraState.localOffsetZ||0);
+      gl.uniform1f(uniforms.uCaveAmbientFloor,lighting.caveAmbientFloor??0.12);
+      gl.uniform3f(uniforms.uLocalLightColor,...(lighting.localLightColor??[1.0,0.72,0.42]));
+    }
+    // CPU visibility is not proof that any terrain has reached the GPU.
+    const renderedChunks = worldChunks.filter(chunk=>[this.entryForChunk(chunk),this.entryForChunk(chunk,true)].some(entry=>entry?.handle?.indexCount>0)).length;
     gl.enable(gl.DEPTH_TEST); gl.depthMask(true); gl.enable(gl.CULL_FACE); gl.disable(gl.BLEND);
     const terrainStats=this.renderMeshPass(worldChunks,origin,['opaque','cutout']);
     drawCalls+=terrainStats.drawCalls;triangles+=terrainStats.triangles;
@@ -682,6 +699,7 @@ export class WebGL2VoxelRenderer {
       backend: "webgl2",
       drawCalls,
       visibleChunks: renderedChunks,
+      terrainDrawCalls: terrainStats.drawCalls+visualStats.drawCalls,
       triangles,
       // Count all resident resources, including screen-excluded buffers and shared avatars once.
       bufferMemory: this.resourceLedger.snapshot().bufferBytes,
@@ -761,12 +779,13 @@ export class WebGL2VoxelRenderer {
 
   renderMeshPass(chunks, origin, passes, visual=false) {
     const gl=this.gl;if(!gl || gl.isContextLost?.() || !this.program || this.contextLost || this.disposed)return {drawCalls:0,triangles:0,bufferMemory:0};
-    gl.useProgram(this.program);gl.uniform1f(this.uniforms.uOpacity,1);this.textureArray?.bind(0);
+    const uniforms=this.solidUniforms??this.uniforms;
+    gl.useProgram(this.solidProgram??this.program);gl.uniform1f(uniforms.uOpacity,1);this.textureArray?.bind(0);
     let drawCalls=0,triangles=0;
     for(const chunk of chunks){const entry=this.entryForChunk(chunk,visual);if(!entry?.handle)continue;
-      const handle=entry.handle;gl.uniform3f(this.uniforms.uChunkOrigin,chunk.chunkX*chunk.chunkSize-origin.worldX,entry.originY-origin.worldY,chunk.chunkZ*chunk.chunkSize-origin.worldZ);gl.bindVertexArray(handle.vao);
+      const handle=entry.handle;gl.uniform3f(uniforms.uChunkOrigin,chunk.chunkX*chunk.chunkSize-origin.worldX,entry.originY-origin.worldY,chunk.chunkZ*chunk.chunkSize-origin.worldZ);gl.bindVertexArray(handle.vao);
       for(const pass of passes){const range=handle.drawRanges?.[pass] ?? (pass==='opaque'?{offset:0,count:handle.indexCount}:null);if(!range?.count)continue;
-        if(this.uniforms.uSurfacePass)gl.uniform1f(this.uniforms.uSurfacePass,pass==='cutout'?1:0);
+        if(uniforms.uSurfacePass)gl.uniform1f(uniforms.uSurfacePass,pass==='cutout'?1:0);
         gl.drawElements(gl.TRIANGLES,range.count,handle.indexType,range.offset*(handle.indexBytes??2));drawCalls++;triangles+=range.count/3;}
     }gl.bindVertexArray(null);return {drawCalls,triangles,bufferMemory:0};
   }
@@ -1077,11 +1096,14 @@ export class WebGL2VoxelRenderer {
     this.voxelParticles = null;
     safely(() => this.textureArray?.dispose());
     if (this.program && this.gl) safely(() => this.gl.deleteProgram(this.program));
+    if (this.solidProgram && this.gl) safely(() => this.gl.deleteProgram(this.solidProgram));
     if (this.avatarProgram && this.gl) safely(() => this.gl.deleteProgram(this.avatarProgram));
     safely(() => this.gpuTimer?.dispose({lost:this.contextLost})); this.gpuTimer=null;
     this.resourceLedger.reset(this.contextGeneration);
     this.gl = null;
     this.program = null;
+    this.solidProgram = null;
+    this.solidUniforms = null;
     this.avatarProgram = null;
     this.uniforms = null;
     this.avatarUniforms = null;
