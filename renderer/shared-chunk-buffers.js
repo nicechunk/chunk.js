@@ -3,6 +3,8 @@ import { CHUNK_VERTEX_STRIDE_BYTES } from "../chunk/chunk-mesher.js";
 const BASE_VERTICES = 32768;
 const BASE_INDICES = 65536;
 const MAX_PAGE_BYTES = 2 * 1024 * 1024;
+// WebGL2 reserves 0xffff for fixed primitive restart, including TRIANGLES.
+const MAX_PAGE_VERTICES = 65535;
 
 // Immutable mesh commits own disjoint slices. Replacement uploads never write
 // over the last published slice. Free slices may be reused after release: WebGL
@@ -21,7 +23,7 @@ export class SharedChunkBuffers {
   begin(mesh, placement) {
     this.reclaim();
     const vertices = mesh.vertices.byteLength / CHUNK_VERTEX_STRIDE_BYTES;
-    if (this.disabled || !placement || !vertices || !mesh.indices.length || !Number.isInteger(vertices)
+    if (this.disabled || !placement || !vertices || vertices > MAX_PAGE_VERTICES || !mesh.indices.length || !Number.isInteger(vertices)
       || (mesh.vertexStrideBytes && mesh.vertexStrideBytes !== CHUNK_VERTEX_STRIDE_BYTES)
       || ![placement.x, placement.y, placement.z].every(Number.isSafeInteger)) return null;
     const tags = surfaceTags(mesh, vertices);
@@ -33,10 +35,10 @@ export class SharedChunkBuffers {
       if (v >= 0 && i >= 0) { page = candidate; vertexBlock = v; indexBlock = i; break; }
     }
     if (!page) {
-      const vertexCapacity = Math.max(BASE_VERTICES, powerOfTwo(vertices));
+      const vertexCapacity = Math.min(MAX_PAGE_VERTICES, Math.max(BASE_VERTICES, powerOfTwo(vertices)));
       const indexCapacity = Math.max(BASE_INDICES, powerOfTwo(mesh.indices.length));
       const bytes = vertexCapacity * (CHUNK_VERTEX_STRIDE_BYTES + 8) + indexCapacity * 2;
-      if (vertexCapacity > 65536 || bytes > MAX_PAGE_BYTES) return null;
+      if (bytes > MAX_PAGE_BYTES) return null;
       // Empty cached pages must not strand the hard allocation budget.
       if (this.bytes + bytes > this.maxBytes) for (const candidate of [...this.pages]) {
         if (!candidate.live) this.deletePage(candidate);

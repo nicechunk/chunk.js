@@ -138,12 +138,12 @@ test('invalid blend indices cannot wrap into a valid 16-bit shared vertex addres
   manager.disposeChunkBuffers(old);manager.dispose();assert.equal(d.buffers.size,0);
 });
 
-test('a 65536-vertex page exactly represents the highest 16-bit vertex index',()=>{
+test('shared 16-bit pages stop below the WebGL2 fixed primitive restart index',()=>{
   const d=device(),manager=new BufferManager(d.gl,{shared:true}),placement={x:0,y:0,z:0};
-  const first=manager.createChunkBuffers(mesh([3],65532),placement),tail=manager.createChunkBuffers(mesh([3]),placement);
-  assert.equal(first.vao,tail.vao);assert.equal(tail.vertexStart,65532);assert.equal(tail.indexBytes,2);
+  const first=manager.createChunkBuffers(mesh([3],65531),placement),tail=manager.createChunkBuffers(mesh([3]),placement);
+  assert.equal(first.vao,tail.vao);assert.equal(tail.vertexStart,65531);assert.equal(tail.indexBytes,2);
   const indices=new Uint16Array(d.buffers.get(tail.ibo).buffer,tail.indexStart*2,tail.indexCount);
-  assert.equal(Math.max(...indices),65535);
+  assert.equal(Math.max(...indices),65534);
   assert.deepEqual(readVertices(d,tail,tail.drawRanges.opaque,[0,0,0]),[[0,0,0],[0,1,0],[1,0,0],[1,0,0],[0,1,0],[1,1,0]]);
   manager.disposeChunkBuffers(first);manager.disposeChunkBuffers(tail);manager.dispose();assert.equal(d.buffers.size,0);
 });
