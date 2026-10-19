@@ -101,6 +101,7 @@ const BLOCK_COLORS = Object.freeze({
   [BLOCK_ID.leaves]: [67, 130, 68],
   [BLOCK_ID.pineTrunk]: [103, 75, 48],
   [BLOCK_ID.pineLeaves]: [58, 107, 77],
+  [BLOCK_ID.twig]: [149,100,62],
   [BLOCK_ID.deadWood]: [85, 66, 44],
   [BLOCK_ID.cactus]: [55, 155, 91],
   [BLOCK_ID.coal]: [31, 30, 34],

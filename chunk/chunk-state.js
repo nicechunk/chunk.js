@@ -65,6 +65,7 @@ export class ChunkState {
       set: (value) => setChunkStateWorldSeed(this, value),
     });
     this.surfaceDecorationRules = surfaceDecorationRules;
+    this.pickedSurfaceColumns = [];
     this.version = 0;
     // World edits can advance while the previous mesh is still on the GPU.
     // These revisions only advance when a replacement mesh has finished.

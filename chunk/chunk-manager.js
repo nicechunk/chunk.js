@@ -1054,6 +1054,7 @@ export class ChunkManager {
         mode: task.mode || "base",
         taskVersion: task.version,
         finalDeltas,
+        pickedSurfaceColumns: chunk.pickedSurfaceColumns,
         neighborDeltas,
         treeDeltas,
       };
