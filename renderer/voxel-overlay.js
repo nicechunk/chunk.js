@@ -1,4 +1,5 @@
 import { createProgram } from "./shader-manager.js";
+import { createSurfaceDecorationPreviewMesh, POSITION_PACK_SCALE } from "../chunk/chunk-mesher.js";
 
 const OVERLAY_VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -61,6 +62,7 @@ const FOUNDATION_MEASURE_OFFSET = 0.42;
 const FOUNDATION_MEASURE_TICK = 0.16;
 const FOUNDATION_MAX_TERRAIN_CELLS = 4_096;
 const FOUNDATION_DYNAMIC_CACHE_FRAMES = 300;
+const PICKUP_GEOMETRY_CACHE_LIMIT = 64;
 
 export class VoxelOverlay {
   constructor(gl) {
@@ -76,6 +78,8 @@ export class VoxelOverlay {
     this.sphereLineIbo = null;
     this.foundationGeometry = new Map();
     this.foundationByteLength = 0;
+    this.pickupGeometry = new Map();
+    this.pickupByteLength = 0;
     this.renderFrame = 0;
     this.byteLength = 0;
   }
@@ -127,12 +131,12 @@ export class VoxelOverlay {
   render({ viewProjection, origin, overlays = [] } = {}) {
     const gl = this.gl;
     if (!gl || !this.program) {
-      return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength + this.foundationByteLength };
+      return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength + this.foundationByteLength + this.pickupByteLength };
     }
     this.renderFrame += 1;
     if (!overlays?.length) {
       this.pruneFoundationGeometry();
-      return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength + this.foundationByteLength };
+      return { drawCalls: 0, triangles: 0, bufferMemory: this.byteLength + this.foundationByteLength + this.pickupByteLength };
     }
     gl.useProgram(this.program);
     gl.uniformMatrix4fv(this.uniforms.uViewProjection, false, viewProjection);
@@ -144,6 +148,23 @@ export class VoxelOverlay {
     let drawCalls = 0;
     let triangles = 0;
     for (const overlay of overlays) {
+      if (overlay?.shape === "surface-decoration") {
+        const color = overlay.fillColor;
+        if (!Array.isArray(color) || color.length !== 4 || !color.every(Number.isFinite) || color[3] <= 0.001
+          || ![overlay.worldX,overlay.worldY,overlay.worldZ].every(Number.isFinite)) continue;
+        const geometry = this.getPickupGeometry(overlay.decoration);
+        if (!geometry) continue;
+        gl.bindVertexArray(geometry.vao);
+        gl.uniform3f(this.uniforms.uBoxOrigin, overlay.worldX-origin.worldX, overlay.worldY-origin.worldY, overlay.worldZ-origin.worldZ);
+        gl.uniform3f(this.uniforms.uBoxSize, 1, 1, 1);
+        gl.uniform4fv(this.uniforms.uColor, color);
+        gl.enable(gl.POLYGON_OFFSET_FILL);
+        gl.polygonOffset(-1, -1);
+        gl.drawElements(gl.TRIANGLES, geometry.count, gl.UNSIGNED_SHORT, 0);
+        gl.disable(gl.POLYGON_OFFSET_FILL);
+        drawCalls++;triangles+=geometry.count/3;
+        continue;
+      }
       if (overlay?.shape === "foundation") {
         const foundation = normalizeFoundationOverlay(overlay);
         if (!foundation) continue;
@@ -188,7 +209,42 @@ export class VoxelOverlay {
     gl.depthMask(true);
     gl.disable(gl.BLEND);
     gl.enable(gl.CULL_FACE);
-    return { drawCalls, triangles, bufferMemory: this.byteLength + this.foundationByteLength };
+    return { drawCalls, triangles, bufferMemory: this.byteLength + this.foundationByteLength + this.pickupByteLength };
+  }
+
+  getPickupGeometry(decoration) {
+    // Only verified pebble descriptors reach this optional path. Reuse the
+    // exact world mesher and its packing grid, never approximate with a cube.
+    if (!Number.isInteger(decoration?.decorationId) || decoration.decorationId < 100 || decoration.decorationId > 107
+      || !Number.isInteger(decoration.variantHash)) return null;
+    const key=[decoration.decorationId,decoration.variantHash,decoration.surfaceBlockId,decoration.variant,decoration.flags].join(':');
+    const cached=this.pickupGeometry.get(key);
+    if(cached){this.pickupGeometry.delete(key);this.pickupGeometry.set(key,cached);return cached;}
+    const mesh=createSurfaceDecorationPreviewMesh(decoration);
+    if (!mesh.indices.length) return null;
+    const positions=new Float32Array(mesh.vertices.length*3);
+    for(let i=0;i<mesh.vertices.length;i++)for(let axis=0;axis<3;axis++)positions[i*3+axis]=Math.round(mesh.vertices[i].p[axis]*POSITION_PACK_SCALE)/POSITION_PACK_SCALE;
+    const indices=new Uint16Array(mesh.indices),gl=this.gl;
+    let vao=null,vbo=null,ibo=null;
+    try {
+      vao=gl.createVertexArray();vbo=gl.createBuffer();ibo=gl.createBuffer();
+      if(!vao||!vbo||!ibo)throw new Error('Pickup overlay allocation failed');
+      gl.bindVertexArray(vao);gl.bindBuffer(gl.ARRAY_BUFFER,vbo);gl.bufferData(gl.ARRAY_BUFFER,positions,gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,12,0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ibo);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,indices,gl.STATIC_DRAW);
+      const geometry={vao,vbo,ibo,count:indices.length,bytes:positions.byteLength+indices.byteLength};
+      this.pickupGeometry.set(key,geometry);this.pickupByteLength+=geometry.bytes;
+      while(this.pickupGeometry.size>PICKUP_GEOMETRY_CACHE_LIMIT){const first=this.pickupGeometry.keys().next().value,old=this.pickupGeometry.get(first);this.deletePickupGeometry(old);this.pickupGeometry.delete(first);}
+      return geometry;
+    } catch {
+      if(vao)gl.deleteVertexArray(vao);if(vbo)gl.deleteBuffer(vbo);if(ibo)gl.deleteBuffer(ibo);
+      return null;
+    } finally {gl.bindVertexArray(null);}
+  }
+
+  deletePickupGeometry(geometry) {
+    this.gl.deleteBuffer(geometry.vbo);this.gl.deleteBuffer(geometry.ibo);this.gl.deleteVertexArray(geometry.vao);
+    this.pickupByteLength-=geometry.bytes;
   }
 
   renderFoundation(foundation, origin) {
@@ -304,6 +360,8 @@ export class VoxelOverlay {
   dispose() {
     const gl = this.gl;
     if (!gl) return;
+    for(const geometry of this.pickupGeometry.values())this.deletePickupGeometry(geometry);
+    this.pickupGeometry.clear();
     if (this.vbo) gl.deleteBuffer(this.vbo);
     if (this.triangleIbo) gl.deleteBuffer(this.triangleIbo);
     if (this.lineIbo) gl.deleteBuffer(this.lineIbo);
