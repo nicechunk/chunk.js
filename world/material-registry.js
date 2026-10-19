@@ -1,6 +1,7 @@
 import { MATERIAL_ID } from "./block-registry.js";
 
 export const materialDefs = Object.freeze({
+  [MATERIAL_ID.stoneFragment]: material(MATERIAL_ID.stoneFragment, 79, [133, 137, 131, 255], 0.96, [0,0,0], "opaque", "rock"),
   [MATERIAL_ID.twig]: material(MATERIAL_ID.twig, 26, [149, 100, 62, 255], 0.9, [0,0,0], "opaque", "wood"),
   [MATERIAL_ID.air]: material(MATERIAL_ID.air, 0, [0, 0, 0, 0], 1, [0, 0, 0], "none"),
   [MATERIAL_ID.grassTop]: material(MATERIAL_ID.grassTop, 1, [148, 184, 104, 255], 0.88, [0, 0, 0], "opaque", "grass"),
