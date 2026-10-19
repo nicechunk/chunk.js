@@ -31,7 +31,7 @@ import {
 } from "./chunk-delta.js";
 import { meshChunkOpaqueFast, meshChunkVisual } from "./chunk-mesher.js";
 import { ensureRenderSections, buildRenderSection, commitRenderSection, updateChunkSectionSummary, sectionRevision, sectionDeltaValues, invalidateRenderSections, prepareRenderSnapshotInvalidation } from "./render-sections.js";
-import { chunkIntersectsCameraFrustum, prepareCameraFrustum } from "../renderer/frustum.js";
+import { chunkIntersectsCameraFrustum, prepareCameraFrustum, cameraRenderCenterChunk } from "../renderer/frustum.js";
 import { RenderStageStats } from "../debug/stats.js";
 
 const DEFAULT_MAX_BUILD_QUEUE = 768;
@@ -115,6 +115,7 @@ export class ChunkManager {
     this.loadDirectionKey = directionBucketKey(this.loadDirX, this.loadDirZ);
     this.buildCamera = null;
     this.buildFrustum = null;
+    this.buildCameraCenter = null;
     this.buildVisibilityCache = new WeakMap();
     this.lastEnsuredRangeKey = "";
     this.lastRebuildMs = 0;
@@ -268,6 +269,7 @@ export class ChunkManager {
     if(!cameraState&&!this.buildCamera)return;
     this.buildCamera = cameraState ? Object.fromEntries(BUILD_CAMERA_FIELDS.map(key=>[key,cameraState[key]])) : null;
     this.buildFrustum = cameraState ? prepareCameraFrustum(cameraState) : null;
+    this.buildCameraCenter = cameraState ? cameraRenderCenterChunk(cameraState,this.chunkSize) : null;
     this.buildQueueNeedsSort = true;
   }
 
@@ -1746,13 +1748,7 @@ function chunkVisibleInCameraCone(chunk, cameraState, manager) {
 }
 
 function visibilityCenterChunk(cameraState, chunkSize) {
-  if (Number.isFinite(cameraState?.targetWorldX) && Number.isFinite(cameraState?.targetWorldZ)) {
-    const targetX = Math.trunc(cameraState.targetWorldX || 0) + (cameraState.targetLocalOffsetX || 0);
-    const targetY = Math.trunc(cameraState.targetWorldY || 0) + (cameraState.targetLocalOffsetY || 0);
-    const targetZ = Math.trunc(cameraState.targetWorldZ || 0) + (cameraState.targetLocalOffsetZ || 0);
-    return worldToChunk(targetX, targetY, targetZ, chunkSize);
-  }
-  return worldToChunk(cameraState?.worldX ?? 0, cameraState?.worldY ?? 0, cameraState?.worldZ ?? 0, chunkSize);
+  return cameraRenderCenterChunk(cameraState, chunkSize);
 }
 
 function cameraForwardXZ(cameraState) {
@@ -1795,8 +1791,9 @@ function taskPriority(task, manager, now) {
   // they no longer receive an unbudgeted main-thread compensation build.
   const remeshPriority = near && (task.mode === "remesh" || task.mode === "section") ? -50000 : 0;
   const chunk=manager.chunks.get(task.id);
-  const inView=manager.buildCamera && chunk
-    && Math.max(Math.abs(task.chunkX-manager.centerChunkX),Math.abs(task.chunkZ-manager.centerChunkZ))<=manager.viewDistance
+  const center=manager.buildCameraCenter;
+  const inView=manager.buildCamera && chunk && center
+    && Math.max(Math.abs(task.chunkX-center.chunkX),Math.abs(task.chunkZ-center.chunkZ))<=manager.viewDistance
     && (near || manager.chunkInBuildFrustum(chunk));
   const visiblePriority=manager.buildCamera && (near||inView) ? -20000 : 0;
   return remeshPriority + visiblePriority + offsetPriority(task.chunkX - manager.centerChunkX, task.chunkZ - manager.centerChunkZ, manager.loadDirX, manager.loadDirZ) - Math.min(40000, age * 4);

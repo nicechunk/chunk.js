@@ -1,7 +1,7 @@
 import { DEFAULT_VIEW_DISTANCE, MAX_DESKTOP_DPR, MAX_MOBILE_DPR } from "../core/constants.js";
 import { BLOCK_ID } from "../world/block-registry.js";
 import { cameraForward, cameraOrigin, cameraViewProjection } from "./camera.js";
-import { filterChunksByCameraFrustum } from "./frustum.js";
+import { filterChunksByCameraFrustum, cameraRenderCenterChunk } from "./frustum.js";
 import { avatarHoldsTransparentBlock, updateAvatarMeshVertices } from "./avatar-mesh.js";
 import { BufferManager } from "./buffer-manager.js";
 import { AsyncGpuTimer, GpuResourceLedger, instrumentGl, assertGpuUpload } from "./gpu-diagnostics.js";
@@ -1662,15 +1662,7 @@ function sameFrustumCamera(left, right = {}) {
 }
 
 function renderCenterChunk(cameraState, chunkSize) {
-  const size = Math.max(1, Math.trunc(chunkSize || 16));
-  if (Number.isFinite(cameraState?.targetWorldX) && Number.isFinite(cameraState?.targetWorldZ)) {
-    const x = Math.trunc(cameraState.targetWorldX || 0) + (cameraState.targetLocalOffsetX || 0);
-    const z = Math.trunc(cameraState.targetWorldZ || 0) + (cameraState.targetLocalOffsetZ || 0);
-    return { chunkX: Math.floor(x / size), chunkZ: Math.floor(z / size) };
-  }
-  const x = Math.trunc(cameraState?.worldX || 0) + (cameraState?.localOffsetX || 0);
-  const z = Math.trunc(cameraState?.worldZ || 0) + (cameraState?.localOffsetZ || 0);
-  return { chunkX: Math.floor(x / size), chunkZ: Math.floor(z / size) };
+  return cameraRenderCenterChunk(cameraState, chunkSize);
 }
 
 function divFloor(value, divisor) {

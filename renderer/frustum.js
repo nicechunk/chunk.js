@@ -2,6 +2,17 @@ import { cameraOrigin, cameraViewProjection } from "./camera.js";
 
 const meshBoundsCache = new WeakMap();
 
+/** Rendering, build priority and initial coverage share the camera target radius. */
+export function cameraRenderCenterChunk(cameraState, chunkSize = 16) {
+  const size = Math.max(1, Math.trunc(chunkSize || 16));
+  const target = Number.isFinite(cameraState?.targetWorldX) && Number.isFinite(cameraState?.targetWorldZ);
+  const x = target ? Math.trunc(cameraState.targetWorldX || 0) + (cameraState.targetLocalOffsetX || 0)
+    : Math.trunc(cameraState?.worldX || 0) + (cameraState?.localOffsetX || 0);
+  const z = target ? Math.trunc(cameraState.targetWorldZ || 0) + (cameraState.targetLocalOffsetZ || 0)
+    : Math.trunc(cameraState?.worldZ || 0) + (cameraState?.localOffsetZ || 0);
+  return { chunkX: Math.floor(x / size), chunkZ: Math.floor(z / size) };
+}
+
 export function visibleByDistance(chunk, cameraState, chunkSize, viewDistance) {
   const eyeX = (cameraState.worldX || 0) + (cameraState.localOffsetX || 0);
   const eyeZ = (cameraState.worldZ || 0) + (cameraState.localOffsetZ || 0);

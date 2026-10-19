@@ -3,9 +3,25 @@ import test from "node:test";
 
 import { createCameraState } from "../renderer/camera.js";
 import {
+  cameraRenderCenterChunk,
   chunkIntersectsCameraFrustum,
   filterChunksByCameraFrustum,
 } from "../renderer/frustum.js";
+
+test('negative fractional camera targets use the same edge radius in manager and renderer',async()=>{
+  const {ChunkManager}=await import('../chunk/chunk-manager.js');
+  const manager=new ChunkManager({useWorkers:false,viewDistance:1,preloadMargin:0});
+  const camera=createCameraState({worldX:8,worldY:8,worldZ:-20,targetWorldX:-1,targetLocalOffsetX:.999,
+    targetWorldY:8,targetWorldZ:8,aspect:2,far:160});
+  const chunk={id:'-2,0',chunkX:-2,chunkZ:0,chunkSize:16,minY:0,height:16,
+    mesh:{vertexCount:3,bounds:{minX:0,maxX:16,minY:0,maxY:16,minZ:0,maxZ:16},originY:0}};
+  try {
+    manager.chunks.set(chunk.id,chunk);
+    assert.deepEqual(cameraRenderCenterChunk(camera,16),{chunkX:-1,chunkZ:0});
+    assert.equal(chunkIntersectsCameraFrustum(chunk,camera),true);
+    assert.deepEqual(manager.getVisibleChunks(camera).map(c=>c.id),['-2,0']);
+  }finally{manager.dispose();}
+});
 
 function buildingChunk(chunkX, chunkZ, options = {}) {
   return {
