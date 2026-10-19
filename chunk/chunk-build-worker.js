@@ -56,6 +56,7 @@ self.onmessage = (event) => {
       baseProfile,
       baseBlockResolver: localProfileBlockResolver(config, task, options, baseProfile),
       treeInstances,
+      shadows: options.shadows,
     });
     chunk.pickedSurfaceColumns = task.pickedSurfaceColumns || [];
     applyPackedChainDeltas(chunk, task.finalDeltas);

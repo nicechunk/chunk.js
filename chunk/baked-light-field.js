@@ -39,7 +39,7 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     if(emissive[i])localSeeds++;
   };
   const maxDistance=Math.floor(14/attenuation);
-  const sunlight=createDirectionalSunlight({
+  const sunlight=chunk.shadows===false?null:createDirectionalSunlight({
     getColumnTopAtWorld:(x,z)=>access.getColumnTopAtWorld?.(x,z)??chunk.minY+chunk.height,
     getBlockAtWorld:access.getBlockAtWorld,
   });
@@ -68,9 +68,12 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     const first=index(x,y,z),cached=samples.get(first);
     if(cached)return cached;
     readCell(first,x,y,z);
-    const light={sun:solid[first]?0:sunlight.sample(ox+x,oy+y,oz+z),sky:0,local:0};
+    const light={sun:0,sky:0,local:0};
     const value=transport(first,x,y,z,maxDistance);
     light.sky=value>>>4;light.local=value&15;
+    // Keep closed caves dark without tracing cast shadows. Exposed surfaces
+    // receive the original directional material light, independent of blockers.
+    light.sun=solid[first]?0:sunlight?sunlight.sample(ox+x,oy+y,oz+z):light.sky>0?15:0;
     samples.set(first,light);return light;
   };
   for(const mesh of meshes) {
@@ -94,5 +97,5 @@ export function bakeSectionLighting(chunk, section, access, meshes, options = DE
     }
     mesh.lightEncoding="sun4-sky4-local4-v1";
   }
-  return {cells:sampledCells,domainCells:count,radius,skySeeds,localSeeds,samples:samples.size,sunlight:sunlight.stats};
+  return {cells:sampledCells,domainCells:count,radius,skySeeds,localSeeds,samples:samples.size,sunlight:sunlight?.stats??null};
 }

@@ -72,6 +72,7 @@ export class ChunkManager {
     resourceRuleVersion = DEFAULT_RESOURCE_RULE_VERSION,
     materialVersion = 1,
     surfaceDecorationRules = [],
+    shadows = true,
     useWorkers = typeof Worker !== "undefined",
     workerCount = defaultWorkerCount(),
     workerUrl = null,
@@ -98,6 +99,7 @@ export class ChunkManager {
     this.generationVersion = this.config.generationVersion;
     this.resourceRuleVersion = this.config.resourceRuleVersion;
     this.materialVersion = materialVersion;
+    this.shadows = shadows !== false;
     this.surfaceDecorationRules = compileSurfaceDecorationRules(surfaceDecorationRules);
     this.surfaceDecorationRulesRevision = 0;
     this.surfaceDecorationRulesSignature = decorationRulesSignature(this.surfaceDecorationRules.rules);
@@ -297,6 +299,7 @@ export class ChunkManager {
       materialVersion: this.materialVersion,
       worldSeed: this.config.worldSeed,
       surfaceDecorationRules: this.surfaceDecorationRules,
+      shadows: this.shadows,
       baseBlocks: null,
       baseBlocksReady: false,
     });
@@ -394,7 +397,7 @@ export class ChunkManager {
   invalidateLightingDependencies(source,deltas) {
     // Both the legacy terrain samples and directional sunlight use this halo.
     // It is separate from the one-cell geometry and tree dependencies.
-    const reach=SUNLIGHT_HORIZONTAL_REACH;
+    const reach=this.shadows?SUNLIGHT_HORIZONTAL_REACH:8;
     const changed=new Set();
     for(const target of this.chunks.values()) {
       if(target===source)continue;
@@ -447,7 +450,7 @@ export class ChunkManager {
   }
 
   *prepareSnapshotNeighborhood(source,changes) {
-    const plans=new Map(),reach=SUNLIGHT_HORIZONTAL_REACH,radius=Math.ceil(reach/this.chunkSize);
+    const plans=new Map(),reach=this.shadows?SUNLIGHT_HORIZONTAL_REACH:8,radius=Math.ceil(reach/this.chunkSize);
     for(const delta of changes) {
       for(let dz=-radius;dz<=radius;dz++)for(let dx=-radius;dx<=radius;dx++) {
         if(dx===0&&dz===0)continue;
@@ -457,7 +460,7 @@ export class ChunkManager {
         if(!plan)plans.set(id,plan={data:new Set(),light:new Set(),maxY:-Infinity,trees:false});
         const y=delta.localY??delta.worldY;
         if(x>=-1&&z>=-1&&x<=this.chunkSize&&z<=this.chunkSize)for(const sy of [y-1,y,y+1])plan.data.add(Math.floor((sy-this.minY)/16));
-        for(const sy of [y-SUNLIGHT_VERTICAL_REACH,y,y+4])plan.light.add(Math.floor((sy-this.minY)/16));
+        for(const sy of [y-(this.shadows?SUNLIGHT_VERTICAL_REACH:4),y,y+4])plan.light.add(Math.floor((sy-this.minY)/16));
         plan.maxY=Math.max(plan.maxY,y+4);
         plan.trees ||= x>=-6&&z>=-6&&x<this.chunkSize+6&&z<this.chunkSize+6;
         yield;
@@ -506,7 +509,7 @@ export class ChunkManager {
     const finalDeltas=packDeltaValues(sectionDeltaValues(chunk,section.sectionIndex));
     const neighborDeltas=this.neighborDeltasForWorker(chunk.chunkX,chunk.chunkZ,section.sectionIndex);
     const treeDeltas=this.treeNeighborDeltasForWorker(chunk.chunkX,chunk.chunkZ,section.sectionIndex);
-    const lightingDeltas=this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,SUNLIGHT_HORIZONTAL_REACH,section.sectionIndex);
+    const lightingDeltas=this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,this.shadows?SUNLIGHT_HORIZONTAL_REACH:8,section.sectionIndex);
     const columnTopHalo=this.captureWorkerColumnTopHalo(chunk);
     try {
       worker.postMessage({type:"buildChunk",taskId,worldSeed:new Uint8Array(managerWorldSeed(this)),chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,
@@ -1323,7 +1326,7 @@ export class ChunkManager {
         pickedSurfaceColumns: chunk.pickedSurfaceColumns,
         neighborDeltas,
         treeDeltas,
-        lightingDeltas: this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,SUNLIGHT_HORIZONTAL_REACH),
+        lightingDeltas: this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,this.shadows?SUNLIGHT_HORIZONTAL_REACH:8),
         columnTopHalo: this.captureWorkerColumnTopHalo(chunk),
       };
       const transfer = [];
@@ -1617,6 +1620,7 @@ export class ChunkManager {
       seaLevel: this.seaLevel,
       maxTerrainHeight: this.maxTerrainHeight,
       renderSections: true,
+      shadows: this.shadows,
       generationVersion: this.generationVersion,
       resourceRuleVersion: this.resourceRuleVersion,
     };

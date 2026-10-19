@@ -39,6 +39,7 @@ export class ChunkState {
     baseProfile = null,
     baseBlockResolver = null,
     treeInstances = [],
+    shadows = true,
     baseBlocksReady = baseBlocks !== null || baseProfile !== null,
   } = {}) {
     const dimensions = normalizeWorldGeneratorDimensions({
@@ -81,6 +82,7 @@ export class ChunkState {
     this.baseBlockResolver = typeof baseBlockResolver === "function" ? baseBlockResolver : null;
     this.baseBlocksReady = Boolean(baseBlocksReady);
     this.treeInstances = treeInstances;
+    this.shadows = shadows !== false;
     this.chainDeltas = new Map();
     this.unobservedChainDeltaKeys = new Set();
     this.confirmedDeltaProtection = new Map();

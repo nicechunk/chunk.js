@@ -116,6 +116,7 @@ export class WebGL2VoxelRenderer {
       maxRenderPixels: options.maxRenderPixels ?? Infinity,
       environmentEffects: options.environmentEffects ?? true,
       waterEffects: options.waterEffects ?? true,
+      shadows: options.shadows ?? true,
       gpuTiming: options.gpuTiming ?? true,
       deferredChunkUploads: options.deferredChunkUploads ?? false,
       textureTileSize: options.textureTileSize ?? 32,
@@ -285,10 +286,12 @@ export class WebGL2VoxelRenderer {
         runStage("sky gradient", () => this.skyGradient.init());
         this.sunDisc = new SunDisc(gl);
         runStage("sun disc", () => this.sunDisc.init());
-        this.projectedShadowLayer = new ProjectedShadowLayer(gl, {
-          maxCasters: this.options.maxDynamicShadowCasters ?? 8,
-        });
-        runStage("projected shadows", () => this.projectedShadowLayer.init());
+        if (this.options.shadows) {
+          this.projectedShadowLayer = new ProjectedShadowLayer(gl, {
+            maxCasters: this.options.maxDynamicShadowCasters ?? 8,
+          });
+          runStage("projected shadows", () => this.projectedShadowLayer.init());
+        }
       }
       this.voxelOverlay = new VoxelOverlay(gl);
       runStage("voxel overlays", () => this.voxelOverlay.init());
@@ -821,7 +824,7 @@ export class WebGL2VoxelRenderer {
     drawCalls+=avatarStats.drawCalls;triangles+=avatarStats.triangles;
     if(typeof gl.blendFunc === "function")gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
     gl.enable(gl.BLEND);gl.depthMask(false);
-    if (this.options.environmentEffects) {
+    if (this.options.environmentEffects && this.options.shadows) {
       for(const visual of [false,true]){const shadowStats=this.renderMeshPass(worldChunks,origin,['shadow'],visual);drawCalls+=shadowStats.drawCalls;triangles+=shadowStats.triangles;}
     }
     gl.disable(gl.BLEND);gl.depthMask(true);
@@ -1190,6 +1193,7 @@ export class WebGL2VoxelRenderer {
   }
 
   renderProjectedShadows(avatars, viewProjection, origin, lighting = this.lighting) {
+    if (!this.options.shadows) return { drawCalls: 0, triangles: 0, bufferMemory: 0 };
     if(this.contextLost||this.disposed||!this.gl||this.gl.isContextLost?.())return {drawCalls:0,triangles:0,bufferMemory:0};
     const gl = this.gl;
     if (!this.projectedShadowLayer || !avatars?.length) return { drawCalls: 0, triangles: 0, bufferMemory: 0 };

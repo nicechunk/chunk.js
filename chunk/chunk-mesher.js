@@ -1077,6 +1077,7 @@ function columnTopAt(chunkState, topY, localX, localZ, getBlockAtWorld, getColum
 }
 
 function terrainSunShadowShade(chunkState, localX, y, localZ, getBlockAtWorld, getColumnTopAtWorld, baseShade = FACE_DEFS[2].shade) {
+  if (chunkState.shadows === false) return baseShade;
   const sunY = Math.max(0.08, TERRAIN_SHADOW_SUN_DIRECTION[1]);
   const sunXZ = Math.hypot(TERRAIN_SHADOW_SUN_DIRECTION[0], TERRAIN_SHADOW_SUN_DIRECTION[2]) || 1;
   const dirX = TERRAIN_SHADOW_SUN_DIRECTION[0] / sunXZ;
@@ -1228,6 +1229,7 @@ function appendLowVegetationQuads(x, y, z, blockId, chunkState, vertices, indice
 }
 
 function appendLowVegetationShadow(x, y, z, blockId, chunkState, vertices, indices) {
+  if (chunkState.shadows === false) return 0;
   if (blockId === BLOCK_ID.cactus) {
     return appendProjectedShadowQuad(vertices, indices, x + 0.5, y + SHADOW_SURFACE_BIAS, z + 0.5, 0.38, 0.88 * CACTUS_MODEL_HEIGHT_SCALE, CACTUS_MODEL_MAX_Y, 0.34);
   }
@@ -1254,6 +1256,7 @@ function appendGroundDetailShadow(x, y, z, hash, vertices, indices, radius, leng
 }
 
 function appendTerrainProjectionShadowsProfile(chunkState, vertices, indices, getColumnTopAtWorld) {
+  if (chunkState.shadows === false) return 0;
   if (!chunkState.baseProfile) return 0;
   let quads = 0;
   let emitted = 0;
@@ -1280,6 +1283,7 @@ function appendTerrainProjectionShadowsProfile(chunkState, vertices, indices, ge
 }
 
 function appendTerrainProjectionShadows(chunkState, vertices, indices, getBlockAtWorld, getColumnTopAtWorld) {
+  if (chunkState.shadows === false) return 0;
   let quads = 0;
   let emitted = 0;
   const size = chunkState.chunkSize;
@@ -1346,6 +1350,7 @@ function appendTerrainProjectionShadowQuad(vertices, indices, x, y, z, strength,
 }
 
 function appendTreeInstanceShadowQuads(chunkState, vertices, indices) {
+  if (chunkState.shadows === false) return 0;
   if (!chunkState.treeInstances?.length) return 0;
   let quads = 0;
   for (const tree of chunkState.treeInstances) {
@@ -1538,7 +1543,7 @@ function appendGroundDetailAt(chunkState, x, y, z, surfaceBlockId, vertices, ind
   });
   if (!decoration || ((decoration.decorationId>=100 && decoration.decorationId<=107) && chunkState.pickedSurfaceColumns?.includes(z*chunkState.chunkSize+x))) return 0;
   const hash = decoration.variantHash;
-  const shadow = decoration.flags & SURFACE_DECORATION_FLAGS.SHADOW
+  const shadow = chunkState.shadows !== false && (decoration.flags & SURFACE_DECORATION_FLAGS.SHADOW)
     ? appendSurfaceDecorationShadow(decoration.decorationId, x, y, z, hash, vertices, indices)
     : 0;
   return shadow + appendSurfaceDecorationModel(decoration, vertices, indices, x, y, z, hash, surfaceBlockId);
@@ -2102,6 +2107,7 @@ function appendCactusResourceModels(chunkState, vertices, indices) {
 }
 
 function appendCactusResourceShadows(chunkState, vertices, indices) {
+  if (chunkState.shadows === false) return { blocks: 0, quads: 0 };
   let quads = 0;
   const blocks = visitCactusResourceCells(chunkState, (x, y, z) => {
     quads += appendProjectedShadowQuad(vertices, indices, x + 0.5, y + SHADOW_SURFACE_BIAS, z + 0.5, 0.38, 0.88 * CACTUS_MODEL_HEIGHT_SCALE, CACTUS_MODEL_MAX_Y, 0.34);
