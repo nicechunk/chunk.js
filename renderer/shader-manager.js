@@ -7,7 +7,7 @@ layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUv;
 layout(location = 3) in vec2 aLayerFlags;
 layout(location = 4) in float aAo;
-layout(location = 5) in ivec4 aChunkOffset;
+layout(location = 8) in ivec4 aChunkOffset;
 
 uniform mat4 uViewProjection;
 uniform vec3 uChunkOrigin;

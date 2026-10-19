@@ -13,7 +13,7 @@ function device() {
     bindVertexArray(v){vao=v;},bindBuffer(t,b){bindings.set(t,b);if(t===2&&vao)vaos.get(vao).indices=b;},
     bufferData(t,n){buffers.set(bindings.get(t),typeof n==='number'?new Uint8Array(n):new Uint8Array(n.buffer,n.byteOffset,n.byteLength).slice());},
     bufferSubData(t,o,bytes){buffers.get(bindings.get(t)).set(bytes,o);},
-    enableVertexAttribArray(){},vertexAttribIPointer(i){if(i===0)vaos.get(vao).vertices=bindings.get(1);if(i===5)vaos.get(vao).origins=bindings.get(1);},vertexAttribPointer(){},
+    enableVertexAttribArray(){},vertexAttribIPointer(i){if(i===0)vaos.get(vao).vertices=bindings.get(1);if(i===8)vaos.get(vao).origins=bindings.get(1);},vertexAttribPointer(){},
     deleteBuffer(b){deleted.push(b);buffers.delete(b);},deleteVertexArray(v){deleted.push(v);vaos.delete(v);},
     getError(){const e=error;error=0;return e;},isContextLost(){return false;},
     useProgram(){},uniform1f(){},uniform1i(){},uniform3f(){},drawElements(){},

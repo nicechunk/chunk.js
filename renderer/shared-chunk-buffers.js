@@ -97,7 +97,7 @@ export class SharedChunkBuffers {
       gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4, 1, gl.UNSIGNED_BYTE, true, CHUNK_VERTEX_STRIDE_BYTES, 11);
       gl.bindBuffer(gl.ARRAY_BUFFER, page.origins);
       gl.bufferData(gl.ARRAY_BUFFER, vertices * 8, gl.STATIC_DRAW);
-      gl.enableVertexAttribArray(5); gl.vertexAttribIPointer(5, 4, gl.SHORT, 8, 0);
+      gl.enableVertexAttribArray(8); gl.vertexAttribIPointer(8, 4, gl.SHORT, 8, 0);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, page.ibo);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices * 4, gl.STATIC_DRAW);
       this.pages.add(page); this.bytes += bytes;

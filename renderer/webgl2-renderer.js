@@ -280,7 +280,7 @@ export class WebGL2VoxelRenderer {
       });
       this.bufferManager = new BufferManager(gl, {shared:this.options.sharedChunkBuffers,maxSharedBytes:this.options.maxSharedChunkBufferBytes,
         canReuseSharedSlices:()=>!this.frameCompletionFences.length&&!this.uploadValidationFence});
-      gl.vertexAttribI4i?.(5,0,0,0,0);
+      gl.vertexAttribI4i?.(8,0,0,0,0);
       this.textureArray = new TextureArrayManager(gl, {
         tileSize: this.options.textureTileSize,
         seed: this.options.textureSeed,
