@@ -461,7 +461,7 @@ export class ChunkManager {
     const frame = ++this.visibilityFrame;
     const cameraChunk = visibilityCenterChunk(cameraState, this.chunkSize);
     const frustum = cameraState ? prepareCameraFrustum(cameraState) : null;
-    for (const chunk of this.chunks.values()) {
+    for (const chunk of this.orderedVisibilityCandidates(cameraChunk)) {
       const distance = Math.max(Math.abs(chunk.chunkX - cameraChunk.chunkX), Math.abs(chunk.chunkZ - cameraChunk.chunkZ));
       if (!chunk.mesh) continue;
       if (distance > this.viewDistance) {
@@ -477,8 +477,31 @@ export class ChunkManager {
       if (lastVisibleFrame && frame - lastVisibleFrame <= this.visibilityLingerFrames) chunks.push(chunk);
     }
     this.cleanupVisibleChunkMemory(frame);
-    chunks.sort((a, b) => chunkPriority(a, cameraChunk, this) - chunkPriority(b, cameraChunk, this));
     return chunks;
+  }
+
+  orderedVisibilityCandidates(center) {
+    let cached = this.visibilityOrder;
+    let current = cached && cached.map === this.chunks && cached.input.length === this.chunks.size
+      && cached.x === center.chunkX && cached.z === center.chunkZ
+      && cached.dirX === this.loadDirX && cached.dirZ === this.loadDirZ;
+    if (current) {
+      let index = 0;
+      // Retain compatibility with callers replacing members of the public Map,
+      // including replacement with another instance at the same coordinates.
+      for (const chunk of this.chunks.values()) {
+        if (cached.input[index] !== chunk || cached.coordinates[index * 2] !== chunk.chunkX
+          || cached.coordinates[index * 2 + 1] !== chunk.chunkZ) { current = false; break; }
+        index++;
+      }
+    }
+    if (current) return cached.ordered;
+    const input = Array.from(this.chunks.values());
+    const priorities = new Map(input.map(chunk => [chunk, chunkPriority(chunk, center, this)]));
+    const ordered = input.slice().sort((a, b) => priorities.get(a) - priorities.get(b));
+    this.visibilityOrder = { map: this.chunks, input, coordinates: input.flatMap(chunk => [chunk.chunkX, chunk.chunkZ]), ordered, x: center.chunkX, z: center.chunkZ,
+      dirX: this.loadDirX, dirZ: this.loadDirZ };
+    return ordered;
   }
 
   cleanupVisibleChunkMemory(frame = this.visibilityFrame) {
@@ -1186,6 +1209,7 @@ export class ChunkManager {
     this.workerCount = 0;
     this.activeBuildLimit = 0;
     this.chunks.clear();
+    this.visibilityOrder = null;
     this.reusableMeshes.clear();this.reusableMeshBytes=0;
     this.pickedSurfaceColumnsByChunk.clear();
     this.visibleChunkMemory.clear();

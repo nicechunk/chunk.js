@@ -55,6 +55,17 @@ test('managed commit observation retires emptied channels once and reuploads aft
  r.dispose();
 });
 
+test('motion suppresses speculative residency while visible gaps upload and idle residency resumes',()=>{
+ const {r}=renderer();r.options.maxUploadCpuMs=10000;
+ const front=chunk('0,0',0),back=chunk('0,3',0);back.chunkZ=3;
+ const moving=r.prepareChunksForRender([front],{maxUploads:4,residencyChunks:[back],allowBackgroundUploads:false});
+ assert.equal(moving.uploaded,1);assert.equal(moving.prefetchUploads,0);
+ assert.ok(r.entryForChunk(front));assert.equal(r.entryForChunk(back),null);
+ const idle=r.prepareChunksForRender([front],{maxUploads:4,residencyChunks:[back],allowBackgroundUploads:true});
+ assert.equal(idle.prefetchUploads,1);assert.ok(r.entryForChunk(back));
+ assert.deepEqual(r.preparedRenderFrame.chunks,[front]);r.dispose();
+});
+
 test('completed and staged chunk uploads validate once per stage and still reject GL allocation errors',()=>{
  const {gl,control}=mockGl(),manager=new BufferManager(gl);let polls=0;const getError=gl.getError;
  gl.getError=()=>{polls++;return getError();};

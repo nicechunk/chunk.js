@@ -1362,8 +1362,13 @@ function appendBox(vertices, indices, box) {
   }
 }
 
-function appendBoxToArray(out, cursor, box, pivot, rotation, offset = null, options = {}) {
-  if (options.hidden) return appendCollapsedBoxToArray(out, cursor, pivot, offset);
+const animatedBoxFaces = new WeakMap();
+
+function preparedAnimatedBoxFaces(box) {
+  const prior = animatedBoxFaces.get(box), r = box.localRotation;
+  if (prior && prior.cx === box.cx && prior.cy === box.cy && prior.cz === box.cz
+    && prior.sx === box.sx && prior.sy === box.sy && prior.sz === box.sz
+    && prior.rotation === r && prior.rx === r?.x && prior.ry === r?.y && prior.rz === r?.z) return prior.faces;
   const x0 = box.cx - box.sx * 0.5;
   const x1 = box.cx + box.sx * 0.5;
   const y0 = box.cy - box.sy * 0.5;
@@ -1378,19 +1383,37 @@ function appendBoxToArray(out, cursor, box, pivot, rotation, offset = null, opti
     { n: [0, 0, 1], p: [[x0, y0, z1], [x0, y1, z1], [x1, y1, z1], [x1, y0, z1]] },
     { n: [0, 0, -1], p: [[x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z0]] },
   ];
+  for (const face of faces) {
+    face.n = transformBoxLocalNormal(face.n, box);
+    face.p = face.p.map(point => transformBoxLocalPoint(point, box));
+  }
+  animatedBoxFaces.set(box, { cx: box.cx, cy: box.cy, cz: box.cz, sx: box.sx, sy: box.sy, sz: box.sz,
+    rotation: r, rx: r?.x, ry: r?.y, rz: r?.z, faces });
+  return faces;
+}
+
+function appendBoxToArray(out, cursor, box, pivot, rotation, offset = null, options = {}) {
+  if (options.hidden) return appendCollapsedBoxToArray(out, cursor, pivot, offset);
+  const faces = preparedAnimatedBoxFaces(box);
+  const rx = rotation.x || 0, ry = rotation.y || 0, rz = rotation.z || 0;
+  const cx = Math.cos(rx), sx = Math.sin(rx), cy = Math.cos(ry), sy = Math.sin(ry), cz = Math.cos(rz), sz = Math.sin(rz);
+  const ox = offset?.[0] || 0, oy = offset?.[1] || 0, oz = offset?.[2] || 0;
   const color = options.color ?? box.color;
   for (let faceIndex = 0; faceIndex < faces.length; faceIndex += 1) {
     const face = faces[faceIndex];
     const textureSurface = avatarBoxTextureSurface(box, faceIndex, options.blockId);
+    // A face has one normal. Keep the original Z/X/Y operation order and
+    // double precision until the final Float32 write, including forged grips.
+    const tn = transformNormal(face.n, rotation);
     for (let vertexIndex = 0; vertexIndex < face.p.length; vertexIndex += 1) {
       const p = face.p[vertexIndex];
-      const lp = transformBoxLocalPoint(p, box);
-      const ln = transformBoxLocalNormal(face.n, box);
-      const tp = transformPoint(lp, pivot, rotation);
-      const tn = transformNormal(ln, rotation);
-      out[cursor++] = tp[0] + (offset?.[0] || 0);
-      out[cursor++] = tp[1] + (offset?.[1] || 0);
-      out[cursor++] = tp[2] + (offset?.[2] || 0);
+      let x = p[0] - pivot[0], y = p[1] - pivot[1], z = p[2] - pivot[2];
+      if (rz) { const nx = x * cz - y * sz, ny = x * sz + y * cz; x = nx; y = ny; }
+      if (rx) { const ny = y * cx - z * sx, nz = y * sx + z * cx; y = ny; z = nz; }
+      if (ry) { const nx = x * cy + z * sy, nz = -x * sy + z * cy; x = nx; z = nz; }
+      out[cursor++] = x + pivot[0] + ox;
+      out[cursor++] = y + pivot[1] + oy;
+      out[cursor++] = z + pivot[2] + oz;
       out[cursor++] = tn[0];
       out[cursor++] = tn[1];
       out[cursor++] = tn[2];

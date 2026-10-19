@@ -2,6 +2,12 @@ import { cameraOrigin, cameraViewProjection } from "./camera.js";
 
 const meshBoundsCache = new WeakMap();
 const worldBoundsCache = new WeakMap();
+const cameraFrustumCache = new WeakMap();
+const rejectingPlanes = new WeakMap();
+const publishedBounds = new WeakMap();
+const CAMERA_FIELDS = ["worldX", "worldY", "worldZ", "localOffsetX", "localOffsetY", "localOffsetZ",
+  "targetWorldX", "targetWorldY", "targetWorldZ", "targetLocalOffsetX", "targetLocalOffsetY", "targetLocalOffsetZ",
+  "yaw", "pitch", "fov", "aspect", "near", "far"];
 
 /** Rendering, build priority and initial coverage share the camera target radius. */
 export function cameraRenderCenterChunk(cameraState, chunkSize = 16) {
@@ -44,6 +50,10 @@ export function aabbIntersectsCameraFrustum(bounds, cameraState) {
 }
 
 export function prepareCameraFrustum(cameraState) {
+  // Build priority, column visibility and section visibility use the same
+  // projection. A camera can mutate in place, so compare every projection input.
+  const prior = cameraFrustumCache.get(cameraState);
+  if (prior && CAMERA_FIELDS.every((key, index) => Object.is(cameraState[key], prior.values[index]))) return prior.frustum;
   const matrix = cameraViewProjection(cameraState);
   const origin = cameraOrigin(cameraState);
   const planes = [];
@@ -59,7 +69,9 @@ export function prepareCameraFrustum(cameraState) {
       if (length > 1e-12) planes.push([a / length, b / length, c / length, d / length]);
     }
   }
-  return { planes, origin };
+  const frustum = { planes, origin };
+  cameraFrustumCache.set(cameraState, { values: CAMERA_FIELDS.map(key => cameraState[key]), frustum });
+  return frustum;
 }
 
 function boundsIntersectPreparedFrustum(bounds, { planes, origin }) {
@@ -67,10 +79,15 @@ function boundsIntersectPreparedFrustum(bounds, { planes, origin }) {
   const minX = bounds.minX - origin.worldX, maxX = bounds.maxX - origin.worldX;
   const minY = bounds.minY - origin.worldY, maxY = bounds.maxY - origin.worldY;
   const minZ = bounds.minZ - origin.worldZ, maxZ = bounds.maxZ - origin.worldZ;
-  for (const [a, b, c, d] of planes) {
+  // A rejected AABB usually stays behind the same plane while walking. Test
+  // that plane first, then all remaining planes; the result stays conservative.
+  const first = rejectingPlanes.get(bounds) ?? 0;
+  for (let step = 0; step < planes.length; step++) {
+    const index = (first + step) % planes.length;
+    const plane = planes[index], a = plane[0], b = plane[1], c = plane[2], d = plane[3];
     const x = a >= 0 ? maxX : minX, y = b >= 0 ? maxY : minY, z = c >= 0 ? maxZ : minZ;
     // Conservative tolerance for float32 projection and surfaces exactly on a plane.
-    if (a * x + b * y + c * z + d < -0.001) return false;
+    if (a * x + b * y + c * z + d < -0.001) { rejectingPlanes.set(bounds, index); return false; }
   }
   return true;
 }
@@ -119,6 +136,22 @@ export function chunkWorldBounds(chunk) {
   const bounds=calculateChunkWorldBounds(chunk);
   worldBoundsCache.set(chunk,{key,bounds});
   return bounds;
+}
+
+/** Publish renderer-owned bounds at the same atomic boundary as a managed mesh.
+ * Legacy mutable meshes still take the defensive identity/value cache below.
+ * Explicit host bounds keep their existing precedence.
+ */
+export function publishCommittedWorldBounds(chunk) {
+  if (chunk.renderBounds && chunk.renderBounds !== publishedBounds.get(chunk)) return;
+  const bounds = calculateChunkWorldBounds(chunk);
+  if (bounds) {
+    chunk.renderBounds = Object.freeze(bounds);
+    publishedBounds.set(chunk, chunk.renderBounds);
+  } else {
+    delete chunk.renderBounds;
+    publishedBounds.delete(chunk);
+  }
 }
 
 function calculateChunkWorldBounds(chunk) {
@@ -188,7 +221,8 @@ function committedMeshBounds(mesh) {
   return bounds;
 }
 function validBounds(bounds) {
-  return bounds && [bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ].every(Number.isFinite)
+  return bounds && Number.isFinite(bounds.minX) && Number.isFinite(bounds.minY) && Number.isFinite(bounds.minZ)
+    && Number.isFinite(bounds.maxX) && Number.isFinite(bounds.maxY) && Number.isFinite(bounds.maxZ)
     && bounds.minX <= bounds.maxX && bounds.minY <= bounds.maxY && bounds.minZ <= bounds.maxZ;
 }
 function sameBounds(a,b) {

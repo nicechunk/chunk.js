@@ -423,6 +423,16 @@ export class WebGL2VoxelRenderer {
       && typeof this.gl?.clientWaitSync === "function" && typeof this.gl?.deleteSync === "function";
   }
 
+  canPrepareFrame() {
+    if (!this.gpuReady()) return false;
+    // Check readiness before the host does camera visibility, draw-list work or
+    // overlays. Physics and authority updates can keep running on every callback.
+    // Do not consume GL errors or commit uploads here; prepare owns validation.
+    if (this.uploadValidationFence) return this.gl.clientWaitSync(this.uploadValidationFence, 0, 0) !== this.gl.TIMEOUT_EXPIRED;
+    if (this.deferredUploadsSupported()) this.pollFrameCompletion();
+    return this.frameCompletionFences.length < 2;
+  }
+
   hasUnvalidatedUploads() {
     for(const stage of this.uploadStaging.values())if(stage.awaitingValidation)return true;
     return false;
@@ -639,7 +649,7 @@ export class WebGL2VoxelRenderer {
     }
   }
 
-  prepareChunksForRender(visibleChunks = [], { maxUploads = this.options.maxChunkUploadsPerFrame, cameraState = null, residencyChunks = [] } = {}) {
+  prepareChunksForRender(visibleChunks = [], { maxUploads = this.options.maxChunkUploadsPerFrame, cameraState = null, residencyChunks = [], allowBackgroundUploads = true } = {}) {
     this.preparedRenderFrame = null;
     if (!this.gpuReady()) return { uploaded: 0, pendingUploads: 0, paused: true };
     const settlement = this.settleDeferredUploads();
@@ -659,7 +669,7 @@ export class WebGL2VoxelRenderer {
     this.preparedRenderFrame = {input:visibleChunks,camera:captureFrustumCamera(cameraState),chunks,viewDistance:this.options.viewDistance};
     const candidates = [];
     const center = cameraState ? cameraRenderCenterChunk(cameraState) : null;
-    const allowPrefetch = performance.now()-this.lastPrefetchAt >= this.options.prefetchIntervalMs && !this.frameCompletionFences.length;
+    const allowPrefetch = allowBackgroundUploads && performance.now()-this.lastPrefetchAt >= this.options.prefetchIntervalMs && !this.frameCompletionFences.length;
     for (const [key, source] of this.pendingMeshSources) {
       const {chunk,visual,parent} = source;
       const mesh = chunk?.[visual ? 'visualMesh' : 'mesh'];
@@ -1024,12 +1034,17 @@ export class WebGL2VoxelRenderer {
       const snapshot=this.avatarFrameState(avatar,entry);
       const offset=[(avatar.worldX||0)+(avatar.localOffsetX||0)-origin.worldX,(avatar.worldY||0)+(avatar.localOffsetY||0)-origin.worldY,(avatar.worldZ||0)+(avatar.localOffsetZ||0)-origin.worldZ];
       const yaw=avatar.yaw||0,c=Math.cos(yaw),s=Math.sin(yaw);
-      for(let i=0;i<entry.mesh.indices.length;i+=3){const ids=[entry.mesh.indices[i],entry.mesh.indices[i+1],entry.mesh.indices[i+2]],stride=(entry.mesh.vertexStrideBytes||40)/4;
+      const vertices=snapshot.vertices,indices=entry.mesh.indices,stride=(entry.mesh.vertexStrideBytes||40)/4;
+      for(let i=0;i<indices.length;i+=3){
+        const a=indices[i]*stride,b=indices[i+1]*stride,d=indices[i+2]*stride;
         // Hidden equipment is collapsed with zero alpha. It has no pixels and
         // must not become one transparent draw per invisible triangle.
-        if(ids.every(id=>snapshot.vertices[id*stride+9]===0&&(stride<13||snapshot.vertices[id*stride+12]<0)))continue;
-        if(opacity>=0.999 && !ids.some(id=>snapshot.vertices[id*stride+9]<0.999 || (stride>=14&&snapshot.vertices[id*stride+13]>0.5)))continue;
-        const center=[0,0,0];for(const id of ids){const o=id*stride;center[0]+=(c*snapshot.vertices[o]+s*snapshot.vertices[o+2])/3;center[1]+=snapshot.vertices[o+1]/3;center[2]+=(-s*snapshot.vertices[o]+c*snapshot.vertices[o+2])/3;}
+        if(vertices[a+9]===0 && vertices[b+9]===0 && vertices[d+9]===0
+          && (stride<13 || vertices[a+12]<0 && vertices[b+12]<0 && vertices[d+12]<0))continue;
+        if(opacity>=0.999 && !(vertices[a+9]<0.999 || vertices[b+9]<0.999 || vertices[d+9]<0.999
+          || stride>=14 && (vertices[a+13]>0.5 || vertices[b+13]>0.5 || vertices[d+13]>0.5)))continue;
+        const center=[0,0,0];
+        for(let v=0;v<3;v++){const o=indices[i+v]*stride;center[0]+=(c*vertices[o]+s*vertices[o+2])/3;center[1]+=vertices[o+1]/3;center[2]+=(-s*vertices[o]+c*vertices[o+2])/3;}
         add({kind:'avatar',avatar,snapshot,range:{offset:i,count:3}},center.map((v,k)=>v+offset[k]));
       }
     }
@@ -1186,7 +1201,17 @@ export class WebGL2VoxelRenderer {
   avatarFrameState(avatar,entry){
     this.avatarFrameStates ??= new Map();
     let snapshot=this.avatarFrameStates.get(avatar);
-    if(!snapshot||snapshot.mesh!==entry.mesh){snapshot={mesh:entry.mesh,vertices:entry.mesh?.parts?.length?new Float32Array(updateAvatarMeshVertices(entry.mesh,avatar.animation)):entry.mesh?.vertices};this.avatarFrameStates.set(avatar,snapshot);}
+    if(!snapshot||snapshot.mesh!==entry.mesh){
+      this.avatarSnapshotCache ??= new WeakMap();
+      snapshot=this.avatarSnapshotCache.get(avatar);
+      if(!snapshot||snapshot.mesh!==entry.mesh) {
+        snapshot={mesh:entry.mesh,revision:0,vertices:entry.mesh?.parts?.length?new Float32Array(entry.mesh.vertices.length):entry.mesh?.vertices};
+        this.avatarSnapshotCache.set(avatar,snapshot);
+      }
+      if(entry.mesh?.parts?.length)snapshot.vertices.set(updateAvatarMeshVertices(entry.mesh,avatar.animation));
+      snapshot.revision++;
+      this.avatarFrameStates.set(avatar,snapshot);
+    }
     return snapshot;
   }
   renderAvatars(cameraState, avatars, viewProjection, origin, lighting = this.lighting, { opaqueOnly=false, transparentOnly=false, drawRange=null, vertexSnapshot=null }={}) {
@@ -1218,10 +1243,11 @@ export class WebGL2VoxelRenderer {
       if (!entry?.handle) continue;
       const handle = entry.handle;
       const snapshot=vertexSnapshot??this.avatarFrameState(avatar,entry);
-      if (entry.mesh?.parts?.length && handle.animationSnapshot!==snapshot) {
+      if (entry.mesh?.parts?.length && (handle.animationSnapshot!==snapshot || handle.animationRevision!==snapshot.revision)) {
         gl.bindBuffer(gl.ARRAY_BUFFER, handle.vbo);
         gl.bufferSubData(gl.ARRAY_BUFFER, 0, snapshot.vertices);
         handle.animationSnapshot=snapshot;
+        handle.animationRevision=snapshot.revision;
       }
       const worldX = Math.trunc(avatar.worldX || 0) + (avatar.localOffsetX || 0);
       const worldY = Math.trunc(avatar.worldY || 0) + (avatar.localOffsetY || 0);
@@ -1394,6 +1420,7 @@ export class WebGL2VoxelRenderer {
     this.disposed=true;
     this.releaseContextResources();
     this.avatarMeshes.clear(); this.retryUploads.clear(); this.pendingUploadSince.clear();this.pendingMeshSources.clear();this.avatarFrameStates.clear();
+    this.avatarSnapshotCache = new WeakMap();
     this.detachContextListeners();
   }
 

@@ -4,6 +4,7 @@ import { bakeSectionLighting } from "./baked-light-field.js";
 import { isVisualBlock,isOpaqueSolidBlock,BLOCK_ID } from "../world/block-registry.js";
 import { prepareMeshDrawRanges } from "../renderer/mesh-draw-ranges.js";
 import { SUNLIGHT_HORIZONTAL_REACH, SUNLIGHT_VERTICAL_REACH } from "../world/sunlight.js";
+import { publishCommittedWorldBounds } from "../renderer/frustum.js";
 
 export const RENDER_SECTION_HEIGHT = 16;
 let generationSerial = 1;
@@ -388,6 +389,7 @@ export function commitRenderSection(chunk, section, result, expectedRevision = s
   section.materialVersion=chunk.materialVersion;
   section.buildTaskId=null;section.buildState="ready";
   if(!section.dirty&&!section.visualDirty)section.oldestDirtyAt=null;
+  publishCommittedWorldBounds(section);
   if(updateSummary)updateChunkSectionSummary(chunk);
   return true;
 }
@@ -398,6 +400,7 @@ export function updateChunkSectionSummary(chunk) {
   chunk.visualMesh=combinedSectionMesh(chunk,sections,"visualMesh");
   chunk.renderActiveSections = sections.filter(section => section.mesh?.indexCount || section.visualMesh?.indexCount);
   chunk.renderSectionCommitRevision = (chunk.renderSectionCommitRevision ?? 0) + 1;
+  publishCommittedWorldBounds(chunk);
   chunk.dirty=sections.some(s=>s.dirty||s.visualDirty);
   if(!sections.some(s=>s.dirty))chunk.meshVersion=chunk.version;
   if(!sections.some(s=>s.visualDirty))chunk.visualMeshVersion=chunk.version;
