@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Validate deferred pose and sorted-index uploads after a zero-timeout fence poll,
+  avoiding synchronous per-actor error checks while preserving matching old
+  poses, exact ordered fallback and failure/context cleanup.
 - Exclude known hidden avatar ranges, batch contiguous globally sorted transparent
   geometry and particles, retain independent actor pose buffers, and cache exact
   NCM4 bone transforms without changing formats or animation frequency.

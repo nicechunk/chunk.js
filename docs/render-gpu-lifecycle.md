@@ -187,6 +187,28 @@ Tests cover signed `2^20` and `2^24`, equivalent eye encodings, and split chunks
 
 ## Diagnostics
 
+### Deferred dynamic validation
+
+When deferred uploads are supported, terrain, per-entity poses and changed sorted
+indices use the same bounded validation fence. A zero-timeout poll must observe
+completion before one shared error check publishes the batch; no newer GPU work
+is submitted behind that check. The compatibility path without fences retains
+synchronous validation.
+
+Pose publication swaps matching GPU and CPU sort/visibility snapshots together.
+The previous verified pose remains drawable on failure. A first instance with no
+verified pose is omitted until validation, avoiding hidden tools from the shared
+registration. This adds one validation-batch pipeline delay without reducing
+animation sampling frequency on submitted frames.
+
+A changed sorted EBO is staged separately from its verified order. Until it
+validates, the current frame draws the canonical globally ordered queue. An equal
+verified order is reused without another index upload; a new order never draws
+last frame's stale sort. Changed-order frames can therefore require more draws.
+Deferred CPU working/committed index arrays both count toward the8MiB stream cap;
+staging/committed GPU storage and pending pose ownership are tracked and released
+on failure, disposal and context-generation change.
+
 `renderer.diagnostics({ maxEntries: 64 })` reports:
 
 - Unique live buffer/texture bytes, including screen-excluded and staging
@@ -223,6 +245,9 @@ entries. Diagnostic snapshots sort bounded CPU samples on demand, not per voxel.
   canonical EBO isolation, both index widths, shared origins, allocation failure,
   particle intervals, independent real poses, visibility/cooldown/fairness,
   prepared-frame invalidation and budgeted material-partition steps.
+- `tests/dynamic-upload-validation.test.mjs` checks pending pose isolation, exact
+  ordered fallback, verified index reuse, shared asynchronous validation,
+  allocation/fence failures, memory bounds and pending disposal.
 - `tools/render-gpu-long-session.mjs` runs a controlled 60-minute renderer and real
   module Worker component session. It explicitly identifies synthetic local
   dig/backfill, view-distance changes, periodic loss/restore, pruning, its renderer

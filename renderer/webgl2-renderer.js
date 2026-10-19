@@ -169,6 +169,7 @@ export class WebGL2VoxelRenderer {
     this.disposed = false;
     this.retryUploads = new Map();
     this.uploadStaging = new Map();
+    this.dynamicUploadStages = [];
     this.uploadValidationFence = null;
     this.frameCompletionFences = [];
     this.lastUploadAttemptBytes=0;
@@ -260,6 +261,7 @@ export class WebGL2VoxelRenderer {
     this.prefetchQueueCache = null;
     this.observedChunkCommits = new WeakMap();
     this.uploadValidationFence = null;
+    this.dynamicUploadStages.length = 0;
     this.frameCompletionFences.length = 0;
   }
 
@@ -441,7 +443,7 @@ export class WebGL2VoxelRenderer {
     for(const map of [this.chunkBuffers,this.visualChunkBuffers])for(const e of map.values())addEntry(e);
     for(const map of [this.regionBuffers,this.visualRegionBuffers])for(const region of map.values())for(const e of region.members?.values()??[])addEntry(e);
     for(const stage of this.uploadStaging.values()){const t=stage.transaction;addMesh(stage.mesh);pendingUploadBytes+=t.vertices.byteLength-t.vertexOffset+t.indices.byteLength-t.indexOffset+(t.origins?t.origins.byteLength-t.originOffset:0);}
-    return {...this.resourceLedger.snapshot(),...this.gpuTimer?.snapshot(),...this.bufferManager?.shared?.snapshot(),cpuStages:this.stageStats.snapshot(),cpuTextureTileCache:materialTileCacheStats(),cpuMeshBytes,cpuSortedIndexBytes:this.sortedIndexStream?.capacityBytes??0,sortedIndices:this.sortedIndexStream?.snapshot()??null,pendingUploadBytes,regionCacheEntries:this.regionGroupCache.size,pendingUploads:this.pendingUploadSince.size,uploadStaging:this.uploadStaging.size,upload:{...this.uploadDiagnostics},entries};
+    return {...this.resourceLedger.snapshot(),...this.gpuTimer?.snapshot(),...this.bufferManager?.shared?.snapshot(),cpuStages:this.stageStats.snapshot(),cpuTextureTileCache:materialTileCacheStats(),cpuMeshBytes,cpuSortedIndexBytes:this.sortedIndexStream?.capacityBytes??0,sortedIndices:this.sortedIndexStream?.snapshot()??null,pendingUploadBytes,regionCacheEntries:this.regionGroupCache.size,pendingUploads:this.pendingUploadSince.size,uploadStaging:this.uploadStaging.size,dynamicUploadsPending:this.dynamicUploadStages.length,upload:{...this.uploadDiagnostics},entries};
   }
 
   setRenderLogger(logger) {
@@ -503,8 +505,13 @@ export class WebGL2VoxelRenderer {
   }
 
   hasUnvalidatedUploads() {
+    if (this.dynamicUploadStages.length) return true;
     for(const stage of this.uploadStaging.values())if(stage.awaitingValidation)return true;
     return false;
+  }
+
+  queueDynamicUpload(stage) {
+    this.dynamicUploadStages.push({...stage,generation:this.contextGeneration});
   }
 
   pollFrameCompletion() {
@@ -537,7 +544,7 @@ export class WebGL2VoxelRenderer {
     let error = null, uploaded = 0;
     try {
       if (status === gl.WAIT_FAILED) throw new Error("GPU upload fence failed");
-      assertGpuUpload(gl, "completed asynchronous chunk uploads");
+      assertGpuUpload(gl, "completed asynchronous scene uploads");
     } catch (failure) { error = failure; }
     for (const [key, stage] of this.uploadStaging) {
       if (!stage.awaitingValidation) continue;
@@ -557,11 +564,16 @@ export class WebGL2VoxelRenderer {
         uploaded++;
       }
     }
+    const dynamic = this.dynamicUploadStages.splice(0);
+    for (const stage of dynamic) {
+      if (error || stage.generation !== this.contextGeneration) stage.abort(error ?? new Error('Obsolete dynamic upload generation'));
+      else stage.commit();
+    }
     return { waiting: false, validated: true, uploaded };
   }
 
   sealDeferredUploads() {
-    if (this.uploadValidationFence || ![...this.uploadStaging.values()].some(stage => stage.awaitingValidation)) return;
+    if (this.uploadValidationFence || !this.hasUnvalidatedUploads()) return;
     const gl = this.gl;
     try {
       const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -574,6 +586,7 @@ export class WebGL2VoxelRenderer {
         this.uploadStaging.delete(key);
         this.noteUploadFailure(stage.source, stage.visual, error);
       }
+      for (const stage of this.dynamicUploadStages.splice(0)) stage.abort(error);
       if(this.uploadValidationFence)gl.deleteSync(this.uploadValidationFence);
       this.uploadValidationFence = null;
     }
@@ -1252,6 +1265,7 @@ export class WebGL2VoxelRenderer {
       const entry = this.avatarBuffers.get(String(avatar.meshId || avatar.id)); if (!entry?.handle) continue;
       const opacity = Math.max(0, Math.min(1, Number(avatar.opacity ?? 1) || 0)); if (opacity <= .001) continue;
       const snapshot = this.avatarFrameState(avatar, entry), handle = this.avatarRenderHandle(avatar, entry, snapshot);
+      if (!handle) continue;
       const vertices = snapshot.vertices, indices = handle.drawIndices ?? entry.mesh.indices,
         stride = (entry.mesh.vertexStrideBytes || 40) / 4;
       const x = (avatar.worldX || 0) + (avatar.localOffsetX || 0) - origin.worldX,
@@ -1296,7 +1310,9 @@ export class WebGL2VoxelRenderer {
     queue.sort((a, b) => b.depth - a.depth || a.key.localeCompare(b.key) || a.order - b.order);
     this.stageStats?.record('transparent-queue-sort-cpu',performance.now()-queueStartedAt);
     const streamStartedAt = performance.now();
-    const stream = this.sortedIndexStream ?? (this.sortedIndexStream = new SortedIndexStream(gl));
+    const stream = this.sortedIndexStream ?? (this.sortedIndexStream = new SortedIndexStream(gl,{
+      deferValidation:this.deferredUploadsSupported()?stage=>this.queueDynamicUpload(stage):null,
+    }));
     stream.beginFrame();
     const segments = this.transparentSegments ??= [], segmentPool = this.transparentSegmentPool ??= [],
       orderedParticles = this.orderedParticles ??= [];
@@ -1482,7 +1498,8 @@ export class WebGL2VoxelRenderer {
   releaseAvatarInstances(modelKey = null, { lost = false, live = null } = {}) {
     for (const [key, instance] of this.avatarInstances ?? []) {
       if (modelKey != null && instance.modelKey !== modelKey || live?.has(key)) continue;
-      for (const handle of [instance.handle, instance.stagingHandle]) if (handle) {
+      instance.released = true;
+      for (const handle of [instance.handle, instance.stagingHandle, instance.pendingHandle]) if (handle) {
         if (!lost) { this.gl?.deleteBuffer(handle.vbo); this.gl?.deleteVertexArray(handle.vao); }
       }
       this.avatarInstances.delete(key);
@@ -1501,7 +1518,8 @@ export class WebGL2VoxelRenderer {
     snapshot = this.avatarInstances.get(key);
     if (snapshot && (snapshot.mesh !== entry.mesh || snapshot.staticHandle !== entry.handle
       || snapshot.generation !== this.contextGeneration)) {
-      for (const handle of [snapshot.handle, snapshot.stagingHandle]) if (handle) {
+      snapshot.released = true;
+      for (const handle of [snapshot.handle, snapshot.stagingHandle, snapshot.pendingHandle]) if (handle) {
         this.gl.deleteBuffer(handle.vbo); this.gl.deleteVertexArray(handle.vao);
       }
       this.avatarInstances.delete(key); snapshot = null;
@@ -1520,6 +1538,12 @@ export class WebGL2VoxelRenderer {
       this.cpuMeshBytesDirty = true;
     }
     snapshot.modelKey = modelKey;
+    if (snapshot.awaitingValidation) {
+      snapshot.vertices = snapshot.committedVertices;
+      snapshot.drawState = snapshot.committedDrawState;
+      this.avatarFrameStates.set(key,snapshot);
+      return snapshot;
+    }
     if (entry.mesh.parts?.length) {
       const poseStartedAt = performance.now();
       snapshot.pendingVertices.set(updateAvatarMeshVertices(entry.mesh, avatar.animation, snapshot.pendingDrawState));
@@ -1534,11 +1558,12 @@ export class WebGL2VoxelRenderer {
 
   avatarRenderHandle(avatar, entry, snapshot) {
     if (!entry.mesh?.parts?.length) return entry.handle;
+    if (snapshot.awaitingValidation) return snapshot.handle;
     if (snapshot.gpuRevision === snapshot.revision) return snapshot.handle ?? entry.handle;
     if (performance.now() < snapshot.retryAfter) {
       snapshot.vertices = snapshot.committedVertices ?? entry.mesh.vertices;
       snapshot.drawState = snapshot.committedDrawState;
-      return snapshot.handle ?? entry.handle;
+      return snapshot.handle ?? (this.deferredUploadsSupported()?null:entry.handle);
     }
     const gl = this.gl;
     const uploadStartedAt = performance.now();
@@ -1557,19 +1582,36 @@ export class WebGL2VoxelRenderer {
       }
       gl.bindBuffer(gl.ARRAY_BUFFER, staging.vbo);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, snapshot.pendingVertices);
+      if (this.deferredUploadsSupported()) {
+        snapshot.awaitingValidation = true;
+        snapshot.pendingHandle = staging;
+        snapshot.stagingHandle = null;
+        this.queueDynamicUpload({
+          commit:()=>{
+            if (snapshot.released) return;
+            snapshot.pendingHandle = null;
+            snapshot.awaitingValidation = false;
+            this.commitAvatarPose(snapshot,staging);
+          },
+          abort:error=>{
+            if (snapshot.released) return;
+            gl.deleteBuffer(staging.vbo);gl.deleteVertexArray(staging.vao);
+            snapshot.pendingHandle = null;
+            snapshot.awaitingValidation = false;
+            snapshot.retryAfter = performance.now()+this.options.uploadRetryMs;
+            this.lastAvatarUploadError = error;
+          },
+        });
+        // A first instance has no verified pose yet. Omit it for this frame:
+        // the shared registration can contain hidden equipment and is not a
+        // valid fallback for this entity's pending visibility/animation state.
+        snapshot.vertices = snapshot.committedVertices;
+        snapshot.drawState = snapshot.committedDrawState;
+        this.stageStats?.record('avatar-pose-upload-cpu',performance.now()-uploadStartedAt);
+        return snapshot.handle;
+      }
       assertGpuUpload(gl, 'avatar instance pose');
-      const previous = snapshot.handle;
-      snapshot.handle = staging; snapshot.stagingHandle = previous;
-      const oldVertices = snapshot.committedVertices ?? snapshot.vertices;
-      snapshot.committedVertices = snapshot.pendingVertices;
-      snapshot.vertices = snapshot.committedVertices;
-      snapshot.pendingVertices = oldVertices;
-      const priorDrawState = snapshot.committedDrawState;
-      snapshot.committedDrawState = snapshot.pendingDrawState;
-      snapshot.pendingDrawState = priorDrawState;
-      snapshot.drawState = snapshot.committedDrawState;
-      snapshot.gpuRevision = snapshot.revision;
-      snapshot.retryAfter = 0;
+      this.commitAvatarPose(snapshot,staging);
       this.stageStats?.record('avatar-pose-upload-cpu',performance.now()-uploadStartedAt);
       return snapshot.handle;
     } catch (error) {
@@ -1578,8 +1620,23 @@ export class WebGL2VoxelRenderer {
       snapshot.vertices = snapshot.committedVertices ?? entry.mesh.vertices;
       snapshot.drawState = snapshot.committedDrawState;
       this.lastAvatarUploadError = error;
-      return snapshot.handle ?? entry.handle;
+      return snapshot.handle ?? (this.deferredUploadsSupported()?null:entry.handle);
     } finally { gl.bindVertexArray(null); }
+  }
+
+  commitAvatarPose(snapshot,staging) {
+    const previous = snapshot.handle;
+    snapshot.handle = staging;snapshot.stagingHandle = previous;
+    const oldVertices = snapshot.committedVertices ?? snapshot.vertices;
+    snapshot.committedVertices = snapshot.pendingVertices;
+    snapshot.vertices = snapshot.committedVertices;
+    snapshot.pendingVertices = oldVertices;
+    const priorDrawState = snapshot.committedDrawState;
+    snapshot.committedDrawState = snapshot.pendingDrawState;
+    snapshot.pendingDrawState = priorDrawState;
+    snapshot.drawState = snapshot.committedDrawState;
+    snapshot.gpuRevision = snapshot.revision;
+    snapshot.retryAfter = 0;
   }
   renderAvatars(cameraState, avatars, viewProjection, origin, lighting = this.lighting, { opaqueOnly=false, transparentOnly=false, drawRange=null, vertexSnapshot=null }={}) {
     const gl = this.gl;
@@ -1610,6 +1667,7 @@ export class WebGL2VoxelRenderer {
       if (!entry?.handle) continue;
       const snapshot=vertexSnapshot??this.avatarFrameState(avatar,entry);
       const handle = this.avatarRenderHandle(avatar,entry,snapshot);
+      if (!handle) continue;
       const worldX = Math.trunc(avatar.worldX || 0) + (avatar.localOffsetX || 0);
       const worldY = Math.trunc(avatar.worldY || 0) + (avatar.localOffsetY || 0);
       const worldZ = Math.trunc(avatar.worldZ || 0) + (avatar.localOffsetZ || 0);
@@ -1735,6 +1793,7 @@ export class WebGL2VoxelRenderer {
     };
     if(this.uploadValidationFence && !this.contextLost)safely(()=>this.gl?.deleteSync(this.uploadValidationFence));
     this.uploadValidationFence = null;
+    this.dynamicUploadStages.length = 0;
     if(!this.contextLost)for(const fence of this.frameCompletionFences)safely(()=>this.gl?.deleteSync(fence));
     this.frameCompletionFences.length=0;
     for(const staging of this.uploadStaging.values())safely(()=>this.bufferManager?.disposeChunkBuffers(staging.transaction.handle));this.uploadStaging.clear();
