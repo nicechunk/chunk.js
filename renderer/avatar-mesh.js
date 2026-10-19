@@ -1,3 +1,4 @@
+import { forgeAvatarGripForRuntime } from "../forge/starter-axe.js";
 import {
   createEquipmentModelParts,
   EQUIPMENT_MODEL_ID,
@@ -184,7 +185,7 @@ export function forgeRuntimeAvatarCollisionReport(runtime, {
   forgeMetersToWorldUnits = null,
   forgeGripRollQuarterTurns = 0,
 } = {}) {
-  if (!runtime?.mesh || !runtime?.grip?.offsetQ) return emptyForgeAvatarCollisionReport();
+  if (!runtime?.mesh || !forgeAvatarGripForRuntime(runtime)?.offsetQ) return emptyForgeAvatarCollisionReport();
   const mesh = avatarMesh ?? createAvatarMeshFromNcm(avatarModelCode, {
     attachIronPickaxe: false,
     attachForgedPickaxe: false,
@@ -206,7 +207,7 @@ export function forgeRuntimeAvatarCollisionReport(runtime, {
   const handAnchor = Array.isArray(rightHandAnchor) ? rightHandAnchor : rightArmRoot;
   const targetGrip = forgeAvatarTargetGrip(handAnchor, avatarScale);
   const placement = forgeGripPlacement(
-    runtime.grip,
+    forgeAvatarGripForRuntime(runtime),
     targetGrip,
     toolScale,
     runtime.fixedScale ?? 64,
@@ -662,7 +663,7 @@ function createRestoredForgeEquipment(
   forgeGripRollQuarterTurns,
 ) {
   const packedMesh = runtime?.mesh;
-  const grip = runtime?.grip;
+  const grip = forgeAvatarGripForRuntime(runtime);
   if (!packedMesh?.vertices?.byteLength || !packedMesh?.indices?.length || !grip?.offsetQ) return null;
   const rightArm = boundsOfParts(parts.filter((part) => part.bone === "right_arm"));
   const rightArmRoot = rig?.pivots?.right_hand_item;
