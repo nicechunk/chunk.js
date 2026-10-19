@@ -143,3 +143,12 @@ with a software WebGL endurance test. Software rendering and controlled local
 Guardian tests do not establish performance on a user's hardware or public
 Guardian deployment. The delivery's per-item evidence table records the exact
 executed tests, source fingerprints, durations and remaining external checks.
+## Surface pickup masks
+
+Authoritative surface pickup masks remain column indices (`z * chunkSize + x`)
+on the parent ChunkState. A host publishes a new mask and marks the chunk dirty;
+the resulting section revisions invalidate earlier visual builds. Section Worker
+requests own a copied mask, just like their captured final deltas, so a collected
+surface model cannot return after a rebuild or an in-flight array mutation.
+The main-thread section view inherits the same mask. Real Worker regressions
+compare complete vertex/index bytes and reject a result after a later pickup.

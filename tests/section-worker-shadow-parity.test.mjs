@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { before,after,test } from "node:test";
 import { ChunkManager } from "../chunk/chunk-manager.js";
 import { BLOCK_ID } from "../world/block-registry.js";
-import { ensureRenderSections,buildRenderSection,commitRenderSection,sectionDeltaValues,sectionRevision } from "../chunk/render-sections.js";
+import { ensureRenderSections,buildRenderSection,commitRenderSection,sectionDeltaValues,sectionRevision,sectionIndexAt } from "../chunk/render-sections.js";
 import { actualFaces,expectedFaces,decodedVertices } from "./helpers/face-oracle.mjs";
 import { createActualBuildWorker } from "./helpers/actual-build-worker.mjs";
 
@@ -107,4 +107,40 @@ test("real late Worker section cannot overwrite a changed or replacement chunk i
     assert.notEqual(next.generation,section.generation);
     assert.equal(commitRenderSection(replacement,next,result,oldRevision),false,"same coordinate is not the same instance generation");
   } finally {manager.dispose();}
+});
+
+test("section Worker captures upstream pickup masks and cannot restore a collected surface model",async()=>{
+  const manager=new ChunkManager({useWorkers:false});
+  try {
+    const chunk=manager.ensureChunk(0,32),profile=chunk.baseProfile;
+    const column=Array.from(profile.surfaceY.keys()).find(i=>{
+      const y=profile.surfaceY[i],x=i%chunk.chunkSize,z=Math.floor(i/chunk.chunkSize);
+      return profile.waterY[i]===profile.noWater&&chunk.getFinalBlock(x,y+1,z)===BLOCK_ID.air;
+    });
+    assert.notEqual(column,undefined,"the deterministic fixture needs an exposed dry surface");
+    manager.setSurfaceDecorationRules([{ruleId:500,decorationId:100,surfaceBlockId:profile.surfaceBlock[column],
+      dropBlockId:BLOCK_ID.stone,rollStartBps:0,rollEndBps:10000,minY:-32,maxY:320,salt:500,flags:0}]);
+    worker.setSurfaceDecorationRules(manager.surfaceDecorationRules.rules,manager.surfaceDecorationRulesRevision);
+    const section=ensureRenderSections(chunk).get(sectionIndexAt(chunk,profile.surfaceY[column]+1));
+    const before=buildRenderSection(chunk,section,manager.meshAccessForChunk(chunk));
+    assert.ok(before.visualMesh.indexCount>0,"verified rules must produce a surface model before collection");
+    chunk.pickedSurfaceColumns=[column];chunk.markDirty();
+    const expected=buildRenderSection(chunk,section,manager.meshAccessForChunk(chunk));
+    assert.ok(expected.visualMesh.indexCount<before.visualMesh.indexCount,"collection removes actual geometry while preserving terrain");
+    let payload;
+    manager.dispatchSectionBuild({postMessage(message){payload=message;}},
+      {id:chunk.id,chunk,sectionIndex:section.sectionIndex,chunkX:chunk.chunkX,chunkZ:chunk.chunkZ,mode:"section"},chunk);
+    assert.deepEqual(payload.pickedSurfaceColumns,[column],"the production section dispatch must carry the authoritative pickup mask");
+    assert.notEqual(payload.pickedSurfaceColumns,chunk.pickedSurfaceColumns,"the task must own a captured array");
+    chunk.pickedSurfaceColumns.push((column+1)%(chunk.chunkSize*chunk.chunkSize));chunk.markDirty();
+    assert.deepEqual(payload.pickedSurfaceColumns,[column],"later mask edits cannot mutate an in-flight request");
+    const response=await worker.build(payload);
+    assert.equal(response.visualError,null);
+    sameMesh(response.mesh,expected.mesh,"collected terrain");
+    sameMesh(response.visualMesh,expected.visualMesh,"collected visual");
+    assert.equal(commitRenderSection(chunk,section,response,payload.sectionRevision),false,"a later pickup invalidates the old complete result");
+  } finally {
+    worker.setSurfaceDecorationRules([],0);
+    manager.dispose();
+  }
 });

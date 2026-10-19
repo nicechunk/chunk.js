@@ -486,6 +486,7 @@ export class ChunkManager {
         generationVersion:this.generationVersion,resourceRuleVersion:this.resourceRuleVersion,materialVersion:this.materialVersion,
         options:this.workerOptions(),mode:"section",taskVersion:task.version,sectionIndex:section.sectionIndex,sectionRevision:revision,
         finalDeltas,neighborDeltas,treeDeltas,lightingDeltas,columnTopHalo,baseProfile:chunk.baseProfile,treeInstances:chunk.treeInstances,
+        pickedSurfaceColumns:[...(chunk.pickedSurfaceColumns??[])],
         visualOnly:!section.dirty},[finalDeltas.buffer,neighborDeltas.buffer,treeDeltas.buffer,lightingDeltas.buffer,columnTopHalo.tops.buffer]);
     } catch(error) {this.handleWorkerError(worker,error,{allowRestart:false});}
     return true;

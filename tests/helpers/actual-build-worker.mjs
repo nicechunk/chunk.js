@@ -25,6 +25,9 @@ export async function createActualBuildWorker() {
   worker.on("error",error=>{for(const entry of pending.values()){clearTimeout(entry.timer);entry.reject(error);}pending.clear();});
   await ready;
   return {
+    setSurfaceDecorationRules(rules, revision=1) {
+      worker.postMessage({type:"setSurfaceDecorationRules",rules,revision});
+    },
     build(task) {
       const taskId=sequence++;
       return new Promise((resolve,reject)=>{
