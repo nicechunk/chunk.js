@@ -651,6 +651,12 @@ export function buildDebugVisualModelAssets() {
 const RESOURCE_DROP_PREVIEW_CACHE_LIMIT = 48;
 const resourceDropPreviewCache = new Map();
 const RESOURCE_DROP_MODEL_DEFS = Object.freeze({
+  [BLOCK_ID.twig]: resourceDropModel("twig", "forked dry twig", "A slender brown branch with a short side fork and pale broken tips.", 0x54574947, (vertices,indices) => {
+    const layer=materialDef(blockDef(BLOCK_ID.twig).materialId).textureLayer;
+    let quads=appendTaperedPrism(vertices,indices,.44,.06,.5,.54,.86,.5,.07,.07,.035,.035,layer,220);
+    quads+=appendTaperedPrism(vertices,indices,.49,.48,.5,.76,.7,.51,.045,.045,.02,.02,layer,238);
+    return quads;
+  }),
   [BLOCK_ID.lava]: resourceDropModel("lava", "molten lava sample", "A stepped molten sample with a dark basalt crust instead of a fluid cube.", 0xa7d4132c, appendMoltenResourceSample),
   [BLOCK_ID.ice]: resourceDropModel("ice", "ice crystal cluster", "A compact cluster of translucent ice shards grown from one fractured base.", 0x1ce5a7d2, appendIceCrystalCluster),
   [BLOCK_ID.toxicWater]: resourceDropModel("toxic_water", "toxic fluid sample", "A shallow toxic pool with raised bubbles, rendered from the baked emissive fluid layer.", 0x70c1c5a9, appendToxicResourceSample),
@@ -1524,7 +1530,7 @@ function appendGroundDetailAt(chunkState, x, y, z, surfaceBlockId, vertices, ind
     surfaceBlockId,
     rules: chunkState.surfaceDecorationRules ?? EMPTY_COMPILED_SURFACE_DECORATION_RULES,
   });
-  if (!decoration) return 0;
+  if (!decoration || ((decoration.decorationId>=100 && decoration.decorationId<=107) && chunkState.pickedSurfaceColumns?.includes(z*chunkState.chunkSize+x))) return 0;
   const hash = decoration.variantHash;
   const shadow = decoration.flags & SURFACE_DECORATION_FLAGS.SHADOW
     ? appendSurfaceDecorationShadow(decoration.decorationId, x, y, z, hash, vertices, indices)

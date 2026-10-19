@@ -67,6 +67,7 @@ export class ChunkState {
       set: (value) => setChunkStateWorldSeed(this, value),
     });
     this.surfaceDecorationRules = surfaceDecorationRules;
+    this.pickedSurfaceColumns = [];
     this.version = 0;
     // Authority preparation depends on actual voxel/overlay/base inputs, not
     // render-only neighbour halo and lighting invalidations of `version`.

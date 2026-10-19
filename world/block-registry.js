@@ -55,6 +55,7 @@ export const BLOCK_ID = Object.freeze({
   flowerRed: 51,
   flowerBlue: 52,
   flowerPink: 53,
+  twig: 54,
 });
 
 export const RESOURCE_ID = Object.freeze({
@@ -87,6 +88,7 @@ export const RESOURCE_ID = Object.freeze({
   flowerRed: 26,
   flowerBlue: 27,
   flowerPink: 28,
+  twig: 29,
 });
 
 export const MATERIAL_ID = Object.freeze({
@@ -145,6 +147,7 @@ export const MATERIAL_ID = Object.freeze({
   flowerPink: 52,
   grassSide: 53,
   shadow: 54,
+  twig: 78,
   woodenPlank: 55,
   woodenStick: 56,
   squaredTimber: 57,
@@ -182,6 +185,7 @@ const LIQUID = BLOCK_FLAGS.TRANSPARENT | BLOCK_FLAGS.LIQUID;
 const LIQUID_MINEABLE = LIQUID | BLOCK_FLAGS.MINEABLE;
 
 export const blockDefs = Object.freeze({
+  [BLOCK_ID.twig]: def(BLOCK_ID.twig, "twig", RESOURCE_ID.twig, MATERIAL_ID.twig, 1, BLOCK_FLAGS.TRANSPARENT),
   [BLOCK_ID.air]: def(BLOCK_ID.air, "air", RESOURCE_ID.none, MATERIAL_ID.air, 0, BLOCK_FLAGS.TRANSPARENT),
   [BLOCK_ID.grass]: def(BLOCK_ID.grass, "grass", RESOURCE_ID.grassFiber, MATERIAL_ID.grassTop, 2, SOLID_MINEABLE),
   [BLOCK_ID.dirt]: def(BLOCK_ID.dirt, "dirt", RESOURCE_ID.soil, MATERIAL_ID.dirt, 2, SOLID_MINEABLE),

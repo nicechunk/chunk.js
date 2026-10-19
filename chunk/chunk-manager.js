@@ -1286,6 +1286,7 @@ export class ChunkManager {
         mode: task.mode || "base",
         taskVersion: task.version,
         finalDeltas,
+        pickedSurfaceColumns: chunk.pickedSurfaceColumns,
         neighborDeltas,
         treeDeltas,
         lightingDeltas: this.visualDeltasForWorker(chunk.chunkX,chunk.chunkZ,8),
