@@ -20,6 +20,7 @@ Managed section commits publish their world AABB with the mesh revision;
 column summaries publish the union, including resource extents and vertical
 origins. Rejected results never replace these bounds. A pending remesh retains
 the previous committed bounds. Explicit host `renderBounds` keep precedence.
+Empty vertical sections skip bounds publication, including budgeted cache restoration.
 Managed geometry is immutable between commits. Legacy unmanaged/mutable meshes
 retain the defensive value/identity bounds path.
 

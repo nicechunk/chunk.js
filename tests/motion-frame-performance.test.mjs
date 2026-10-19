@@ -4,7 +4,7 @@ import { ChunkManager } from '../chunk/chunk-manager.js';
 import { ChunkState } from '../chunk/chunk-state.js';
 import { ensureRenderSections, commitRenderSection, sectionRevision } from '../chunk/render-sections.js';
 import { createCameraState } from '../renderer/camera.js';
-import { cameraRenderCenterChunk, chunkIntersectsCameraFrustum, chunkWorldBounds, prepareCameraFrustum } from '../renderer/frustum.js';
+import { cameraRenderCenterChunk, chunkIntersectsCameraFrustum, chunkWorldBounds, prepareCameraFrustum, publishCommittedWorldBounds } from '../renderer/frustum.js';
 import { WebGL2VoxelRenderer } from '../renderer/webgl2-renderer.js';
 import { loadPeasantGuyAvatarMesh } from '../renderer/avatar-mesh.js';
 
@@ -90,6 +90,19 @@ test('shared animated mesh snapshots retain per-entity pose data and update reus
   assert.ok(second.revision > revision);
   assert.notDeepEqual(second.vertices,original,'walk animation must advance');
   assert.equal(renderer.avatarFrameState(a,entry).revision,second.revision,'opaque and transparent passes share one revision');
+});
+
+test('empty managed sections retire owned bounds without inspecting empty buffers', () => {
+  const source = {chunkX:0,chunkZ:0,chunkSize:16,mesh:{vertexCount:3,originY:-32,
+    bounds:{minX:0,maxX:16,minY:0,maxY:16,minZ:0,maxZ:16}}};
+  publishCommittedWorldBounds(source);
+  assert.ok(source.renderBounds);
+  const empty = {vertexCount:0,indexCount:0,get bounds(){throw Error('empty bounds inspection');},
+    get vertices(){throw Error('empty buffer inspection');}};
+  source.mesh=empty;source.visualMesh=empty;
+  assert.doesNotThrow(()=>publishCommittedWorldBounds(source));
+  assert.equal(source.renderBounds,undefined);
+  assert.doesNotThrow(()=>publishCommittedWorldBounds(source));
 });
 
 test('frame admission polls without waiting, consuming errors, or publishing partial uploads', () => {

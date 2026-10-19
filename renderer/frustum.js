@@ -144,6 +144,13 @@ export function chunkWorldBounds(chunk) {
  */
 export function publishCommittedWorldBounds(chunk) {
   if (chunk.renderBounds && chunk.renderBounds !== publishedBounds.get(chunk)) return;
+  // Most generated vertical sections are empty. They never enter the render
+  // list, and restoring a retained column must not inspect all their channels.
+  if (!chunk.mesh?.vertexCount && !chunk.visualMesh?.vertexCount
+    && !chunk.mesh?.sectionSummary && !chunk.visualMesh?.sectionSummary) {
+    if (chunk.renderBounds) { delete chunk.renderBounds; publishedBounds.delete(chunk); }
+    return;
+  }
   const bounds = calculateChunkWorldBounds(chunk);
   if (bounds) {
     chunk.renderBounds = Object.freeze(bounds);
