@@ -40,7 +40,8 @@ Pruning releases pending sources even when they never reached a GPU allocation.
 ## Reusable meshes
 
 Only complete generated builds dispatched with clean local/halo inputs qualify.
-Any later voxel/neighbor/rule/pickup invalidation makes that version ineligible.
+Any later voxel/neighbor invalidation makes that version ineligible. Rule/pickup
+changes retain eligibility only after their current visual replacements finish.
 An evicted clean mesh can be reused only with matching materials, rule signature,
 pickup mask and a clean current neighborhood. Restoring creates new chunk/section
 instances and commit tokens, and runs under the normal main-thread rebuild budget.
@@ -48,7 +49,8 @@ Authority snapshots still apply normally; cached presentation authorizes nothing
 
 The cache defaults to 32 MiB of array bytes plus conservative metadata estimates,
 with a separate limit of 768 entries. Taking an entry removes its retained-byte
-charge. A zero byte limit disables retention. Disposal clears it. This accounting
+charge. Returning identities awaiting budgeted rehydration take eviction priority
+over newly evicted unrelated terrain. A zero byte limit disables retention. Disposal clears it. This accounting
 is an application limit, not a claim about the JS engine's physical heap size.
 
 ## Other hot paths

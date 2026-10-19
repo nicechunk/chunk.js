@@ -251,8 +251,12 @@ export function invalidateSurfaceDecorations(chunk, { surfaces = null, columns =
     changed = true;
   }
   if (changed) {
+    const reusable = chunk.reusableBaseVersion === chunk.version;
     chunk.renderInvalidationPending = true;
     chunk.markDirty();
+    // The generated voxel inputs did not change. Once the new visual channels
+    // finish, their current rule/pickup signature may be retained as well.
+    if (reusable) chunk.reusableBaseVersion = chunk.version;
   }
 }
 

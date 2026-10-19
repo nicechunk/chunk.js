@@ -427,7 +427,14 @@ export class ChunkManager {
       materialVersion:this.materialVersion,rules:this.surfaceDecorationRulesSignature,picked:chunk.pickedSurfaceColumns.join(',')});
     this.reusableMeshBytes += bytes;
     while (this.reusableMeshBytes > this.maxCachedMeshBytes || this.reusableMeshes.size > 768) {
-      const id=this.reusableMeshes.keys().next().value;
+      // Returning identities are reserved before eviction/rehydration. Do not
+      // evict the very meshes that the next budgeted rebuild is about to use.
+      let id;
+      for (const candidate of this.reusableMeshes.keys()) {
+        const current=this.chunks.get(candidate);
+        if (!current || current.baseBlocksReady) { id=candidate;break; }
+      }
+      id ??= this.reusableMeshes.keys().next().value;
       this.reusableMeshBytes -= this.reusableMeshes.get(id).bytes;
       this.reusableMeshes.delete(id);
     }

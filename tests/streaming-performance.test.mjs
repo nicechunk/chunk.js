@@ -95,6 +95,10 @@ test('one real Worker batch accepts unchanged siblings and rejects an edited sec
 test('reusable meshes have a byte cap, fresh instances and rule/pickup/authority guards',()=>{
   const {manager,chunk}=fixture(DEFAULT_SURFACE_DECORATION_RULES);
   try {
+    chunk.reusableBaseVersion=chunk.version;
+    manager.setSurfaceDecorationRules(DEFAULT_SURFACE_DECORATION_RULES.map(rule=>({...rule,salt:(rule.salt+1)%65536})));
+    manager.rebuildDirtyChunks(10000);
+    assert.equal(chunk.reusableBaseVersion,chunk.version,'current rule-only replacements preserve pure generated cache eligibility');
     chunk.reusableBaseVersion=chunk.version;manager.retainReusableMesh(chunk);
     assert.equal(manager.reusableMeshes.size,1);assert.ok(manager.reusableMeshBytes<=manager.maxCachedMeshBytes);
     const oldGeneration=chunk.renderSections.get(0).generation,expected=hash(chunk.renderSections.get(7).mesh);
@@ -112,4 +116,22 @@ test('reusable meshes have a byte cap, fresh instances and rule/pickup/authority
     manager.applyPendingDelta([{worldX:1153,worldY:5,worldZ:449,blockId:BLOCK_ID.air}], 'changed');
     manager.rebuildDirtyChunks(10000);manager.retainReusableMesh(picked);assert.equal(manager.reusableMeshes.size,0);
   } finally {manager.dispose();}
+});
+
+test('cache eviction protects a returning column awaiting budgeted rehydration',()=>{
+  const a=fixture(DEFAULT_SURFACE_DECORATION_RULES),other=new ChunkManager({useWorkers:false,shadows:false,surfaceDecorationRules:DEFAULT_SURFACE_DECORATION_RULES});
+  try {
+    a.chunk.reusableBaseVersion=a.chunk.version;a.manager.retainReusableMesh(a.chunk);
+    const firstBytes=a.manager.reusableMeshBytes;
+    a.manager.chunks.delete(a.chunk.id);
+    const returning=a.manager.ensureChunk(72,28,{deferBase:true});assert.equal(returning.baseBlocksReady,false);
+    const chunk=other.ensureChunk(73,28);other.rebuildDirtyChunks(10000);chunk.reusableBaseVersion=chunk.version;
+    a.manager.retainReusableMesh(chunk);
+    const secondBytes=a.manager.reusableMeshes.get(chunk.id).bytes;
+    a.manager.maxCachedMeshBytes=Math.max(firstBytes,secondBytes);
+    a.manager.retainReusableMesh(chunk);
+    assert.ok(a.manager.reusableMeshes.has(returning.id));assert.equal(a.manager.reusableMeshes.has(chunk.id),false);
+    assert.ok(a.manager.reusableMeshBytes<=a.manager.maxCachedMeshBytes);
+    a.manager.rebuildDirtyChunks(10000);assert.equal(returning.baseBlocksReady,true);assert.equal(a.manager.reusedMeshChunks,1);
+  } finally {a.manager.dispose();other.dispose();}
 });
