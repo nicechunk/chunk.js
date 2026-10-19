@@ -143,7 +143,12 @@ test("chunk reconstruction and explicit resource blocks fail closed outside the 
     generationVersion: DEFAULT_GENERATION_VERSION,
   });
   assert.equal(resource.blockId, BLOCK_ID.stone);
-  for (const blockId of [-1, "3", 54, 65_535, NaN, Infinity]) {
+  const twig = getResourceAt("block-test", 0, 0, 0, DEFAULT_RESOURCE_RULE_VERSION, {
+    blockId: BLOCK_ID.twig,
+    generationVersion: DEFAULT_GENERATION_VERSION,
+  });
+  assert.equal(twig.blockId, BLOCK_ID.twig);
+  for (const blockId of [-1, "3", Math.max(...Object.values(BLOCK_ID)) + 1, 65_535, NaN, Infinity]) {
     assert.throws(
       () => getResourceAt("block-test", 0, 0, 0, DEFAULT_RESOURCE_RULE_VERSION, {
         blockId,
