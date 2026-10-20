@@ -4,6 +4,7 @@ import {
   payloadByteLength,
   voxelizeSteps,
 } from "../ncm/blueprint-codec.js";
+import { buildingDamageLookup } from "./building-damage.js";
 
 export const BUILDING_QUARTER_TURNS = Object.freeze([0, 1, 2, 3]);
 
@@ -31,7 +32,7 @@ export function parseNcm3Building(code, options = {}) {
   return drainParserSteps(parseNcm3BuildingSteps(code, options));
 }
 
-export function* parseNcm3BuildingSteps(code, { id = "", name = "", workBudget = 256 } = {}) {
+export function* parseNcm3BuildingSteps(code, { id = "", name = "", workBudget = 256, damageSections = [] } = {}) {
   const work = parserWorkBudget(workBudget);
   const sourceCode = String(code ?? "").trim();
   yield {phase: "building-decode-envelope", workUnits: 1};
@@ -40,6 +41,13 @@ export function* parseNcm3BuildingSteps(code, { id = "", name = "", workBudget =
   const canonicalCode = encodeNcm3(blueprint);
   const voxels = yield* voxelizeSteps(blueprint, undefined, {workBudget});
   const size = Object.freeze({ ...blueprint.size });
+  if (damageSections.length) {
+    const removed = buildingDamageLookup(damageSections, size);
+    for (const [key, voxel] of voxels) {
+      if (takeParserWork(work)) yield {phase: "building-damage", workUnits: work.limit};
+      if (removed(voxel.x, voxel.y, voxel.z)) voxels.delete(key);
+    }
+  }
   const analysis = yield* analyzeVoxelsSteps(voxels, size, work);
   const contentBounds = Object.freeze(analysis.bounds);
   const materials = Object.freeze([...analysis.materials].sort((a, b) => a - b));

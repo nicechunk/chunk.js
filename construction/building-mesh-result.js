@@ -73,6 +73,7 @@ const CHUNK_KEYS = keySet([
   "voxelCount",
   "visualBlockCount",
   "collisionMask",
+  "materialVoxels",
   "collisionBlockCount",
   "mesh",
   "visualMesh",
@@ -207,6 +208,7 @@ function summarizeChunk(chunk) {
     voxelCount: chunk.voxelCount,
     visualBlockCount: chunk.visualBlockCount,
     collisionMask: chunk.collisionMask,
+    materialVoxels: chunk.materialVoxels,
     collisionBlockCount: chunk.collisionBlockCount,
     mesh: summarizeMesh(chunk.mesh),
     visualMesh: chunk.visualMesh === null ? null : summarizeMesh(chunk.visualMesh),
@@ -418,17 +420,25 @@ function validateRequestBinding(input, building, placement) {
   for (const key of SIZE_KEYS) {
     requireEqual(building.size[key], envelope.size[key], `building result size.${key}/request binding`);
   }
-  for (const key of BOUNDS_KEYS) {
+  for (const key of request.damageSections?.length ? [] : BOUNDS_KEYS) {
     requireEqual(
       building.contentBounds[key],
       envelope.contentBounds[key],
       `building result contentBounds.${key}/request binding`,
     );
   }
+  if (request.damageSections?.length && building.voxelCount > 0) {
+    for (const axis of ["X", "Y", "Z"]) {
+      if (building.contentBounds[`min${axis}`] < envelope.contentBounds[`min${axis}`]
+          || building.contentBounds[`max${axis}`] > envelope.contentBounds[`max${axis}`]) {
+        invalidResult("demolition result extends outside the original building content bounds");
+      }
+    }
+  }
   if (building.voxelCount > envelope.maxVoxelCount) {
     invalidResult("building result voxelCount exceeds its decoded command envelope");
   }
-  if ((envelope.commandCount === 0) !== (building.voxelCount === 0)) {
+  if (!request.damageSections?.length && (envelope.commandCount === 0) !== (building.voxelCount === 0)) {
     invalidResult("building result voxelCount emptiness does not match its decoded commands");
   }
   const referencedMaterials = new Set(envelope.referencedMaterials);
@@ -503,6 +513,8 @@ function* validateChunksSteps(input, building, placement, binding, work) {
   const limits = {
     buffers: new Set(),
     collisionBytes: 0,
+    materialBytes: 0,
+    allowedMaterialIds: new Set(building.materials),
     maxCollisionBytes,
     meshBlockCount: 0,
     opaqueBlockCount: 0,
@@ -678,6 +690,18 @@ function validateMaterialClassPartition({
 }
 
 function* validateCollisionMaskSteps(chunk, label, chunkSize, height, voxelCount, limits, work) {
+  const materials = requireTypedArray(chunk.materialVoxels, Uint16Array, `${label}.materialVoxels`, limits.buffers);
+  if (materials.length !== chunkSize * chunkSize * height) invalidResult(`${label}.materialVoxels dimensions mismatch`);
+  limits.materialBytes += materials.byteLength;
+  if (limits.materialBytes > limits.maxCollisionBytes * 16) invalidResult("building material buffers exceed placement bounds");
+  let occupied = 0;
+  for (const material of materials) {
+    if (takeResultWork(work)) yield {phase: "building-result-material-voxels", workUnits: work.limit};
+    if (!material) continue;
+    if (!limits.allowedMaterialIds.has(material)) invalidResult(`${label}.materialVoxels has an undeclared material`);
+    occupied++;
+  }
+  if (occupied !== voxelCount) invalidResult(`${label}.materialVoxels count mismatch`);
   const mask = requireTypedArray(chunk.collisionMask, Uint32Array, `${label}.collisionMask`, limits.buffers);
   const expectedWords = Math.ceil((chunkSize * chunkSize * height) / 32);
   if (mask.length !== expectedWords) invalidResult(`${label}.collisionMask length is inconsistent with chunk dimensions`);

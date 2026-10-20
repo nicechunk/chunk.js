@@ -24,7 +24,7 @@ self.onmessage = (event) => {
 };
 
 function buildResult(request) {
-  const building = parseNcm3Building(request.code, { id: request.buildingId || "" });
+  const building = parseNcm3Building(request.code, { id: request.buildingId || "", damageSections: request.damageSections });
   const placement = createBuildingPlacement(building, request.foundation, {
     quarterTurns: request.quarterTurns,
     placementId: request.placementId,
@@ -44,6 +44,7 @@ function transferList(chunks) {
   const buffers = [];
   for (const chunk of chunks ?? []) {
     if (chunk?.collisionMask?.buffer) buffers.push(chunk.collisionMask.buffer);
+    if (chunk?.materialVoxels?.buffer) buffers.push(chunk.materialVoxels.buffer);
     for (const mesh of [chunk?.mesh, chunk?.visualMesh]) {
       if (mesh?.vertices?.buffer) buffers.push(mesh.vertices.buffer);
       if (mesh?.indices?.buffer) buffers.push(mesh.indices.buffer);

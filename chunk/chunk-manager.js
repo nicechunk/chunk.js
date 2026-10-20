@@ -207,6 +207,10 @@ export class ChunkManager {
     this.renderLogger = logger || null;
   }
 
+  getActionTargetAtWorld(worldX, worldY, worldZ) {
+    return this.supplementalCollisionProvider?.getMiningTargetAtWorld?.(worldX, worldY, worldZ) ?? null;
+  }
+
   setSupplementalCollisionProvider(provider) {
     this.supplementalCollisionProvider = provider
       && (typeof provider.hasCollisionAtWorld === "function" || typeof provider.collisionTopAtWorld === "function")

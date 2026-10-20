@@ -23,6 +23,12 @@ export function raycastBlock(cameraState, direction = null, maxDistance = 6, wor
   let face = [0, 0, 0];
 
   while (travelled <= maxDistance) {
+    const supplemental = worldState.getActionTargetAtWorld?.(x, y, z);
+    if (supplemental) {
+      return { ...supplemental, hit: true, worldX: x, worldY: y, worldZ: z,
+        ...worldToChunk(x, y, z, worldState.chunkSize),
+        faceX: face[0], faceY: face[1], faceZ: face[2], distance: travelled };
+    }
     const blockId = worldState.getBlockAtWorld(x, y, z);
     if (blockId !== BLOCK_ID.air && (!isLowVegetationBlock(blockId) || isBlockingBlock(blockId))) {
       const coord = worldToChunk(x, y, z, worldState.chunkSize);

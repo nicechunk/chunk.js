@@ -119,6 +119,7 @@ function* createBuildingChunkStateSteps(placement, chunk, chunkSize, version, vo
   const visualGroups = new Map();
   const collisionHeight = chunk.maxY - chunk.minY + 1;
   const collisionMask = new Uint32Array(Math.ceil((chunkSize * chunkSize * collisionHeight) / 32));
+  const materialVoxels = new Uint16Array(chunkSize * chunkSize * collisionHeight);
   let opaqueBlockCount = 0;
   let visualBlockCount = 0;
   let collisionBlockCount = 0;
@@ -133,6 +134,7 @@ function* createBuildingChunkStateSteps(placement, chunk, chunkSize, version, vo
     else opaqueBlockCount += 1;
     const localX = chunk.voxels[offset + 4];
     const localZ = chunk.voxels[offset + 5];
+    materialVoxels[collisionBitIndex(localX, y - chunk.minY, localZ, chunkSize)] = chunk.voxels[offset + 3];
     if (renderMaterial.colliding) {
       const bitIndex = collisionBitIndex(localX, y - chunk.minY, localZ, chunkSize);
       const bit = 1 << (bitIndex & 31);
@@ -171,6 +173,7 @@ function* createBuildingChunkStateSteps(placement, chunk, chunkSize, version, vo
     voxelCount: chunk.voxels.length / 6,
     visualBlockCount,
     collisionMask,
+    materialVoxels,
     collisionBlockCount,
     mesh,
     visualMesh,

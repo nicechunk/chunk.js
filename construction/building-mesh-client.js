@@ -1,3 +1,4 @@
+import { snapshotBuildingDamage } from "./building-damage.js";
 import {
   createBuildingPlacementSteps,
   parseNcm3BuildingSteps,
@@ -335,7 +336,7 @@ export function createBuildingMeshWorkerClient({
 }
 
 async function buildOnMainThread(input, consume) {
-  const building = await consume(parseNcm3BuildingSteps(input.code, { id: input.buildingId || "", workBudget: 128 }));
+  const building = await consume(parseNcm3BuildingSteps(input.code, { id: input.buildingId || "", workBudget: 128, damageSections: input.damageSections }));
   const placement = await consume(createBuildingPlacementSteps(building, input.foundation, {
     quarterTurns: input.quarterTurns,
     placementId: input.placementId,
@@ -364,6 +365,7 @@ function snapshotRequest(input, requestId) {
   return {
     requestId,
     code,
+    damageSections: snapshotBuildingDamage(source.damageSections),
     buildingId: requestLabel(source.buildingId, "buildingId", true),
     foundation,
     quarterTurns: source.quarterTurns,
