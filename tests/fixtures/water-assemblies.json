@@ -1,0 +1,360 @@
+[
+  {
+    "name": "mixed-five-walls-coplanar-shaft",
+    "codeHex": "f0064731200000000000000000018c400840007f6001000a041420fe4010008001020a1000e008004004860501000007f92000c30280800002039000218040403800fe600001ffc10000",
+    "valid": true,
+    "capacityMl": 5493,
+    "volumeQ3": 47185920,
+    "seedIndex": 130,
+    "preview": {
+      "valid": true,
+      "reason": "valid",
+      "seedIndex": 130,
+      "volumeQ3": 47185920,
+      "openingQuads": [
+        {
+          "min": [
+            -0.09375,
+            0.09375,
+            -0.09375
+          ],
+          "max": [
+            0.09375,
+            0.09375,
+            0.09375
+          ]
+        }
+      ],
+      "ruleVersion": 1,
+      "capacityMl": 5493,
+      "materialVolumeMm3": 6408691,
+      "gridDims": [
+        6,
+        6,
+        5
+      ]
+    }
+  },
+  {
+    "name": "mixed-reversed-order",
+    "codeHex": "f0064731200000000000000000018430080807001fcc00003ff82000c30280800002039001218140400001fe48001020a1000e0080040028105083f9004002000c400840007f60010000",
+    "valid": true,
+    "capacityMl": 5493,
+    "volumeQ3": 47185920,
+    "seedIndex": 130,
+    "preview": {
+      "valid": true,
+      "reason": "valid",
+      "seedIndex": 130,
+      "volumeQ3": 47185920,
+      "openingQuads": [
+        {
+          "min": [
+            -0.09375,
+            0.09375,
+            -0.09375
+          ],
+          "max": [
+            0.09375,
+            0.09375,
+            0.09375
+          ]
+        }
+      ],
+      "ruleVersion": 1,
+      "capacityMl": 5493,
+      "materialVolumeMm3": 6408691,
+      "gridDims": [
+        6,
+        6,
+        5
+      ]
+    }
+  },
+  {
+    "name": "mixed-grip-first",
+    "codeHex": "f0064731200000000000000000018430080807001fcc00003ff82000c400840007f6001000a041420fe4010008001020a1000e008004004860501000007f92000c302808000020390000",
+    "valid": true,
+    "capacityMl": 5493,
+    "volumeQ3": 47185920,
+    "seedIndex": 130,
+    "preview": {
+      "valid": true,
+      "reason": "valid",
+      "seedIndex": 130,
+      "volumeQ3": 47185920,
+      "openingQuads": [
+        {
+          "min": [
+            -0.09375,
+            0.09375,
+            -0.09375
+          ],
+          "max": [
+            0.09375,
+            0.09375,
+            0.09375
+          ]
+        }
+      ],
+      "ruleVersion": 1,
+      "capacityMl": 5493,
+      "materialVolumeMm3": 6408691,
+      "gridDims": [
+        6,
+        6,
+        5
+      ]
+    }
+  },
+  {
+    "name": "mixed-split-front-wall",
+    "codeHex": "f006473120000000000000000001cc400840007f6001000a041420fe4010008001020a1000e0080040028305013fd007f92000c18280801803fc900061814040000101c80010c020201c007f300000ffe08000",
+    "valid": true,
+    "capacityMl": 5493,
+    "volumeQ3": 47185920,
+    "seedIndex": 130,
+    "preview": {
+      "valid": true,
+      "reason": "valid",
+      "seedIndex": 130,
+      "volumeQ3": 47185920,
+      "openingQuads": [
+        {
+          "min": [
+            -0.09375,
+            0.09375,
+            -0.09375
+          ],
+          "max": [
+            0,
+            0.09375,
+            0.09375
+          ]
+        },
+        {
+          "min": [
+            0,
+            0.09375,
+            -0.09375
+          ],
+          "max": [
+            0.09375,
+            0.09375,
+            0.09375
+          ]
+        }
+      ],
+      "ruleVersion": 1,
+      "capacityMl": 5493,
+      "materialVolumeMm3": 6408691,
+      "gridDims": [
+        7,
+        6,
+        5
+      ]
+    }
+  },
+  {
+    "name": "mixed-overlapping-wall",
+    "codeHex": "f006473120000000000000000001cc400840007f6001000a041420fe4010008001020a1000e008004004860501000007f92000c30280800002039000218040403800fe600001ffc10005996041420fe401000800",
+    "valid": true,
+    "capacityMl": 5493,
+    "volumeQ3": 47185920,
+    "seedIndex": 130,
+    "preview": {
+      "valid": true,
+      "reason": "valid",
+      "seedIndex": 130,
+      "volumeQ3": 47185920,
+      "openingQuads": [
+        {
+          "min": [
+            -0.09375,
+            0.09375,
+            -0.09375
+          ],
+          "max": [
+            0.09375,
+            0.09375,
+            0.09375
+          ]
+        }
+      ],
+      "ruleVersion": 1,
+      "capacityMl": 5493,
+      "materialVolumeMm3": 6408691,
+      "gridDims": [
+        6,
+        6,
+        5
+      ]
+    }
+  },
+  {
+    "name": "mixed-no-bottom",
+    "codeHex": "f00647312000000000000000000154082841fc802001000204142001c0100080090c0a0200000ff24001860501000004072000430080807001fcc00003ff820000",
+    "valid": false,
+    "capacityMl": 0,
+    "volumeQ3": 0,
+    "seedIndex": 130,
+    "preview": {
+      "valid": false,
+      "reason": "no-opening",
+      "capacityMl": 0
+    }
+  },
+  {
+    "name": "mixed-side-seam",
+    "codeHex": "f0064731200000000000000000018c400840007f6001000a041420fe0010008001020a1000e008004004860501000007f92000c30280800002039000218040403800fe600001ffc10000",
+    "valid": false,
+    "capacityMl": 0,
+    "volumeQ3": 0,
+    "seedIndex": 130,
+    "preview": {
+      "valid": false,
+      "reason": "no-opening",
+      "capacityMl": 0
+    }
+  },
+  {
+    "name": "mixed-detached-shaft",
+    "codeHex": "f0064731200000000000000000018c400840007f6001000a041420fe4010008001020a1000e008004004860501000007f92000c30280800002039000218040403c00fe600001ffc10000",
+    "valid": false,
+    "capacityMl": 0,
+    "volumeQ3": 0,
+    "seedIndex": 130,
+    "preview": {
+      "valid": false,
+      "reason": "no-opening",
+      "capacityMl": 0
+    }
+  },
+  {
+    "name": "mixed-occluded-grip",
+    "codeHex": "f006473120000000000000000001cc400840007f6001000a041420fe4010008001020a1000e008004004860501000007f92000c30280800002039000218040403800fe600001ffc1001218040403800fdc8000",
+    "valid": false,
+    "capacityMl": 0,
+    "volumeQ3": 0,
+    "seedIndex": 130,
+    "preview": {
+      "valid": false,
+      "reason": "invalid-grip",
+      "capacityMl": 0
+    }
+  },
+  {
+    "name": "tube-sealed-by-other-material",
+    "codeHex": "f00647312000000000000000000194082841fc802001000204142001c0100080090c0a0200000ff24001860501000004072000c400840007f6001000218040403800fe600001ffc10000",
+    "valid": true,
+    "capacityMl": 5493,
+    "volumeQ3": 47185920,
+    "seedIndex": 130,
+    "preview": {
+      "valid": true,
+      "reason": "valid",
+      "seedIndex": 130,
+      "volumeQ3": 47185920,
+      "openingQuads": [
+        {
+          "min": [
+            -0.09375,
+            0.09375,
+            -0.09375
+          ],
+          "max": [
+            0.09375,
+            0.09375,
+            0.09375
+          ]
+        }
+      ],
+      "ruleVersion": 1,
+      "capacityMl": 5493,
+      "materialVolumeMm3": 6408691,
+      "gridDims": [
+        6,
+        6,
+        5
+      ]
+    }
+  },
+  {
+    "name": "isolated-component-0",
+    "codeHex": "f0064731200000000000000000004c400840007f60010000",
+    "valid": false,
+    "capacityMl": 0,
+    "volumeQ3": 0,
+    "seedIndex": 130,
+    "preview": {
+      "valid": false,
+      "reason": "invalid-grip",
+      "capacityMl": 0
+    }
+  },
+  {
+    "name": "isolated-component-1",
+    "codeHex": "f00647312000000000000000000054082841fc8020010000",
+    "valid": false,
+    "capacityMl": 0,
+    "volumeQ3": 0,
+    "seedIndex": 130,
+    "preview": {
+      "valid": false,
+      "reason": "invalid-grip",
+      "capacityMl": 0
+    }
+  },
+  {
+    "name": "isolated-component-2",
+    "codeHex": "f00647312000000000000000000044082840038020010000",
+    "valid": false,
+    "capacityMl": 0,
+    "volumeQ3": 0,
+    "seedIndex": 130,
+    "preview": {
+      "valid": false,
+      "reason": "invalid-grip",
+      "capacityMl": 0
+    }
+  },
+  {
+    "name": "isolated-component-3",
+    "codeHex": "f0064731200000000000000000006430280800003fc90000",
+    "valid": false,
+    "capacityMl": 0,
+    "volumeQ3": 0,
+    "seedIndex": 130,
+    "preview": {
+      "valid": false,
+      "reason": "invalid-grip",
+      "capacityMl": 0
+    }
+  },
+  {
+    "name": "isolated-component-4",
+    "codeHex": "f0064731200000000000000000004c302808000020390000",
+    "valid": false,
+    "capacityMl": 0,
+    "volumeQ3": 0,
+    "seedIndex": 130,
+    "preview": {
+      "valid": false,
+      "reason": "invalid-grip",
+      "capacityMl": 0
+    }
+  },
+  {
+    "name": "isolated-component-5",
+    "codeHex": "f0064731200000000000000000004430080807001fcc00003ff82000",
+    "valid": false,
+    "capacityMl": 0,
+    "volumeQ3": 0,
+    "seedIndex": 130,
+    "preview": {
+      "valid": false,
+      "reason": "no-opening",
+      "capacityMl": 0
+    }
+  }
+]

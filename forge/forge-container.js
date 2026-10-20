@@ -58,6 +58,7 @@ function makeGeometry(axisSets, grips) {
   const dims = axes.map((axis) => axis.length - 1);
   if (dims.reduce((a, b) => a * b, 1) > MAX_CELLS) fail("container-too-complex");
   return { axes, dims, grips, material: new Uint8Array(dims.reduce((a, b) => a * b, 1)),
+    gripMaterial: new Uint8Array(dims.reduce((a, b) => a * b, 1)),
     indexes: axes.map((axis) => new Map(axis.map((value, index) => [value, index]))) };
 }
 
@@ -80,13 +81,17 @@ function componentGeometry(design) {
     const cuts = planes.map((set, a) => [...set].sort((a, b) => a - b).map((p) => { axes[a].add(boundary(a, p)); return p; }));
     for (let zi = 0; zi + 1 < cuts[2].length; zi++) for (let yi = 0; yi + 1 < cuts[1].length; yi++) for (let xi = 0; xi + 1 < cuts[0].length; xi++) {
       const low = [cuts[0][xi], cuts[1][yi], cuts[2][zi]], high = [cuts[0][xi + 1], cuts[1][yi + 1], cuts[2][zi + 1]];
-      if (solid(...low)) boxes.push({ low: low.map((p, a) => boundary(a, p)), high: high.map((p, a) => boundary(a, p)) });
+      if (solid(...low)) boxes.push({ low: low.map((p, a) => boundary(a, p)), high: high.map((p, a) => boundary(a, p)), gripOwner: Boolean(c.grip) });
     }
   }
   const g = makeGeometry(axes, grips);
   for (const box of boxes) {
     const low = box.low.map((v, a) => g.indexes[a].get(v)), high = box.high.map((v, a) => g.indexes[a].get(v));
-    for (let z = low[2]; z < high[2]; z++) for (let y = low[1]; y < high[1]; y++) for (let x = low[0]; x < high[0]; x++) g.material[at(g.dims, x, y, z)] = 1;
+    for (let z = low[2]; z < high[2]; z++) for (let y = low[1]; y < high[1]; y++) for (let x = low[0]; x < high[0]; x++) {
+      const index = at(g.dims, x, y, z);
+      g.material[index] = 1;
+      if (box.gripOwner) g.gripMaterial[index] = 1;
+    }
   }
   return g;
 }
@@ -136,6 +141,7 @@ function appearanceGeometry(design) {
       if ((faces.get(faceKey(a, p, u, v)) || 0) !== expected) fail("invalid-container-surface");
     }
   }
+  g.gripMaterial.set(g.material);
   return g;
 }
 
@@ -147,7 +153,8 @@ function validateGrip(g) {
   const min = [Infinity, Infinity], max = [-Infinity, -Infinity];
   for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
     const p = [x, y, z], index = at(g.dims, x, y, z);
-    if (!g.material[index] || Math.abs(g.axes[a][p[a] + (grip.sign > 0 ? 1 : 0)] - grip.point[a]) > 16) continue;
+    // Measure only the bound component; test exposure against the whole union.
+    if (!g.gripMaterial[index] || Math.abs(g.axes[a][p[a] + (grip.sign > 0 ? 1 : 0)] - grip.point[a]) > 16) continue;
     const edge = grip.sign > 0 ? p[a] + 1 === g.dims[a] : p[a] === 0;
     if (!edge && g.material[index + (grip.sign > 0 ? strides[a] : -strides[a])]) continue;
     const widths = t.map((axis, i) => {
