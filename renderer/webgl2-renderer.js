@@ -903,7 +903,18 @@ export class WebGL2VoxelRenderer {
   entryForChunk(chunk, visual=false) {
     const buffers=visual?this.visualChunkBuffers:this.chunkBuffers;
     const direct=buffers.get(chunk.id);
-    if(direct)return direct.generation===this.contextGeneration&&direct.source===chunk&&direct.instanceGeneration===(chunk.generation??0)?direct:null;
+    if(direct){
+      // Building Workers replace immutable CPU chunks. Keep their last valid
+      // GPU mesh visible until the new upload passes its completion fence.
+      // The revision-scoped buildingId prevents reuse across distinct models.
+      const buildingReplacement=chunk.building===true&&direct.source?.building===true
+        && typeof chunk.buildingId==='string'&&chunk.buildingId.length>0
+        && direct.source.buildingId===chunk.buildingId
+        && direct.chunkX===chunk.chunkX&&direct.chunkZ===chunk.chunkZ
+        && committedMeshVersion(chunk,visual)>=direct.version;
+      return direct.generation===this.contextGeneration&&(direct.source===chunk||buildingReplacement)
+        && direct.instanceGeneration===(chunk.generation??0)?direct:null;
+    }
     if(!regionBatchEligible(chunk))return null;
     const regions=visual?this.visualRegionBuffers:this.regionBuffers;
     const member=regions.get(regionIdForChunk(chunk,this.options.regionChunkSize))?.members?.get(chunk.id);

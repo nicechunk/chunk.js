@@ -115,3 +115,19 @@ test('deferred sorted CPU snapshots remain inside the configured index cap',()=>
   f.reset();draw(f,[c]);assert.equal(f.trace.draws.length,40);assert.ok(f.r.sortedIndexStream.capacityBytes<=64);
   assert.equal(f.r.dynamicUploadStages.length,0);f.r.dispose();assert.equal(f.buffers.size,0);
 });
+
+test('building replacements retain a verified GPU mesh through upload backpressure and commit once ready',()=>{
+ const f=fixture();
+ const old={...chunk(packedTriangles(4)),id:'building:deed:revision:0,0',building:true,buildingId:'deed:revision'};
+ const entry=f.r.uploadChunk(old);assert(entry);
+ const replacement={...old,mesh:packedTriangles(3),meshVersion:2,version:2,gpuUploaded:false};
+ assert.equal(f.r.entryForChunk(replacement),entry);
+ f.r.observeChunkCommits([replacement]);assert.equal(f.r.pendingMeshSources.get('opaque:'+old.id).chunk,replacement);
+ f.r.uploadChannel(replacement,false,null,1_000_000);
+ assert.equal(f.r.entryForChunk(replacement),entry,'pending GPU validation must not hide the whole building');
+ settle(f);const next=f.r.entryForChunk(replacement);assert.notEqual(next,entry);assert.equal(next.source,replacement);
+ assert.equal(f.buffers.has(entry.handle.vbo),false);
+ assert.equal(f.r.entryForChunk({...replacement,buildingId:'different-revision'}),null);
+ assert.equal(f.r.entryForChunk({...replacement,building:false}),null);
+ f.r.dispose();assert.equal(f.buffers.size,0);
+});
