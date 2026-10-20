@@ -191,12 +191,17 @@ export function encodeNcf1Bytes(input) {
 // components so editing information is never discarded without a byte saving.
 // Raw identity changes when surfaceBaked is true: hashes and material proofs
 // must be derived from the returned bytes/code, not from the component input.
-export function selectCompactNcf1Encoding(input) {
+export function selectCompactNcf1Encoding(input, { preferComponents = false } = {}) {
   const sourceDesign = canonicalizeForgeDesign(input);
   const sourceBytes = encodeCanonicalNcf1Bytes(sourceDesign);
   if (sourceDesign.appearance) {
     assertNcf1ByteLength(sourceBytes);
     return compactNcf1Selection(sourceDesign, sourceBytes, sourceBytes.length, null, "appearance", sourceBytes.length);
+  }
+  // Container certification uses these exact solids. Preserve editable geometry
+  // whenever it fits, so a lossy appearance bake cannot seal a real opening.
+  if (preferComponents && sourceBytes.length <= NCF1_MAX_RAW_BYTES) {
+    return compactNcf1Selection(sourceDesign, sourceBytes, sourceBytes.length, null);
   }
   // Cloth motion is reconstructed from component identity and bounds at
   // runtime. An appearance-only bake intentionally drops that editable

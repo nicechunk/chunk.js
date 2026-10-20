@@ -1,6 +1,5 @@
 import { STARTER_AXE_CODE, registerStarterAxePresentationRestore } from "../renderer/forge-avatar-presentation.js";
 import {
-  FORGE_COMPONENT_GRID,
   FORGE_FIXED_SCALE,
   FORGE_RESOURCE_IDS,
   NCF1_MAX_RAW_BYTES,
@@ -189,13 +188,9 @@ export class ForgeRuntimeCache {
   }
 }
 
-function forgeRuntimeMeshOptions(design) {
-  // Sub-Q hammering and cuts must retain their occupied cells in Play and item
-  // previews too. The normal 128/metre packing can collapse a tiny face; use
-  // the workbench's bounded Int16 precision for centimetre-scale components.
-  const sizes = [FORGE_COMPONENT_GRID.x, FORGE_COMPONENT_GRID.y, FORGE_COMPONENT_GRID.z];
-  return design.components?.some((component) => component.dimsQ.some((value, axis) => value < sizes[axis]))
-    ? { positionScale: FORGE_EDIT_POSITION_SCALE } : {};
+function forgeRuntimeMeshOptions() {
+  // Rendering, collision and capacity retain the same 1/2048 m boundaries.
+  return { positionScale: FORGE_EDIT_POSITION_SCALE };
 }
 
 function runtimeInputBytes(input) {

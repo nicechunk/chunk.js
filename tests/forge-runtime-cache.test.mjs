@@ -11,6 +11,7 @@ import {
   forgeChainDesignHash,
   updateAvatarMeshVertices,
 } from "../index.js";
+import { FORGE_EDIT_POSITION_SCALE } from "../forge/forge-mesher.js";
 
 const componentCode = encodeNcf1(createForgeDesign({
   equipment: { mass5g: 48, volumeCm3: 96, attributes6: new Uint8Array(12).fill(31) },
@@ -55,7 +56,8 @@ assert.ok(componentRuntime.triangleCount > 0);
 assert.equal(componentRuntime.mesh.indexCount, componentRuntime.triangleCount * 3);
 assert.equal(componentRuntime.designHash, componentHash);
 
-const directComponentMesh = buildForgeDesignMesh(decodeNcf1(componentCode, { requireCanonical: true }));
+const directComponentMesh = buildForgeDesignMesh(decodeNcf1(componentCode, { requireCanonical: true }), { positionScale: FORGE_EDIT_POSITION_SCALE });
+assert.equal(componentRuntime.mesh.positionScale, 2048, "runtime and capacity use the same physical boundaries");
 assert.equal(componentRuntime.vertexCount, directComponentMesh.vertexCount);
 assert.equal(componentRuntime.triangleCount, directComponentMesh.triangleCount);
 assert.deepEqual(componentRuntime.mesh.vertices, directComponentMesh.vertices);
