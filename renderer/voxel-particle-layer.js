@@ -619,7 +619,8 @@ function fractureBlocks(options) {
     const key = `${worldX},${worldY},${worldZ}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    output.push({ worldX, worldY, worldZ, blockId });
+    const materialId = Math.trunc(Number(block?.materialId));
+    output.push({ worldX, worldY, worldZ, blockId, ...(materialId > 0 ? { materialId } : {}) });
   }
   return output;
 }

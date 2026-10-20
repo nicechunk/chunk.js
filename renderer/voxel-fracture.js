@@ -48,13 +48,17 @@ const DYNAMICS_BY_STYLE = Object.freeze({
 
 export function createVoxelFracturePieces(options = {}) {
   const blockId = normalizedBlockId(options.blockId);
+  const requestedMaterial = Math.trunc(Number(options.materialId));
+  const materialId = requestedMaterial > 0 && materialDef(requestedMaterial).materialId === requestedMaterial
+    ? requestedMaterial : null;
   const worldX = integer(options.worldX ?? options.x);
   const worldY = integer(options.worldY ?? options.y);
   const worldZ = integer(options.worldZ ?? options.z);
   const seed = fractureHash(worldX, worldY, worldZ, blockId);
   const pieceLimit = clampInt(options.pieceLimit ?? MAX_PIECES_PER_BLOCK, 1, MAX_PIECES_PER_BLOCK);
   let pieces;
-  if (blockId === BLOCK_ID.cactus) pieces = cactusPieces(seed);
+  if (materialId !== null) pieces = cubePieces(blockId, seed).map(piece => ({ ...piece, materialId }));
+  else if (blockId === BLOCK_ID.cactus) pieces = cactusPieces(seed);
   else if (isLowVegetationBlock(blockId)) pieces = vegetationPieces(blockId, seed);
   else pieces = cubePieces(blockId, seed);
   const selected = limitPieces(pieces, pieceLimit, seed);

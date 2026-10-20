@@ -8,6 +8,7 @@ import { materialDef } from "../world/material-registry.js";
 assertCubeFracturePreservesVolumeAndMaterials();
 assertCactusFractureUsesModelSilhouette();
 assertFractureIsDeterministic();
+assertBuildingFractureUsesSourceMaterial();
 assertGravityBounceAndLifetime();
 
 console.log("chunk.js voxel fracture tests passed");
@@ -52,6 +53,23 @@ function assertCactusFractureUsesModelSilhouette() {
 function assertFractureIsDeterministic() {
   const options = { blockId: BLOCK_ID.stone, worldX: -18, worldY: 94, worldZ: 37 };
   assert.deepEqual(createVoxelFracturePieces(options), createVoxelFracturePieces(options));
+}
+
+function assertBuildingFractureUsesSourceMaterial() {
+  for (const [materialId, blockId] of [[55, 22], [58, 5], [64, 3], [96, 7]]) {
+    const options = { worldX: -3, worldY: 101, worldZ: 17, blockId, materialId };
+    const pieces = createVoxelFracturePieces(options);
+    const definition = materialDef(materialId);
+    assert.ok(Math.abs(totalVolume(pieces) - 1) < 1e-9);
+    assertBounds(pieces, [0, 1], [0, 1], [0, 1]);
+    assert.ok(pieces.every(piece => [piece.sideLayer, piece.topLayer, piece.bottomLayer].every(layer => layer === definition.textureLayer)));
+    assert.ok(pieces.every(piece => piece.alpha === definition.baseColor[3] / 255));
+    const layer = new VoxelParticleLayer(null, { maxParticles: 32 });
+    assert.equal(layer.emitFracture({ blocks: [options] }), pieces.length);
+    assert.ok(layer.particles.every(particle => particle.layerSide === definition.textureLayer));
+    for (let frame = 0; frame < 600; frame++) layer.update(1 / 60);
+    assert.equal(layer.particles.length, 0);
+  }
 }
 
 function assertGravityBounceAndLifetime() {
