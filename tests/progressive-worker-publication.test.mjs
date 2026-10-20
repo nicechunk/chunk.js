@@ -36,7 +36,7 @@ test("actual progressive Worker retains its profile and matches the complete col
   } finally { manager.dispose(); await worker.dispose(); }
 });
 
-test("progress packets are budgeted, ordered, deduplicated and keep the Worker slot until terminal consumption", async () => {
+test("progress packets are budgeted, ordered, deduplicated and release the computing slot at validated terminal reception", async () => {
   const previous = globalThis.Worker;
   const workers = [];
   globalThis.Worker = class {
@@ -57,13 +57,14 @@ test("progress packets are budgeted, ordered, deduplicated and keep the Worker s
     const packets = response.progress.map(packet => ({ ...packet, taskId: request.taskId }));
     assert.ok(packets.length > 2);
     manager.handleWorkerMessage(stub, packets[1]);
-    assert.equal(manager.drainWorkerProgress(0), 0, "out-of-order packets wait for their predecessor");
+    assert.equal(manager.drainWorkerProgress(5, { maxPackets: 1 }), 0, "out-of-order packets wait for their predecessor");
     manager.handleWorkerMessage(stub, packets[0]);
     assert.equal(chunk.baseBlocksReady, false, "message callbacks only enqueue work");
     assert.equal(manager.idleWorkers.length, 0);
-    manager.drainWorkerProgress(0);
+    assert.equal(manager.drainWorkerProgress(0), 0, "expired service leaves queued results untouched");
+    manager.drainWorkerProgress(2, { maxPackets: 1 });
     assert.equal(chunk.baseBlocksReady, true);
-    assert.equal(manager.progressiveSectionsCommitted, 1, "zero budget allows just one bounded completion");
+    assert.equal(manager.progressiveSectionsCommitted, 1, "one reserved publication quantum commits one section");
     assert.equal(manager.inFlightBuilds.size, 1);
     const first = chunk.renderSections.get(packets[0].sectionResults[0].sectionIndex);
     const token = first.meshCommitToken;
@@ -73,8 +74,9 @@ test("progress packets are budgeted, ordered, deduplicated and keep the Worker s
     for (const packet of packets.slice(2)) manager.handleWorkerMessage(stub, packet);
     manager.handleWorkerMessage(stub, { ...response, sectionResults: undefined, progress: undefined, taskId: request.taskId });
     assert.equal(manager.inFlightBuilds.size, 1, "terminal arrival does not bypass the commit deadline");
+    assert.equal(manager.idleWorkers.length, 1, "validated terminal frees the computing slot before publication drains");
     manager.consecutiveWorkerFailures = 2;
-    for (let index = 0; index < response.progressMessageCount + 2 && manager.inFlightBuilds.size; index++) manager.drainWorkerProgress(0);
+    for (let index = 0; index < response.progressMessageCount + 2 && manager.inFlightBuilds.size; index++) manager.drainWorkerProgress(5, { maxPackets: 1 });
     assert.equal(manager.inFlightBuilds.size, 0);
     assert.equal(manager.idleWorkers.length, 1);
     assert.equal(manager.consecutiveWorkerFailures, 0, "a successful progressive task clears consecutive Worker failure debt");
@@ -107,7 +109,7 @@ async function withProgressiveHarness(run) {
 
 test('unloading terminates progressive ownership before the same coordinate is recreated',async()=>{
  await withProgressiveHarness(({manager,chunk,stub,packets,terminal})=>{
-  manager.handleWorkerMessage(stub,packets[0]);manager.drainWorkerProgress(0);
+  manager.handleWorkerMessage(stub,packets[0]);manager.drainWorkerProgress(5, { maxPackets: 1 });
   manager.unloadFarChunks(100,100);
   assert.equal(stub.terminated,true);assert.equal(manager.inFlightBuilds.size,0);
   assert.equal(manager.cancelledWorkerTasks,1);
@@ -123,7 +125,7 @@ test('changed decoration revisions reject old progressive meshes while accepting
  await withProgressiveHarness(({manager,chunk,stub,packets,terminal})=>{
   manager.setSurfaceDecorationRules(DEFAULT_SURFACE_DECORATION_RULES,{revision:1});
   for(const packet of packets)manager.handleWorkerMessage(stub,packet);manager.handleWorkerMessage(stub,terminal);
-  for(let i=0;i<terminal.progressMessageCount+2&&manager.inFlightBuilds.size;i++)manager.drainWorkerProgress(0);
+  for(let i=0;i<terminal.progressMessageCount+2&&manager.inFlightBuilds.size;i++)manager.drainWorkerProgress(5, { maxPackets: 1 });
   assert.equal(chunk.baseBlocksReady,true);assert.equal(manager.progressiveSectionsCommitted,0);
   assert.ok(chunk.dirty);assert.ok(manager.staleBuildResults>0);assert.equal(manager.idleWorkers.length,1);
  });
@@ -140,14 +142,14 @@ test('empty transport batches remain section-budgeted and skip unchanged initial
    const result=message.sectionResults[0];
    const empty=!result.mesh?.indexCount&&!result.visualMesh?.indexCount&&!result.visualError;
    const revision=chunk.renderSectionCommitRevision??0,committed=manager.progressiveSectionsCommitted;
-   manager.drainWorkerProgress(0);
-   assert.equal(manager.progressiveSectionsCommitted,committed+1,'one logical section per zero-budget drain');
+   manager.drainWorkerProgress(5, { maxPackets: 1 });
+   assert.equal(manager.progressiveSectionsCommitted,committed+1,'one logical section per reserved publication quantum');
    if(empty){emptyCommits++;assert.equal(chunk.renderSectionCommitRevision??0,revision,'empty-to-empty cannot change visible summary');}
    else{geometryCommits++;assert.ok(chunk.renderSectionCommitRevision>revision);}
   }
   assert.ok(emptyCommits>geometryCommits&&geometryCommits>0);
   assert.equal(manager.inFlightBuilds.size,1,'batch reception and logical commits do not settle without terminal');
-  manager.handleWorkerMessage(stub,terminal);manager.drainWorkerProgress(0);
+  manager.handleWorkerMessage(stub,terminal);manager.drainWorkerProgress(5, { maxPackets: 1 });
   assert.equal(manager.inFlightBuilds.size,0);assert.equal(chunk.dirty,false);
  });
 });
@@ -161,5 +163,25 @@ test('silent and incomplete terminal Workers time out and can be retried with cl
   assert.notEqual(chunk.buildState,'building');assert.equal(chunk.baseBlocksReady,false);
   manager.workerBuildFailures.get(chunk.id).retryAt=0;manager.rebuildDirtyChunks(5);
   assert.equal(manager.inFlightBuilds.size,1);
+ });
+});
+
+test('a validated completed task releases compute capacity while its unconsumed geometry survives a newer Worker failure', async () => {
+ await withProgressiveHarness(({ manager, chunk, stub, request, packets, terminal }) => {
+  for (const packet of packets) manager.handleWorkerMessage(stub, packet);
+  manager.handleWorkerMessage(stub, terminal);
+  assert.equal(chunk.baseBlocksReady, false);
+  assert.equal(manager.inFlightBuilds.get(request.taskId).computeReleased, true);
+  const next = manager.ensureChunk(1, 0); manager.dispatchBuilds();
+  assert.equal(stub.messages.filter(message => message.type === 'buildChunk').length, 2);
+  assert.equal(manager.inFlightBuilds.size, 2);
+  assert.equal(manager.idleWorkers.length, 0);
+  manager.handleWorkerError(stub, new Error('Injected failure in the new computing job'));
+  assert.ok(manager.inFlightBuilds.has(request.taskId), 'completed geometry is not owned by the failing computing slot');
+  assert.notEqual(next.buildState, 'building');
+  manager.drainWorkerProgress(1000);
+  assert.ok(chunk.mesh?.indexCount);
+  assert.equal(chunk.dirty, false);
+  assert.equal(manager.inFlightBuilds.has(request.taskId), false);
  });
 });

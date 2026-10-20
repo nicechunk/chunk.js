@@ -634,6 +634,13 @@ export class WebGL2VoxelRenderer {
   }
 
   noteEntryFirstDraw(entry) {
+    const request = entry.source?.presentationRequest;
+    if (request && request.firstDrawSubmitted == null && entry.version >= request.dataRevision) {
+      request.firstDrawSubmitted = performance.now();
+      request.pairToFirstDrawMs = request.pairValidatedAt == null ? null : request.firstDrawSubmitted - request.pairValidatedAt;
+      request.interestToFirstDrawMs = request.interestEntered == null ? null : request.firstDrawSubmitted - request.interestEntered;
+      if (this.renderLogger?.enabled) this.logRenderEvent("chain-presentation-first-draw", { chunkId: entry.id, ...request });
+    }
     if (entry.firstDrawAt != null) return;
     entry.firstDrawAt = performance.now();
     if (this.renderLogger?.enabled) this.logRenderEvent('mesh-first-draw', {chunkId:entry.id,visual:entry.visual,
@@ -805,7 +812,7 @@ export class WebGL2VoxelRenderer {
       const debt = this.uploadWaitFrames.get(candidate.key) ?? 0;
       const age = now - (this.pendingUploadSince.get(candidate.key) ?? now);
       candidate.priority = (visibleSections.get(candidate.chunk) ?? 0) * 2 + (candidate.visual ? 1 : 0)
-        - debt * 4 - age / 16;
+        - debt * 4 - age / 16 - (candidate.chunk.localPlacement ? 256 : 0);
       this.uploadWaitFrames.set(candidate.key,debt+1);
     }
     candidates.sort((a,b)=>a.priority-b.priority);
@@ -1202,7 +1209,7 @@ export class WebGL2VoxelRenderer {
       if(handle.sharedPage && combined){
         if(pendingPage && pendingPage!==handle.sharedPage)flush();
         pendingPage=handle.sharedPage;
-        if (entry.firstDrawAt == null) firstDrawEntries.push(entry);
+        if (entry.firstDrawAt == null || entry.source?.presentationRequest?.firstDrawSubmitted === null) firstDrawEntries.push(entry);
         for(const pass of passes){const range=handle.drawRanges[pass];if(!range?.count)continue;
           const offset=range.offset*pendingPage.indexBytes;
           if(runs && this.multiDrawOffsets[runs-1]+this.multiDrawCounts[runs-1]*pendingPage.indexBytes===offset)this.multiDrawCounts[runs-1]+=range.count;
@@ -1333,7 +1340,7 @@ export class WebGL2VoxelRenderer {
         segments.push(segment);
       }
       segment.last = i;
-      if (item.entry?.firstDrawAt == null && item.entry && item.entry.firstDrawQueuedTo !== segment) {
+      if (item.entry && (item.entry.firstDrawAt == null || item.entry.source?.presentationRequest?.firstDrawSubmitted === null) && item.entry.firstDrawQueuedTo !== segment) {
         segment.firstDrawEntries.push(item.entry); item.entry.firstDrawQueuedTo = segment;
       }
       if (item.kind === 'particle') { orderedParticles.push(item.particle); segment.count++; continue; }

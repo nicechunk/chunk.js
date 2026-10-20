@@ -80,7 +80,7 @@ test('a real Worker initial retry matches the final edited world in every comple
     manager.applyChainDelta([{worldX:1064,worldY:5,worldZ:472,blockId:20},
       {worldX:1065,worldY:6,worldZ:472,blockId:0}]);
     await pending[0];assert.equal(chunk.mesh,null,'message callbacks must only enqueue progressive output');
-    for(let step=0;step<32&&manager.inFlightBuilds.size;step++)manager.rebuildDirtyChunks(0);
+    for(let step=0;step<32&&manager.inFlightBuilds.size;step++)manager.rebuildDirtyChunks(0.8);
     assert.ok(chunk.mesh,'unaffected initial sections can publish while the edited section retries');
     assert.ok(manager.staleBuildResults>=1);
     manager.rebuildDirtyChunks(50);assert.equal(starts[1].mode,'section');await pending[1];

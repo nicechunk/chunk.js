@@ -173,6 +173,7 @@ export class ChunkManager {
     this.supplementalCollisionProvider = null;
     this.collisionColumnTopCache = new Map();
     this.remoteOverlayChunks = new Set();
+    this.interestRevision = 0;
     this.visibilityFrame = 0;
     this.lastVisibilityCleanupFrame = 0;
     this.visibilityLingerFrames = boundedManagerInteger(
@@ -398,6 +399,7 @@ export class ChunkManager {
       else this.remoteOverlayChunks.delete(chunk);
     };
     this.chunks.set(id, chunk);
+    this.interestRevision++;
     // Rehydration allocates section states. Step it under rebuildDirtyChunks'
     // frame budget rather than restoring an entire returning range in one call.
     if (this.reusableMeshes.has(id)) {
@@ -890,7 +892,8 @@ export class ChunkManager {
   recoverTimedOutWorkers(now = performance.now()) {
     const expired = new Set();
     for (const task of this.inFlightBuilds?.values() ?? []) {
-      const awaitingWorker = !task.progressTerminal || task.receivedProgress.size < task.progressiveJobs.length;
+      if (task.computeReleased) continue;
+      const awaitingWorker = !task.progressTerminal || task.receivedProgress.size < (task.progressiveJobs?.length ?? 0);
       if (awaitingWorker && now - (task.lastActivityAt ?? task.startedAt) > WORKER_TASK_TIMEOUT_MS) expired.add(task.worker);
     }
     for (const worker of expired) {
@@ -901,7 +904,7 @@ export class ChunkManager {
   }
 
   cancelObsoleteWorkerTasks() {
-    const cancelled = [...this.inFlightBuilds].filter(([, task]) => task.cancelled);
+    const cancelled = [...this.inFlightBuilds].filter(([, task]) => task.cancelled && !task.computeReleased);
     if (!cancelled.length) return 0;
     const previousSize = this.workers.length;
     for (const [taskId, task] of cancelled) {
@@ -1410,6 +1413,8 @@ export class ChunkManager {
       lastWorkerBuildMs: this.lastWorkerBuildMs,
       buildQueue: this.buildQueue.length,
       inFlightBuilds: this.inFlightBuilds.size,
+      computingJobs: [...this.inFlightBuilds.values()].filter(task => !task.computeReleased).length,
+      readyResults: [...this.inFlightBuilds.values()].filter(task => task.computeReleased).length,
       workers: this.workers.length,
       lastBuildError: this.lastBuildError,
       failedBuilds: this.workerBuildFailures.size,
@@ -1523,7 +1528,7 @@ export class ChunkManager {
   recoverWorkerTasks(worker, error) {
     let recovered = 0;
     for (const [taskId, task] of Array.from(this.inFlightBuilds.entries())) {
-      if (task.worker !== worker) continue;
+      if (task.worker !== worker || task.computeReleased) continue;
       const chunk = this.chunks.get(task.id);
       for (const job of task.sectionJobs ?? [{sectionIndex:task.sectionIndex}]) {
         const section=chunk?.renderSections?.get(job.sectionIndex);
@@ -1699,7 +1704,10 @@ export class ChunkManager {
   dispatchBuilds() {
     if (!this.useWorkers || !this.idleWorkers.length || !this.buildQueue.length) return;
     const activeLimit = Math.max(0, Math.min(this.workerCount, Math.trunc(this.activeBuildLimit || 0)));
-    if (this.inFlightBuilds.size >= activeLimit) return;
+    const computingCount = () => [...this.inFlightBuilds.values()].filter(task => !task.computeReleased).length;
+    const ready = [...this.inFlightBuilds.values()].filter(task => task.computeReleased);
+    if (ready.length >= 24 || ready.reduce((sum, task) => sum + (task.progressBytesQueued || 0), 0) >= 64 * 1024 * 1024) return;
+    if (computingCount() >= activeLimit) return;
     if (this.buildQueueNeedsSort || performance.now() - this.lastBuildQueueSortAt >= 100) {
       const now = performance.now();
       for(const task of this.buildQueue)task.dispatchPriority=taskPriority(task,this,now);
@@ -1707,7 +1715,7 @@ export class ChunkManager {
       this.buildQueueNeedsSort = false;
       this.lastBuildQueueSortAt = now;
     }
-    while (this.idleWorkers.length && this.buildQueue.length && this.inFlightBuilds.size < activeLimit) {
+    while (this.idleWorkers.length && this.buildQueue.length && computingCount() < activeLimit) {
       const worker = this.idleWorkers.pop();
       const task = this.takeNextBuildTask();
       const chunk = this.chunks.get(task.id);
@@ -1907,6 +1915,7 @@ export class ChunkManager {
     if (message.progressComplete === true) {
       if (message.progressMessageCount !== count) throw new Error("Invalid progressive Worker terminal count.");
       task.progressTerminal = message;
+      this.releaseComputedWorkerTask(task);
       return;
     }
     const sequence = message.progressSequence;
@@ -1942,17 +1951,40 @@ export class ChunkManager {
       task.progressBytesQueued = (task.progressBytesQueued ?? 0) + progressivePacketBytes(sectionMessage);
     }
     task.firstProgressReceivedAt ??= receivedAt;
+    this.releaseComputedWorkerTask(task);
   }
 
-  drainWorkerProgress(budgetMs = 1) {
+  releaseComputedWorkerTask(task) {
+    if (task.computeReleased || !task.progressTerminal || task.receivedProgress.size !== task.progressiveJobs.length) return false;
+    task.computeReleased = true;
+    task.computedAt = performance.now();
+    this.markWorkerIdle(task.worker);
+    this.scheduleBuildDispatch();
+    return true;
+  }
+
+  ensureChainPresentation(id) {
+    const chunk = this.chunks.get(id);
+    if (!chunk?.baseBlocksReady) return false;
+    if (!chunk.renderSections) { if (!chunk.mesh) { chunk.dirty = true; return true; } return false; }
+    let missing = false;
+    for (const section of chunk.renderSections.values()) {
+      if (!section.mesh && !section.dirty) { section.dirty = true; section.visualDirty = true; section.oldestDirtyAt ??= performance.now(); missing = true; }
+      if (!section.visualMesh && !section.visualDirty) { section.visualDirty = true; section.oldestDirtyAt ??= performance.now(); missing = true; }
+    }
+    if (missing) chunk.dirty = true;
+    return missing;
+  }
+
+  drainWorkerProgress(budgetMs = 1, { maxPackets = 64 } = {}) {
     const startedAt = performance.now();
-    if (!this.inFlightBuilds?.size) return 0;
+    if (budgetMs <= 0 || !this.inFlightBuilds?.size) return 0;
     const tasks = [...this.inFlightBuilds.entries()].filter(([, task]) => task.progressiveJobs);
     if (!tasks.length) return 0;
     let committed = 0, packets = 0, advanced = true;
     const first = (this.progressDrainCursor ?? 0) % tasks.length;
     this.progressDrainCursor = first + 1;
-    while (advanced && packets < 64) {
+    while (advanced && packets < maxPackets) {
       advanced = false;
       for (let offset = 0; offset < tasks.length; offset++) {
         const [taskId, task] = tasks[(first + offset) % tasks.length];
@@ -1960,10 +1992,10 @@ export class ChunkManager {
         const chunk = this.chunks.get(task.id);
         if (chunk !== task.chunk) task.cancelled = true;
         if (task.cancelled) { task.pendingProgress.clear(); task.progressBytesQueued = 0; }
+        const ownsChunk = chunk === task.chunk && (chunk.buildTaskId === taskId || !task.baseAdopted);
         const message = task.pendingProgress.get(task.nextProgressToApply);
-        // One bounded commit can still make progress when earlier frame work
-        // exhausted its deadline. No geometry is generated in this path.
-        if (message && (!packets || performance.now() - startedAt < budgetMs)) {
+        // Host reserves service; an expired low-level deadline remains strict.
+        if (message && packets < maxPackets && performance.now() - startedAt < budgetMs) {
           task.pendingProgress.delete(task.nextProgressToApply++);
           task.progressBytesQueued = Math.max(0, (task.progressBytesQueued ?? 0) - progressivePacketBytes(message));
           packets++; advanced = true;
@@ -1981,6 +2013,7 @@ export class ChunkManager {
               }
             }
             task.baseAdopted = true;
+            if (chunk === task.chunk && chunk.buildTaskId == null) chunk.markBuilding(taskId);
           }
           if (!task.cancelled && message.materialVersion === this.materialVersion) {
             const result = message.sectionResults[0];
@@ -1998,7 +2031,7 @@ export class ChunkManager {
               task.firstSectionCommittedAt ??= performance.now();
             } else this.staleBuildResults++;
           }
-          if (chunk === task.chunk) chunk.markBuilding(taskId);
+          if (ownsChunk) chunk.markBuilding(taskId);
         }
         if (task.progressTerminal && (task.cancelled || task.nextProgressToApply === task.progressiveJobs.length)) {
           if (chunk === task.chunk && chunk.buildTaskId === taskId) {
@@ -2012,7 +2045,7 @@ export class ChunkManager {
             }
           }
           this.lastWorkerBuildMs = Number(task.progressTerminal.elapsedMs) || 0;
-          if (this.settleWorkerTask(taskId, task)) this.markWorkerIdle(task.worker);
+          if (this.settleWorkerTask(taskId, task) && !task.computeReleased) this.markWorkerIdle(task.worker);
           this.scheduleBuildDispatch();
         }
       }
